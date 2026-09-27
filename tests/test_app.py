@@ -1,8 +1,28 @@
 from fastapi.testclient import TestClient
+from uuid import uuid4
 
 from app.main import app
 
 client = TestClient(app)
+
+
+def test_history_survives_reconnect_and_new_id_starts_empty(monkeypatch):
+    async def fake_reply(message, history):
+        return "answer"
+
+    monkeypatch.setattr("app.main.generate_reply", fake_reply)
+    url = f"/ws/chat?conversation_id={uuid4()}"
+    with client.websocket_connect(url) as socket:
+        assert socket.receive_json() == {"history": []}
+        socket.send_text("remember me")
+        assert socket.receive_json() == {"reply": "answer"}
+    with client.websocket_connect(url) as socket:
+        assert socket.receive_json()["history"] == [
+            {"role": "user", "parts": [{"text": "remember me"}]},
+            {"role": "model", "parts": [{"text": "answer"}]},
+        ]
+    with client.websocket_connect(f"/ws/chat?conversation_id={uuid4()}") as socket:
+        assert socket.receive_json() == {"history": []}
 
 
 def test_health():

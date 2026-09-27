@@ -1,9 +1,13 @@
 # Voice Agent Lab
 
-A learning project: Gemini text chat with per-connection history, then speech.
+A learning project: Gemini text chat with conversation IDs, then speech.
 Each model call receives the successful previous turns and the current message.
-History lives in a Python list owned by the WebSocket handler. Refreshing or
-disconnecting starts a new conversation. Replies arrive whole, not streamed.
+History lives in a server dictionary keyed by UUID. The browser keeps its ID in
+sessionStorage and sends it when connecting. Refreshing restores previous messages;
+the New conversation button creates a new ID. Replies arrive whole, not streamed.
+Server restarts (including development reloads) clear all histories. Use one server
+process: this dictionary is not shared between workers. Conversations have no expiry
+yet, so memory grows until restart. IDs identify conversations; they are not login credentials.
 Create a local `.env` from `.env.example` and fill in your Gemini API key.
 Prompts are sent to Google. Never put credentials in frontend code or Git.
 
@@ -34,7 +38,9 @@ python -m pytest
 
 - Browser connects to `/ws/chat` on the same host.
 - Server sends previous successful turns with each new message to Gemini.
-- Each connection has separate history; failed requests leave it unchanged.
+- Connections using the same ID share history; new IDs start empty.
+- A per-conversation lock serializes requests for the same ID.
+- Failed requests leave history unchanged.
 - History is not persisted or trimmed yet; long conversations can hit model limits.
 - The API key stays on the backend; the model is configurable via GEMINI_MODEL.
 - One request at a time per connection, with a timeout and visible errors.

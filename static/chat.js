@@ -12,16 +12,32 @@ function displayMessage(sender, text) {
 
 const button = form.querySelector("button");
 const protocol = location.protocol === "https:" ? "wss:" : "ws:";
-const socket = new WebSocket(`${protocol}//${location.host}/ws/chat`);
+let conversationId = sessionStorage.getItem("conversationId");
+if (!conversationId) {
+  conversationId = crypto.randomUUID();
+  sessionStorage.setItem("conversationId", conversationId);
+}
+const socket = new WebSocket(`${protocol}//${location.host}/ws/chat?conversation_id=${encodeURIComponent(conversationId)}`);
+document.querySelector("#new-conversation").addEventListener("click", () => {
+  sessionStorage.setItem("conversationId", crypto.randomUUID());
+  location.reload();
+});
 button.disabled = true;
 socket.onopen = () => {
-  status.textContent = "Connected. Each message is independent.";
+  status.textContent = "Connected.";
   button.disabled = false;
 };
 socket.onmessage = (event) => {
   const response = JSON.parse(event.data);
+  if (response.history) {
+    messages.replaceChildren();
+    for (const message of response.history) {
+      displayMessage(message.role === "user" ? "You" : "Gemini", message.parts[0].text);
+    }
+    return;
+  }
   displayMessage(response.error ? "Error" : "Gemini", response.error || response.reply);
-  status.textContent = "Ready. No conversation history is sent.";
+  status.textContent = "Ready.";
   button.disabled = false;
 };
 socket.onclose = () => {

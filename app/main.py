@@ -2,6 +2,7 @@ from pathlib import Path
 
 import asyncio
 import logging
+from uuid import UUID, uuid4
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
@@ -11,6 +12,8 @@ from app.llm import generate_reply
 
 STATIC_DIRECTORY = Path(__file__).resolve().parent.parent / "static"
 logger = logging.getLogger("uvicorn.error")
+conversations: dict[str, list[dict]] = {}
+conversation_locks: dict[str, asyncio.Lock] = {}
 
 app = FastAPI(title="Voice Agent Lab")
 app.mount("/static", StaticFiles(directory=STATIC_DIRECTORY), name="static")
@@ -28,14 +31,25 @@ async def health():
 
 @app.websocket("/ws/chat")
 async def chat(socket: WebSocket):
+    requested_id = socket.query_params.get("conversation_id")
+    try:
+        conversation_id = str(UUID(requested_id)) if requested_id else str(uuid4())
+    except ValueError:
+        await socket.close(code=1008)
+        return
     await socket.accept()
-    history = []
+    history = conversations.setdefault(conversation_id, [])
+    lock = conversation_locks.setdefault(conversation_id, asyncio.Lock())
+    if requested_id:
+        await socket.send_json({"history": history})
     try:
         while True:
             message = (await socket.receive_text()).strip()
             if not message or len(message) > 8000:
                 await socket.send_json({"error": "Send between 1 and 8,000 characters."})
                 continue
+            # Two connections resuming the same ID must not interleave turns.
+            await lock.acquire()
             try:
                 reply = await asyncio.wait_for(generate_reply(message, history), timeout=35)
             except RuntimeError as error:
@@ -49,5 +63,7 @@ async def chat(socket: WebSocket):
                 history.append({"role": "user", "parts": [{"text": message}]})
                 history.append({"role": "model", "parts": [{"text": reply}]})
                 await socket.send_json({"reply": reply})
+            finally:
+                lock.release()
     except WebSocketDisconnect:
         pass
