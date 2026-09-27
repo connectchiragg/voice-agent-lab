@@ -11,6 +11,7 @@ load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 async def stream_reply(message: str, history: list[dict]):
     """Yield text chunks, retaining interruption context from earlier turns."""
     api_key = os.getenv("GEMINI_API_KEY")
+
     if not api_key:
         raise RuntimeError("Set GEMINI_API_KEY in your environment or local .env file.")
     contents = []
@@ -24,7 +25,7 @@ async def stream_reply(message: str, history: list[dict]):
         api_key=api_key, http_options=types.HttpOptions(timeout=30000)
     ).aio as client:
         stream = await client.models.generate_content_stream(
-            model=os.getenv("GEMINI_MODEL", "gemini-3-flash-preview"),
+            model=os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite"),
             contents=contents,
             config=types.GenerateContentConfig(max_output_tokens=1024),
         )
