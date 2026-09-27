@@ -53,5 +53,28 @@ Explain the path of two messages before adding streaming.
 Streaming LLM chat → push-to-talk ASR/TTS → continuous
 audio and endpointing → tools and durable state → barge-in and recovery.
 
-No agent framework, database, authentication, telephony, or deployment yet.
+No agent framework, application authentication, telephony, or deployment yet.
 This is local-only learning scaffolding, not a production service.
+
+## Local PostgreSQL and pgAdmin
+
+Docker infrastructure is ready; the app still stores conversations in memory.
+Copy `infra.env.example` to `.env.docker` and choose two passwords on a fresh setup.
+The existing local setup already has generated passwords there; this file is ignored by Git.
+
+```sh
+docker compose --env-file .env.docker up -d
+docker compose --env-file .env.docker stop
+```
+
+- PostgreSQL: `localhost:5432`, database/user `voice_agent`, password from
+  `POSTGRES_PASSWORD` in `.env.docker`.
+- pgAdmin: http://localhost:5050, login `admin@example.com`, password from
+  `PGADMIN_PASSWORD` in `.env.docker`.
+- The registered server "Voice Agent Lab" uses host `postgres` and port `5432`
+  inside Docker. Enter the PostgreSQL password when connecting, then open Query Tool.
+- Named volumes preserve database and pgAdmin data across container recreation.
+  Do not use `down -v` unless you intend to erase those volumes.
+- These environment variables initialize credentials on the first launch only;
+  changing them later does not change passwords already stored in the volumes.
+- Both published ports bind only to this Mac's loopback interface.

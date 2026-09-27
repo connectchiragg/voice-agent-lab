@@ -1,0 +1,13 @@
+{
+  "Servers": {
+    "1": {
+      "Name": "Voice Agent Lab",
+      "Group": "Local",
+      "Host": "postgres",
+      "Port": 5432,
+      "MaintenanceDB": "voice_agent",
+      "Username": "voice_agent",
+      "SSLMode": "prefer"
+    }
+  }
+}
