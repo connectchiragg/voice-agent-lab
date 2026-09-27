@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import asyncio
+import logging
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
@@ -9,6 +10,7 @@ from fastapi.staticfiles import StaticFiles
 from app.llm import generate_reply
 
 STATIC_DIRECTORY = Path(__file__).resolve().parent.parent / "static"
+logger = logging.getLogger("uvicorn.error")
 
 app = FastAPI(title="Voice Agent Lab")
 app.mount("/static", StaticFiles(directory=STATIC_DIRECTORY), name="static")
@@ -37,8 +39,10 @@ async def chat(socket: WebSocket):
             try:
                 reply = await asyncio.wait_for(generate_reply(message, history), timeout=35)
             except RuntimeError as error:
+                logger.exception("Chat request failed (history messages: %d)", len(history))
                 await socket.send_json({"error": str(error)})
             except Exception:
+                logger.exception("Gemini request failed (history messages: %d)", len(history))
                 await socket.send_json({"error": "Gemini request failed. Check your key, model and quota, then retry."})
             else:
                 # Keep complete turns only; failed requests do not change history.
