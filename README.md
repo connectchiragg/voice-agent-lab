@@ -1,10 +1,10 @@
 # Voice Agent Lab
 
 A learning project: Gemini text chat with conversation IDs, then speech.
-Each model call receives the successful previous turns and the current message.
+Each model call receives previous turns (including marked partial replies) and the current message.
 History lives in PostgreSQL, keyed by UUID. The browser keeps its ID in
 sessionStorage and sends it when connecting. Refreshing restores previous messages;
-the New conversation button creates a new ID. Replies arrive whole, not streamed.
+the New conversation button creates a new ID. Replies stream into one browser message.
 Server restarts preserve saved history. Use one server process for now: the
 per-conversation locks are in memory and do not coordinate multiple workers.
 IDs identify conversations; they are not login credentials.
@@ -38,21 +38,27 @@ python -m pytest
 ## Completed milestone: conversation history
 
 - Browser connects to `/ws/chat` on the same host.
-- Server sends previous successful turns with each new message to Gemini.
+- Server sends previous turns with each new message to Gemini.
 - Connections using the same ID share history; new IDs start empty.
 - A per-conversation lock serializes requests for the same ID.
-- Failed requests leave history unchanged.
-- Both messages and conversation updated_at are saved in one transaction.
+- User messages are saved before generation. Assistant rows start as interrupted
+  and become completed only when Gemini finishes normally.
+- Each text chunk is persisted before sending, updating conversation updated_at.
+  This favors simple recovery over throughput; batching writes is a later optimization.
+- Interrupted replies stay visible and enter future context with an interruption note.
+- No automatic retry: the user can send another message, including "continue".
+- On browser disconnect detected during sending, generation stops; saved text remains.
+- Storage failures stop delivery; the UI reports interruption, and only committed chunks survive.
 - History is not trimmed yet; long conversations can hit model limits.
 - The API key stays on the backend; the model is configurable via GEMINI_MODEL.
 - One request at a time per connection, with a timeout and visible errors.
 - Reload to reconnect; no automatic retry or provider cancellation on disconnect.
 
-Explain the path of two messages before adding streaming.
+The WebSocket sends start, delta, done or interrupted events for each response.
 
 ## Later milestones
 
-Streaming LLM chat → push-to-talk ASR/TTS → continuous
+Push-to-talk ASR/TTS → continuous
 audio and endpointing → tools and durable state → barge-in and recovery.
 
 No agent framework, application authentication, telephony, or deployment yet.
@@ -75,8 +81,9 @@ For a fresh database only, create the tables before starting the app:
 docker compose --env-file .env.docker exec -T postgres psql -v ON_ERROR_STOP=1 -U voice_agent -d voice_agent < infra/schema.sql
 ```
 
-The current local database already has these tables. Existing in-memory chats
-are not migrated; only new successful exchanges are saved to PostgreSQL.
+The current local database already has these tables and the status column.
+For an older database created before streaming, apply `infra/002_message_status.sql`
+once using the same psql command instead of running schema.sql again.
 
 - PostgreSQL: `localhost:5432`, database/user `voice_agent`, password from
   `POSTGRES_PASSWORD` in `.env.docker`.

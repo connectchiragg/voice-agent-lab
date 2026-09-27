@@ -8,7 +8,10 @@ function displayMessage(sender, text) {
   // Treat messages as text, never executable HTML.
   paragraph.textContent = `${sender}: ${text}`;
   messages.appendChild(paragraph);
+  return paragraph;
 }
+
+let assistantMessage = null;
 
 const button = form.querySelector("button");
 const protocol = location.protocol === "https:" ? "wss:" : "ws:";
@@ -32,15 +35,29 @@ socket.onmessage = (event) => {
   if (response.history) {
     messages.replaceChildren();
     for (const message of response.history) {
-      displayMessage(message.role === "user" ? "You" : "Gemini", message.parts[0].text);
+      displayMessage(message.role === "user" ? "You" : "Gemini",
+        message.parts[0].text + (message.status === "interrupted" ? " [Interrupted]" : ""));
     }
     return;
   }
-  displayMessage(response.error ? "Error" : "Gemini", response.error || response.reply);
+  if (response.type === "start") {
+    assistantMessage = displayMessage("Gemini", "");
+    return;
+  }
+  if (response.type === "delta") {
+    assistantMessage.appendChild(document.createTextNode(response.text));
+    return;
+  }
+  if (response.type === "interrupted" && assistantMessage) {
+    assistantMessage.appendChild(document.createTextNode(" [Interrupted]"));
+  }
+  if (response.error) displayMessage("Error", response.error);
+  assistantMessage = null;
   status.textContent = "Ready.";
   button.disabled = false;
 };
 socket.onclose = () => {
+  if (assistantMessage) assistantMessage.appendChild(document.createTextNode(" [Connection lost]"));
   status.textContent = "Disconnected. Reload to reconnect.";
   button.disabled = true;
 };

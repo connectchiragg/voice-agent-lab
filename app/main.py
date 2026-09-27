@@ -1,4 +1,5 @@
 from pathlib import Path
+from contextlib import aclosing
 
 import asyncio
 import logging
@@ -8,8 +9,8 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.llm import generate_reply
-from app.database import load_history, save_exchange
+from app.llm import stream_reply
+from app.database import load_history, start_turn, update_reply
 
 STATIC_DIRECTORY = Path(__file__).resolve().parent.parent / "static"
 logger = logging.getLogger("uvicorn.error")
@@ -48,27 +49,36 @@ async def chat(socket: WebSocket):
             await socket.close(code=1011)
             return
         if requested_id:
-            await socket.send_json({"history": history})
+            async with lock:
+                await socket.send_json({"history": await load_history(conversation_id)})
         while True:
             message = (await socket.receive_text()).strip()
-
             if not message or len(message) > 8000:
                 await socket.send_json({"error": "Send between 1 and 8,000 characters."})
                 continue
             # Two connections resuming the same ID must not interleave turns.
             await lock.acquire()
+            reply = ""
+            reply_id = None
             try:
                 history = await load_history(conversation_id)
-                reply = await asyncio.wait_for(generate_reply(message, history), timeout=35)
-                await save_exchange(conversation_id, message, reply)
-            except RuntimeError as error:
-                logger.exception("Chat request failed (history messages: %d)", len(history))
-                await socket.send_json({"error": str(error)})
+                reply_id = await start_turn(conversation_id, message)
+                await socket.send_json({"type": "start"})
+                async with asyncio.timeout(35), aclosing(stream_reply(message, history)) as stream:
+                    async for chunk in stream:
+                        reply += chunk
+                        # Persist before delivery so reconnects retain the partial answer.
+                        await update_reply(conversation_id, reply_id, reply)
+                        await socket.send_json({"type": "delta", "text": chunk})
+                await update_reply(conversation_id, reply_id, reply, "completed")
+            except WebSocketDisconnect:
+                return
             except Exception:
-                logger.exception("Chat generation or persistence failed (history messages: %d)", len(history))
-                await socket.send_json({"error": "Could not generate or save the reply. Check the server logs, then retry."})
+                logger.exception("Chat stream or persistence failed")
+                await socket.send_json({"type": "interrupted", "error":
+                    "Response interrupted. You can send another message. If storage failed, the last chunk may not be saved."})
             else:
-                await socket.send_json({"reply": reply})
+                await socket.send_json({"type": "done"})
             finally:
                 lock.release()
     except WebSocketDisconnect:

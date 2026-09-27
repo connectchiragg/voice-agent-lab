@@ -28,23 +28,40 @@ async def load_history(conversation_id: str) -> list[dict]:
             (conversation_id,),
         )
         cursor = await connection.execute(
-            "SELECT role, content FROM messages WHERE conversation_id = %s ORDER BY id",
+            "SELECT role, content, status FROM messages WHERE conversation_id = %s ORDER BY id",
             (conversation_id,),
         )
         rows = await cursor.fetchall()
-    return [{"role": role, "parts": [{"text": content}]} for role, content in rows]
+    return [{"role": role, "parts": [{"text": content}], "status": status}
+            for role, content, status in rows]
 
 
-async def save_exchange(conversation_id: str, message: str, reply: str) -> None:
-    # The connection context commits all three changes together, or rolls back on error.
+async def start_turn(conversation_id: str, message: str) -> int:
+    # Default to interrupted until the stream finishes successfully.
     async with await connect() as connection:
         await connection.execute(
             "INSERT INTO messages (conversation_id, role, content) VALUES (%s, 'user', %s)",
             (conversation_id, message),
         )
+        cursor = await connection.execute(
+            "INSERT INTO messages (conversation_id, role, content, status) "
+            "VALUES (%s, 'model', '', 'interrupted') RETURNING id",
+            (conversation_id,),
+        )
+        message_id = (await cursor.fetchone())[0]
         await connection.execute(
-            "INSERT INTO messages (conversation_id, role, content) VALUES (%s, 'model', %s)",
-            (conversation_id, reply),
+            "UPDATE conversations SET updated_at = now() WHERE id = %s",
+            (conversation_id,),
+        )
+    return message_id
+
+
+async def update_reply(conversation_id: str, message_id: int, text: str,
+                       status: str = "interrupted") -> None:
+    async with await connect() as connection:
+        await connection.execute(
+            "UPDATE messages SET content = %s, status = %s WHERE id = %s AND conversation_id = %s",
+            (text, status, message_id, conversation_id),
         )
         await connection.execute(
             "UPDATE conversations SET updated_at = now() WHERE id = %s",

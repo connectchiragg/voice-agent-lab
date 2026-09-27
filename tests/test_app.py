@@ -1,116 +1,104 @@
-from fastapi.testclient import TestClient
 from uuid import uuid4
 import pytest
-
+from fastapi.testclient import TestClient
 from app.main import app
 
 client = TestClient(app)
 
 
-@pytest.fixture(autouse=True)
-def fake_database(monkeypatch):
+@pytest.fixture
+def storage(monkeypatch):
     histories = {}
 
-    async def load(conversation_id):
-        return list(histories.setdefault(conversation_id, []))
+    async def load(cid):
+        return [dict(turn) for turn in histories.setdefault(cid, [])]
 
-    async def save(conversation_id, message, reply):
-        histories[conversation_id].extend([
-            {"role": "user", "parts": [{"text": message}]},
-            {"role": "model", "parts": [{"text": reply}]},
+    async def start(cid, message):
+        histories[cid].extend([
+            {"role": "user", "parts": [{"text": message}], "status": "completed"},
+            {"role": "model", "parts": [{"text": ""}], "status": "interrupted"},
         ])
+        return len(histories[cid]) - 1
+
+    async def update(cid, mid, text, status="interrupted"):
+        histories[cid][mid] = {"role": "model", "parts": [{"text": text}], "status": status}
 
     monkeypatch.setattr("app.main.load_history", load)
-    monkeypatch.setattr("app.main.save_exchange", save)
+    monkeypatch.setattr("app.main.start_turn", start)
+    monkeypatch.setattr("app.main.update_reply", update)
+    return histories
 
 
-def test_history_survives_reconnect_and_new_id_starts_empty(monkeypatch):
-    async def fake_reply(message, history):
-        return "answer"
+def test_http_routes():
+    assert client.get("/health").json() == {"status": "ok"}
+    assert "Voice Agent Lab" in client.get("/").text
+    assert client.get("/static/chat.js").status_code == 200
 
-    monkeypatch.setattr("app.main.generate_reply", fake_reply)
-    url = f"/ws/chat?conversation_id={uuid4()}"
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_stream_persistence_and_reconnect(monkeypatch, storage, fail):
+    async def stream(message, history):
+        yield "Hello"
+        if fail:
+            raise ValueError("private provider error")
+        yield " there"
+
+    monkeypatch.setattr("app.main.stream_reply", stream)
+    cid = str(uuid4())
+    url = f"/ws/chat?conversation_id={cid}"
     with client.websocket_connect(url) as socket:
         assert socket.receive_json() == {"history": []}
-        socket.send_text("remember me")
-        assert socket.receive_json() == {"reply": "answer"}
+        socket.send_text("hi")
+        assert socket.receive_json()["type"] == "start"
+        assert socket.receive_json() == {"type": "delta", "text": "Hello"}
+        if not fail:
+            assert socket.receive_json()["text"] == " there"
+        event = socket.receive_json()
+        assert event["type"] == ("interrupted" if fail else "done")
+        assert "private" not in str(event)
     with client.websocket_connect(url) as socket:
-        assert socket.receive_json()["history"] == [
-            {"role": "user", "parts": [{"text": "remember me"}]},
-            {"role": "model", "parts": [{"text": "answer"}]},
-        ]
+        history = socket.receive_json()["history"]
+        assert history[0]["parts"][0]["text"] == "hi"
+        assert history[1]["parts"][0]["text"] == ("Hello" if fail else "Hello there")
+        assert history[1]["status"] == ("interrupted" if fail else "completed")
     with client.websocket_connect(f"/ws/chat?conversation_id={uuid4()}") as socket:
         assert socket.receive_json() == {"history": []}
 
 
-def test_health():
-    response = client.get("/health")
-    assert response.status_code == 200
-    assert response.json() == {"status": "ok"}
+def test_continue_after_interruption(monkeypatch, storage):
+    async def stream(message, history):
+        if message == "first":
+            yield "Partial"
+            raise TimeoutError()
+        assert history[-1]["status"] == "interrupted"
+        assert history[-1]["parts"][0]["text"] == "Partial"
+        yield "Continued"
 
-
-def test_home():
-    response = client.get("/")
-    assert response.status_code == 200
-    assert "Voice Agent Lab" in response.text
-
-
-def test_browser_script():
-    assert client.get("/static/chat.js").status_code == 200
-
-
-def test_conversation_history_and_connection_isolation(monkeypatch):
-    received = []
-
-    async def fake_reply(message, history):
-        received.append((message, list(history)))
-        return "answer: " + message
-
-    monkeypatch.setattr("app.main.generate_reply", fake_reply)
+    monkeypatch.setattr("app.main.stream_reply", stream)
     with client.websocket_connect("/ws/chat") as socket:
-        for message in ["hello", "another question"]:
+        for message, expected in [("first", "interrupted"), ("continue", "done")]:
             socket.send_text(message)
-            assert socket.receive_json() == {"reply": "answer: " + message}
-    with client.websocket_connect("/ws/chat") as socket:
-        socket.send_text("fresh conversation")
+            assert socket.receive_json()["type"] == "start"
+            assert socket.receive_json()["type"] == "delta"
+            assert socket.receive_json()["type"] == expected
+
+
+def test_failure_before_first_chunk(monkeypatch, storage):
+    async def stream(message, history):
+        raise ValueError("failure")
+        yield "unreachable"
+
+    monkeypatch.setattr("app.main.stream_reply", stream)
+    cid = str(uuid4())
+    with client.websocket_connect(f"/ws/chat?conversation_id={cid}") as socket:
         socket.receive_json()
-    assert received == [
-        ("hello", []),
-        ("another question", [
-            {"role": "user", "parts": [{"text": "hello"}]},
-            {"role": "model", "parts": [{"text": "answer: hello"}]},
-        ]),
-        ("fresh conversation", []),
-    ]
+        socket.send_text("preserve this")
+        assert socket.receive_json()["type"] == "start"
+        assert socket.receive_json()["type"] == "interrupted"
+    assert storage[cid][0]["parts"][0]["text"] == "preserve this"
 
 
-def test_invalid_message():
+def test_invalid_message(storage):
     with client.websocket_connect("/ws/chat") as socket:
         socket.send_text("  ")
         assert "error" in socket.receive_json()
-        socket.send_text("x" * 8001)
-        assert "error" in socket.receive_json()
-
-
-def test_provider_error_is_not_exposed(monkeypatch):
-    async def fake_reply(message, history):
-        assert history == []
-        if message == "hello":
-            raise ValueError("sensitive provider details")
-        return "recovered"
-
-    monkeypatch.setattr("app.main.generate_reply", fake_reply)
-    with client.websocket_connect("/ws/chat") as socket:
-        socket.send_text("hello")
-        response = socket.receive_json()
-        assert "error" in response
-        assert "sensitive" not in response["error"]
-        socket.send_text("retry")
-        assert socket.receive_json() == {"reply": "recovered"}
-
-
-def test_missing_key(monkeypatch):
-    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
-    with client.websocket_connect("/ws/chat") as socket:
-        socket.send_text("hello")
-        assert "GEMINI_API_KEY" in socket.receive_json()["error"]

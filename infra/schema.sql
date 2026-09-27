@@ -11,6 +11,8 @@ CREATE TABLE messages (
     conversation_id UUID NOT NULL REFERENCES conversations(id),
     role TEXT NOT NULL CHECK (role IN ('user', 'model')),
     content TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'completed'
+        CHECK (status IN ('completed', 'interrupted')),
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
