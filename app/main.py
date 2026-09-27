@@ -64,7 +64,7 @@ async def chat(socket: WebSocket):
                 history = await load_history(conversation_id)
                 reply_id = await start_turn(conversation_id, message)
                 await socket.send_json({"type": "start"})
-                async with asyncio.timeout(35), aclosing(stream_reply(message, history)) as stream:
+                async with asyncio.timeout(90), aclosing(stream_reply(message, history)) as stream:
                     async for chunk in stream:
                         reply += chunk
                         # Persist before delivery so reconnects retain the partial answer.
@@ -73,6 +73,10 @@ async def chat(socket: WebSocket):
                 await update_reply(conversation_id, reply_id, reply, "completed")
             except WebSocketDisconnect:
                 return
+            except TimeoutError:
+                logger.exception("Chat stream exceeded its time limit")
+                await socket.send_json({"type": "interrupted", "error":
+                    "Response timed out. Your message and saved partial reply are retained."})
             except Exception:
                 logger.exception("Chat stream or persistence failed")
                 await socket.send_json({"type": "interrupted", "error":
