@@ -27,6 +27,7 @@ async def health():
 @app.websocket("/ws/chat")
 async def chat(socket: WebSocket):
     await socket.accept()
+    history = []
     try:
         while True:
             message = (await socket.receive_text()).strip()
@@ -34,12 +35,15 @@ async def chat(socket: WebSocket):
                 await socket.send_json({"error": "Send between 1 and 8,000 characters."})
                 continue
             try:
-                reply = await asyncio.wait_for(generate_reply(message), timeout=35)
+                reply = await asyncio.wait_for(generate_reply(message, history), timeout=35)
             except RuntimeError as error:
                 await socket.send_json({"error": str(error)})
             except Exception:
                 await socket.send_json({"error": "Gemini request failed. Check your key, model and quota, then retry."})
             else:
+                # Keep complete turns only; failed requests do not change history.
+                history.append({"role": "user", "parts": [{"text": message}]})
+                history.append({"role": "model", "parts": [{"text": reply}]})
                 await socket.send_json({"reply": reply})
     except WebSocketDisconnect:
         pass

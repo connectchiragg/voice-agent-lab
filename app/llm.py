@@ -8,8 +8,8 @@ from google.genai import types
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 
-async def generate_reply(message: str) -> str:
-    """Send only this message, without retaining a conversation history."""
+async def generate_reply(message: str, history: list[dict]) -> str:
+    """Send previous turns and the new message without modifying history."""
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
         raise RuntimeError("Set GEMINI_API_KEY in your environment or local .env file.")
@@ -18,7 +18,7 @@ async def generate_reply(message: str) -> str:
     ).aio as client:
         response = await client.models.generate_content(
             model=os.getenv("GEMINI_MODEL", "gemini-3.8-flash"),
-            contents=message,
+            contents=history + [{"role": "user", "parts": [{"text": message}]}],
             config=types.GenerateContentConfig(max_output_tokens=1024),
         )
     if not response.text:

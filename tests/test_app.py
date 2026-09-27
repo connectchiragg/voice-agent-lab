@@ -21,11 +21,11 @@ def test_browser_script():
     assert client.get("/static/chat.js").status_code == 200
 
 
-def test_independent_messages(monkeypatch):
+def test_conversation_history_and_connection_isolation(monkeypatch):
     received = []
 
-    async def fake_reply(message):
-        received.append(message)
+    async def fake_reply(message, history):
+        received.append((message, list(history)))
         return "answer: " + message
 
     monkeypatch.setattr("app.main.generate_reply", fake_reply)
@@ -33,7 +33,17 @@ def test_independent_messages(monkeypatch):
         for message in ["hello", "another question"]:
             socket.send_text(message)
             assert socket.receive_json() == {"reply": "answer: " + message}
-    assert received == ["hello", "another question"]
+    with client.websocket_connect("/ws/chat") as socket:
+        socket.send_text("fresh conversation")
+        socket.receive_json()
+    assert received == [
+        ("hello", []),
+        ("another question", [
+            {"role": "user", "parts": [{"text": "hello"}]},
+            {"role": "model", "parts": [{"text": "answer: hello"}]},
+        ]),
+        ("fresh conversation", []),
+    ]
 
 
 def test_invalid_message():
@@ -45,8 +55,11 @@ def test_invalid_message():
 
 
 def test_provider_error_is_not_exposed(monkeypatch):
-    async def fake_reply(message):
-        raise ValueError("sensitive provider details")
+    async def fake_reply(message, history):
+        assert history == []
+        if message == "hello":
+            raise ValueError("sensitive provider details")
+        return "recovered"
 
     monkeypatch.setattr("app.main.generate_reply", fake_reply)
     with client.websocket_connect("/ws/chat") as socket:
@@ -54,6 +67,8 @@ def test_provider_error_is_not_exposed(monkeypatch):
         response = socket.receive_json()
         assert "error" in response
         assert "sensitive" not in response["error"]
+        socket.send_text("retry")
+        assert socket.receive_json() == {"reply": "recovered"}
 
 
 def test_missing_key(monkeypatch):
