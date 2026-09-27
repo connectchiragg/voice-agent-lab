@@ -9,10 +9,10 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.llm import generate_reply
+from app.database import load_history, save_exchange
 
 STATIC_DIRECTORY = Path(__file__).resolve().parent.parent / "static"
 logger = logging.getLogger("uvicorn.error")
-conversations: dict[str, list[dict]] = {}
 conversation_locks: dict[str, asyncio.Lock] = {}
 
 app = FastAPI(title="Voice Agent Lab")
@@ -38,30 +38,36 @@ async def chat(socket: WebSocket):
         await socket.close(code=1008)
         return
     await socket.accept()
-    history = conversations.setdefault(conversation_id, [])
     lock = conversation_locks.setdefault(conversation_id, asyncio.Lock())
-    if requested_id:
-        await socket.send_json({"history": history})
     try:
+        try:
+            history = await load_history(conversation_id)
+        except Exception:
+            logger.exception("Could not load conversation")
+            await socket.send_json({"error": "Database unavailable. Reconnect after PostgreSQL is running."})
+            await socket.close(code=1011)
+            return
+        if requested_id:
+            await socket.send_json({"history": history})
         while True:
             message = (await socket.receive_text()).strip()
+
             if not message or len(message) > 8000:
                 await socket.send_json({"error": "Send between 1 and 8,000 characters."})
                 continue
             # Two connections resuming the same ID must not interleave turns.
             await lock.acquire()
             try:
+                history = await load_history(conversation_id)
                 reply = await asyncio.wait_for(generate_reply(message, history), timeout=35)
+                await save_exchange(conversation_id, message, reply)
             except RuntimeError as error:
                 logger.exception("Chat request failed (history messages: %d)", len(history))
                 await socket.send_json({"error": str(error)})
             except Exception:
-                logger.exception("Gemini request failed (history messages: %d)", len(history))
-                await socket.send_json({"error": "Gemini request failed. Check your key, model and quota, then retry."})
+                logger.exception("Chat generation or persistence failed (history messages: %d)", len(history))
+                await socket.send_json({"error": "Could not generate or save the reply. Check the server logs, then retry."})
             else:
-                # Keep complete turns only; failed requests do not change history.
-                history.append({"role": "user", "parts": [{"text": message}]})
-                history.append({"role": "model", "parts": [{"text": reply}]})
                 await socket.send_json({"reply": reply})
             finally:
                 lock.release()

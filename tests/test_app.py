@@ -1,9 +1,27 @@
 from fastapi.testclient import TestClient
 from uuid import uuid4
+import pytest
 
 from app.main import app
 
 client = TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def fake_database(monkeypatch):
+    histories = {}
+
+    async def load(conversation_id):
+        return list(histories.setdefault(conversation_id, []))
+
+    async def save(conversation_id, message, reply):
+        histories[conversation_id].extend([
+            {"role": "user", "parts": [{"text": message}]},
+            {"role": "model", "parts": [{"text": reply}]},
+        ])
+
+    monkeypatch.setattr("app.main.load_history", load)
+    monkeypatch.setattr("app.main.save_exchange", save)
 
 
 def test_history_survives_reconnect_and_new_id_starts_empty(monkeypatch):

@@ -2,12 +2,12 @@
 
 A learning project: Gemini text chat with conversation IDs, then speech.
 Each model call receives the successful previous turns and the current message.
-History lives in a server dictionary keyed by UUID. The browser keeps its ID in
+History lives in PostgreSQL, keyed by UUID. The browser keeps its ID in
 sessionStorage and sends it when connecting. Refreshing restores previous messages;
 the New conversation button creates a new ID. Replies arrive whole, not streamed.
-Server restarts (including development reloads) clear all histories. Use one server
-process: this dictionary is not shared between workers. Conversations have no expiry
-yet, so memory grows until restart. IDs identify conversations; they are not login credentials.
+Server restarts preserve saved history. Use one server process for now: the
+per-conversation locks are in memory and do not coordinate multiple workers.
+IDs identify conversations; they are not login credentials.
 Create a local `.env` from `.env.example` and fill in your Gemini API key.
 Prompts are sent to Google. Never put credentials in frontend code or Git.
 
@@ -32,7 +32,8 @@ python -m pytest
 2. `static/index.html`: the message form and conversation area.
 3. `static/chat.js`: WebSocket connection and safe message rendering.
 4. `app/llm.py`: sends history and the new message to Gemini, without tools.
-5. `tests/test_app.py`: local tests with the provider mocked.
+5. `app/database.py`: direct SQL for loading history and saving exchanges.
+6. `tests/test_app.py`: local tests with the provider and storage mocked.
 
 ## Completed milestone: conversation history
 
@@ -41,7 +42,8 @@ python -m pytest
 - Connections using the same ID share history; new IDs start empty.
 - A per-conversation lock serializes requests for the same ID.
 - Failed requests leave history unchanged.
-- History is not persisted or trimmed yet; long conversations can hit model limits.
+- Both messages and conversation updated_at are saved in one transaction.
+- History is not trimmed yet; long conversations can hit model limits.
 - The API key stays on the backend; the model is configurable via GEMINI_MODEL.
 - One request at a time per connection, with a timeout and visible errors.
 - Reload to reconnect; no automatic retry or provider cancellation on disconnect.
@@ -58,7 +60,7 @@ This is local-only learning scaffolding, not a production service.
 
 ## Local PostgreSQL and pgAdmin
 
-Docker infrastructure is ready; the app still stores conversations in memory.
+The app connects to PostgreSQL on localhost:5432 using psycopg's async driver.
 Copy `infra.env.example` to `.env.docker` and choose two passwords on a fresh setup.
 The existing local setup already has generated passwords there; this file is ignored by Git.
 
@@ -66,6 +68,15 @@ The existing local setup already has generated passwords there; this file is ign
 docker compose --env-file .env.docker up -d
 docker compose --env-file .env.docker stop
 ```
+
+For a fresh database only, create the tables before starting the app:
+
+```sh
+docker compose --env-file .env.docker exec -T postgres psql -v ON_ERROR_STOP=1 -U voice_agent -d voice_agent < infra/schema.sql
+```
+
+The current local database already has these tables. Existing in-memory chats
+are not migrated; only new successful exchanges are saved to PostgreSQL.
 
 - PostgreSQL: `localhost:5432`, database/user `voice_agent`, password from
   `POSTGRES_PASSWORD` in `.env.docker`.
