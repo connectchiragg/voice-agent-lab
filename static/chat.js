@@ -8,10 +8,12 @@ function displayMessage(sender, text) {
   // Treat messages as text, never executable HTML.
   paragraph.textContent = `${sender}: ${text}`;
   messages.appendChild(paragraph);
+  messages.scrollTop = messages.scrollHeight;
   return paragraph;
 }
 
 let assistantMessage = null;
+let receivedChunks = 0;
 
 const button = form.querySelector("button");
 const protocol = location.protocol === "https:" ? "wss:" : "ws:";
@@ -42,10 +44,15 @@ socket.onmessage = (event) => {
   }
   if (response.type === "start") {
     assistantMessage = displayMessage("Gemini", "");
+    receivedChunks = 0;
+    status.textContent = "Waiting for Gemini’s first text chunk…";
     return;
   }
   if (response.type === "delta") {
     assistantMessage.appendChild(document.createTextNode(response.text));
+    receivedChunks += 1;
+    status.textContent = `Streaming… ${receivedChunks} chunks received`;
+    messages.scrollTop = messages.scrollHeight;
     return;
   }
   if (response.type === "interrupted" && assistantMessage) {
@@ -53,7 +60,8 @@ socket.onmessage = (event) => {
   }
   if (response.error) displayMessage("Error", response.error);
   assistantMessage = null;
-  status.textContent = "Ready.";
+  status.textContent = response.type === "done"
+    ? `Complete. Received ${receivedChunks} chunks.` : "Ready.";
   button.disabled = false;
 };
 socket.onclose = () => {
