@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Voice Agent Lab</title>
+    <link rel="stylesheet" href="/static/style.css" />
+    <script src="/static/chat.js" defer></script>
+  </head>
+  <body>
+    <main>
+      <h1>Voice Agent Lab</h1>
+      <p>Stateless Gemini chat: each message starts fresh.</p>
+      <p id="status" role="status">Connecting…</p>
+      <section id="messages" role="log" aria-label="Chat messages"></section>
+      <form id="chat-form">
+        <label for="message">Message</label>
+        <div class="composer">
+          <input id="message" autocomplete="off" required placeholder="Hello" />
+          <button type="submit">Send</button>
+        </div>
+      </form>
+    </main>
+  </body>
+</html>

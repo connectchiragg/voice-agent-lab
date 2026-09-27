@@ -1,0 +1,10 @@
+:root { color-scheme: dark; font-family: system-ui, sans-serif; }
+body { margin: 0; background: #181923; color: #e8e8ef; }
+main { max-width: 720px; margin: 48px auto; padding: 24px; }
+h1 { font-size: 28px; }
+#status { color: #b5b8cf; }
+#messages { min-height: 260px; max-height: 50vh; overflow-y: auto; border: 1px solid #41445a; border-radius: 8px; padding: 16px; margin-bottom: 24px; overflow-wrap: anywhere; }
+label { display: block; margin-bottom: 8px; }
+.composer { display: flex; gap: 12px; }
+input { flex: 1; min-width: 0; background: #242638; color: inherit; border: 1px solid #60657d; border-radius: 6px; padding: 12px; font: inherit; }
+button { background: #b7c4ff; color: #171923; border: 0; border-radius: 6px; padding: 12px 20px; font: inherit; cursor: pointer; }
