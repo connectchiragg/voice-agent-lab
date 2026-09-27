@@ -24,7 +24,7 @@ async def stream_reply(message: str, history: list[dict]):
         api_key=api_key, http_options=types.HttpOptions(timeout=30000)
     ).aio as client:
         stream = await client.models.generate_content_stream(
-            model=os.getenv("GEMINI_MODEL", "gemini-3.8-flash"),
+            model=os.getenv("GEMINI_MODEL", "gemini-3-flash-preview"),
             contents=contents,
             config=types.GenerateContentConfig(max_output_tokens=1024),
         )
