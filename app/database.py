@@ -39,21 +39,6 @@ async def lifespan(app):
     async with AsyncPostgresSaver.from_conn_string(connection_string) as saver:
         await saver.setup()
         graph = build_graph(saver)
-        # Import existing history once; retain the old tables for rollback.
-        cursor = await saver.conn.execute(
-            "SELECT c.id::text, c.updated_at, m.role, m.content, m.status "
-            "FROM conversations c LEFT JOIN messages m ON m.conversation_id = c.id "
-            "ORDER BY c.id, m.id"
-        )
-        histories = {}
-        for row in await cursor.fetchall():
-            cid = row["id"]
-            state = histories.setdefault(cid, {"messages": [], "updated_at": row["updated_at"].isoformat()})
-            if row["role"] is not None:
-                state["messages"].append({"role": row["role"], "parts": [{"text": row["content"]}], "status": row["status"]})
-        for cid, state in histories.items():
-            if not (await graph.aget_state(config(cid))).values:
-                await graph.aupdate_state(config(cid), state, as_node="save")
         try:
             yield
         finally:

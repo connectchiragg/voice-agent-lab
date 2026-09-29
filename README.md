@@ -33,7 +33,7 @@ python -m pytest
 3. `static/chat.js`: WebSocket connection and safe message rendering.
 4. `app/llm.py`: sends history and the new message to Gemini, without tools.
 5. `app/database.py`: typed conversation state and LangGraph checkpoint persistence.
-6. `tests/test_app.py`: local tests with the provider and storage mocked.
+6. `tests/test_app.py`: local tests with a mocked provider and an in-memory LangGraph checkpointer.
 
 ## Completed milestone: conversation history
 
@@ -44,9 +44,7 @@ inside the graph yet: streaming remains explicit and easy to trace.
 
 Startup runs the PostgreSQL checkpointer's setup, creating `checkpoints`,
 `checkpoint_blobs`, `checkpoint_writes`, and `checkpoint_migrations`.
-Existing SQL history is imported only for threads with no checkpoint. The old
-tables are preserved for rollback, but no longer receive new messages.
-The current `updated_at` lives in graph state rather than the legacy SQL row.
+These are the only application tables. Messages and `updated_at` live in graph state.
 
 Preserving every partial reply requires an explicit checkpoint before each
 UI chunk. This stores more data than updating one SQL message row because the
@@ -58,7 +56,7 @@ does not itself serialize concurrent requests for the same conversation.
 - Server sends previous turns with each new message to Gemini.
 - Connections using the same ID share history; new IDs start empty.
 - A per-conversation lock serializes requests for the same ID.
-- User messages are saved before generation. Assistant rows start as interrupted
+- User messages are saved before generation. Assistant messages start as interrupted
   and become completed only when Gemini finishes normally.
 - Each text chunk is persisted before sending, updating conversation updated_at.
   This favors simple recovery over throughput; batching writes is a later optimization.
@@ -92,15 +90,8 @@ docker compose --env-file .env.docker up -d
 docker compose --env-file .env.docker stop
 ```
 
-For a fresh database only, create the tables before starting the app:
-
-```sh
-docker compose --env-file .env.docker exec -T postgres psql -v ON_ERROR_STOP=1 -U voice_agent -d voice_agent < infra/schema.sql
-```
-
-The current local database already has these tables and the status column.
-For an older database created before streaming, apply `infra/002_message_status.sql`
-once using the same psql command instead of running schema.sql again.
+Start the containers before starting the app. LangGraph creates its tables
+automatically during app startup; no manual SQL schema setup is needed.
 
 - PostgreSQL: `localhost:5432`, database/user `voice_agent`, password from
   `POSTGRES_PASSWORD` in `.env.docker`.
