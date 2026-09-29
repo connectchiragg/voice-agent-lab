@@ -10,13 +10,13 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.llm import stream_reply
-from app.database import load_history, start_turn, update_reply
+from app.database import lifespan, load_history, start_turn, update_reply
 
 STATIC_DIRECTORY = Path(__file__).resolve().parent.parent / "static"
 logger = logging.getLogger("uvicorn.error")
 conversation_locks: dict[str, asyncio.Lock] = {}
 
-app = FastAPI(title="Voice Agent Lab")
+app = FastAPI(title="Voice Agent Lab", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=STATIC_DIRECTORY), name="static")
 
 
@@ -42,15 +42,15 @@ async def chat(socket: WebSocket):
     lock = conversation_locks.setdefault(conversation_id, asyncio.Lock())
     try:
         try:
-            history = await load_history(conversation_id)
+            async with lock:
+                history = await load_history(conversation_id)
+                if requested_id:
+                    await socket.send_json({"history": history})
         except Exception:
             logger.exception("Could not load conversation")
             await socket.send_json({"error": "Database unavailable. Reconnect after PostgreSQL is running."})
             await socket.close(code=1011)
             return
-        if requested_id:
-            async with lock:
-                await socket.send_json({"history": await load_history(conversation_id)})
         while True:
             message = (await socket.receive_text()).strip()
             if not message or len(message) > 8000:

@@ -2,7 +2,7 @@
 
 A learning project: Gemini text chat with conversation IDs, then speech.
 Each model call receives previous turns (including marked partial replies) and the current message.
-History lives in PostgreSQL, keyed by UUID. The browser keeps its ID in
+History lives in LangGraph PostgreSQL checkpoints, keyed by UUID (`thread_id`). The browser keeps its ID in
 sessionStorage and sends it when connecting. Refreshing restores previous messages;
 the New conversation button creates a new ID. Replies stream into one browser message.
 Server restarts preserve saved history. Use one server process for now: the
@@ -32,10 +32,27 @@ python -m pytest
 2. `static/index.html`: the message form and conversation area.
 3. `static/chat.js`: WebSocket connection and safe message rendering.
 4. `app/llm.py`: sends history and the new message to Gemini, without tools.
-5. `app/database.py`: direct SQL for loading history and saving exchanges.
+5. `app/database.py`: typed conversation state and LangGraph checkpoint persistence.
 6. `tests/test_app.py`: local tests with the provider and storage mocked.
 
 ## Completed milestone: conversation history
+
+LangGraph now owns state storage. `Conversation` contains `messages` and
+`updated_at`; `aget_state` loads it and `aupdate_state` saves it. The graph has
+one `save` node solely to anchor these state updates. We do not run the LLM
+inside the graph yet: streaming remains explicit and easy to trace.
+
+Startup runs the PostgreSQL checkpointer's setup, creating `checkpoints`,
+`checkpoint_blobs`, `checkpoint_writes`, and `checkpoint_migrations`.
+Existing SQL history is imported only for threads with no checkpoint. The old
+tables are preserved for rollback, but no longer receive new messages.
+The current `updated_at` lives in graph state rather than the legacy SQL row.
+
+Preserving every partial reply requires an explicit checkpoint before each
+UI chunk. This stores more data than updating one SQL message row because the
+messages list is versioned. This is a learning tradeoff, not a throughput
+optimization. We retain the single-process conversation lock: persistence
+does not itself serialize concurrent requests for the same conversation.
 
 - Browser connects to `/ws/chat` on the same host.
 - Server sends previous turns with each new message to Gemini.
@@ -61,7 +78,7 @@ The WebSocket sends start, delta, done or interrupted events for each response.
 Push-to-talk ASR/TTS → continuous
 audio and endpointing → tools and durable state → barge-in and recovery.
 
-No agent framework, application authentication, telephony, or deployment yet.
+No application authentication, telephony, or deployment yet.
 This is local-only learning scaffolding, not a production service.
 
 ## Local PostgreSQL and pgAdmin

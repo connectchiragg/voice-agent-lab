@@ -1,5 +1,8 @@
 from uuid import uuid4
 import pytest
+import asyncio
+from langgraph.checkpoint.memory import InMemorySaver
+from app import database
 from fastapi.testclient import TestClient
 from app.main import app
 
@@ -8,25 +11,7 @@ client = TestClient(app)
 
 @pytest.fixture
 def storage(monkeypatch):
-    histories = {}
-
-    async def load(cid):
-        return [dict(turn) for turn in histories.setdefault(cid, [])]
-
-    async def start(cid, message):
-        histories[cid].extend([
-            {"role": "user", "parts": [{"text": message}], "status": "completed"},
-            {"role": "model", "parts": [{"text": ""}], "status": "interrupted"},
-        ])
-        return len(histories[cid]) - 1
-
-    async def update(cid, mid, text, status="interrupted"):
-        histories[cid][mid] = {"role": "model", "parts": [{"text": text}], "status": status}
-
-    monkeypatch.setattr("app.main.load_history", load)
-    monkeypatch.setattr("app.main.start_turn", start)
-    monkeypatch.setattr("app.main.update_reply", update)
-    return histories
+    monkeypatch.setattr(database, "graph", database.build_graph(InMemorySaver()))
 
 
 def test_http_routes():
@@ -95,7 +80,7 @@ def test_failure_before_first_chunk(monkeypatch, storage):
         socket.send_text("preserve this")
         assert socket.receive_json()["type"] == "start"
         assert socket.receive_json()["type"] == "interrupted"
-    assert storage[cid][0]["parts"][0]["text"] == "preserve this"
+    assert asyncio.run(database.load_history(cid))[0]["parts"][0]["text"] == "preserve this"
 
 
 def test_invalid_message(storage):
