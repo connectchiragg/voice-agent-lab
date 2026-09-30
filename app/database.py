@@ -1,19 +1,22 @@
-"""Conversation state persisted by LangGraph's PostgreSQL checkpointer."""
+"""A one-node conversation workflow with PostgreSQL checkpoints."""
 import os
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import aclosing, asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal, TypedDict, cast
+from typing import Literal, NotRequired, TypedDict, cast
 
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from psycopg.conninfo import make_conninfo
+
+from app.llm import stream_reply
 
 load_dotenv(Path(__file__).resolve().parent.parent / ".env.docker")
 
@@ -35,21 +38,41 @@ class Conversation(TypedDict):
     updated_at: str
 
 
+class ChatEvent(TypedDict):
+    type: Literal["start", "delta"]
+    text: NotRequired[str]
+
+
 ConversationGraph = CompiledStateGraph[Conversation, None, Conversation, Conversation]
 graph: ConversationGraph | None = None
 
 
-def save_node(state: Conversation) -> dict[str, object]:
-    """State updates are supplied directly by save_history; no extra work here."""
-    return {}
+async def generate_reply(state: Conversation, config: RunnableConfig) -> Conversation:
+    """Run Gemini inside the graph; checkpoint text before publishing each chunk."""
+    messages = state["messages"]
+    message = messages[-2]["parts"][0]["text"]
+    conversation_id = config["configurable"]["thread_id"]
+    writer = get_stream_writer()
+    # The graph's input checkpoint already holds the user and empty assistant.
+    writer({"type": "start"})
+    reply = ""
+    async with aclosing(stream_reply(message, messages[:-2])) as stream:
+        async for chunk in stream:
+            reply += chunk
+            messages[-1] = {"role": "model", "parts": [{"text": reply}], "status": "interrupted"}
+            # Node-boundary checkpoints alone would lose an unfinished stream.
+            await save_history(conversation_id, messages)
+            writer({"type": "delta", "text": chunk})
+    messages[-1] = {"role": "model", "parts": [{"text": reply}], "status": "completed"}
+    # LangGraph persists this returned state before the workflow finishes.
+    return {"messages": messages, "updated_at": datetime.now(timezone.utc).isoformat()}
 
 
 def build_graph(checkpointer: BaseCheckpointSaver[str]) -> ConversationGraph:
-    # Only offload state here; Gemini streaming stays in llm.py.
     builder = StateGraph(Conversation)
-    builder.add_node("save", save_node)
-    builder.add_edge(START, "save")
-    builder.add_edge("save", END)
+    builder.add_node("generate_reply", generate_reply)
+    builder.add_edge(START, "generate_reply")
+    builder.add_edge("generate_reply", END)
     return builder.compile(checkpointer=checkpointer)
 
 
@@ -86,21 +109,21 @@ async def save_history(conversation_id: str, messages: list[Message]) -> None:
         raise RuntimeError("Conversation storage has not started.")
     await graph.aupdate_state(config(conversation_id), {
         "messages": messages, "updated_at": datetime.now(timezone.utc).isoformat(),
-    }, as_node="save")
+    }, as_node="generate_reply")
 
 
-async def start_turn(conversation_id: str, message: str) -> int:
+async def stream_conversation(conversation_id: str, message: str) -> AsyncIterator[ChatEvent]:
+    """Supply a new turn to the graph and forward its custom streaming events."""
+    if graph is None:
+        raise RuntimeError("Conversation storage has not started.")
     messages = await load_history(conversation_id)
     messages.extend([
         {"role": "user", "parts": [{"text": message}], "status": "completed"},
         {"role": "model", "parts": [{"text": ""}], "status": "interrupted"},
     ])
-    await save_history(conversation_id, messages)
-    return len(messages) - 1
-
-
-async def update_reply(conversation_id: str, message_id: int, text: str,
-                       status: MessageStatus = "interrupted") -> None:
-    messages = await load_history(conversation_id)
-    messages[message_id] = {"role": "model", "parts": [{"text": text}], "status": status}
-    await save_history(conversation_id, messages)
+    state: Conversation = {"messages": messages, "updated_at": datetime.now(timezone.utc).isoformat()}
+    async with aclosing(graph.astream(
+        state, config(conversation_id), stream_mode="custom", durability="sync",
+    )) as stream:
+        async for event in stream:
+            yield cast(ChatEvent, event)

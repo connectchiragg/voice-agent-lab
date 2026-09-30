@@ -1,4 +1,5 @@
 import os
+from collections.abc import AsyncIterator
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -8,7 +9,7 @@ from google.genai import types
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 
-async def stream_reply(message: str, history: list[dict]):
+async def stream_reply(message: str, history: list[dict]) -> AsyncIterator[str]:
     """Yield text chunks, retaining interruption context from earlier turns."""
     api_key = os.getenv("GEMINI_API_KEY")
 

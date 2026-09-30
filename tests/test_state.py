@@ -1,17 +1,34 @@
 import asyncio
+from contextlib import aclosing
 from uuid import uuid4
 
 from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.config import get_config
 from app import database
 
 
 def test_checkpoint_recovery_and_isolation(monkeypatch):
+    async def provider(message, history):
+        assert get_config()["metadata"]["langgraph_node"] == "generate_reply"
+        if message == "hello":
+            yield "partial"
+            raise RuntimeError("provider disconnected")
+        assert history[-1]["status"] == "interrupted"
+        yield "complete"
+
+    monkeypatch.setattr(database, "stream_reply", provider)
+
     async def scenario():
         saver = InMemorySaver()
         monkeypatch.setattr(database, "graph", database.build_graph(saver))
         cid = str(uuid4())
-        reply_id = await database.start_turn(cid, "hello")
-        await database.update_reply(cid, reply_id, "partial")
+        try:
+            async for event in database.stream_conversation(cid, "hello"):
+                pass
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("Provider failure should reach the caller")
         # Rebuild the graph: all conversation data must come from checkpoints.
         monkeypatch.setattr(database, "graph", database.build_graph(saver))
         history = await database.load_history(cid)
@@ -19,10 +36,89 @@ def test_checkpoint_recovery_and_isolation(monkeypatch):
         assert history[1]["status"] == "interrupted"
         assert history[1]["parts"][0]["text"] == "partial"
         before = (await database.graph.aget_state(database.config(cid))).values["updated_at"]
-        await database.update_reply(cid, reply_id, "complete", "completed")
+        async for event in database.stream_conversation(cid, "continue"):
+            pass
         state = await database.graph.aget_state(database.config(cid))
         assert state.values["updated_at"] >= before
-        assert state.values["messages"][1]["status"] == "completed"
+        assert state.values["messages"][-1]["status"] == "completed"
+        assert state.next == ()
         assert await database.load_history(str(uuid4())) == []
+
+    asyncio.run(scenario())
+
+
+def test_chunks_are_saved_before_delivery_and_close_cancels_provider(monkeypatch):
+    async def scenario():
+        closed = asyncio.Event()
+
+        async def provider(message, history):
+            try:
+                yield "partial"
+                await asyncio.Event().wait()
+            finally:
+                closed.set()
+
+        monkeypatch.setattr(database, "stream_reply", provider)
+        monkeypatch.setattr(database, "graph", database.build_graph(InMemorySaver()))
+        cid = str(uuid4())
+        async with aclosing(database.stream_conversation(cid, "hello")) as stream:
+            assert (await anext(stream))["type"] == "start"
+            assert (await anext(stream))["text"] == "partial"
+            history = await database.load_history(cid)
+            assert history[-1]["parts"][0]["text"] == "partial"
+            assert history[-1]["status"] == "interrupted"
+        await asyncio.wait_for(closed.wait(), timeout=1)
+
+    asyncio.run(scenario())
+
+
+def test_failed_checkpoint_stops_chunk_delivery(monkeypatch):
+    async def provider(message, history):
+        yield "must not reach UI"
+
+    async def fail_save(conversation_id, messages):
+        raise RuntimeError("storage unavailable")
+
+    async def scenario():
+        monkeypatch.setattr(database, "graph", database.build_graph(InMemorySaver()))
+        monkeypatch.setattr(database, "stream_reply", provider)
+        monkeypatch.setattr(database, "save_history", fail_save)
+        cid = str(uuid4())
+        events = []
+        try:
+            async for event in database.stream_conversation(cid, "hello"):
+                events.append(event)
+        except RuntimeError as error:
+            assert str(error) == "storage unavailable"
+        else:
+            raise AssertionError("Storage failure should stop generation")
+        assert events == [{"type": "start"}]
+        history = await database.load_history(cid)
+        assert history[0]["parts"][0]["text"] == "hello"
+        assert history[1]["parts"][0]["text"] == ""
+
+    asyncio.run(scenario())
+
+
+def test_completed_turns_reach_next_node_without_duplicate_messages(monkeypatch):
+    calls = []
+
+    async def provider(message, history):
+        calls.append((message, history))
+        yield "reply to " + message
+
+    async def scenario():
+        monkeypatch.setattr(database, "stream_reply", provider)
+        monkeypatch.setattr(database, "graph", database.build_graph(InMemorySaver()))
+        cid = str(uuid4())
+        for message in ("first", "second"):
+            async for event in database.stream_conversation(cid, message):
+                pass
+        assert calls[0] == ("first", [])
+        assert calls[1][0] == "second"
+        assert len(calls[1][1]) == 2
+        assert calls[1][1][-1]["parts"][0]["text"] == "reply to first"
+        assert calls[1][1][-1]["status"] == "completed"
+        assert len(await database.load_history(cid)) == 4
 
     asyncio.run(scenario())

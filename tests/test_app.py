@@ -28,7 +28,7 @@ def test_stream_persistence_and_reconnect(monkeypatch, storage, fail):
             raise ValueError("private provider error")
         yield " there"
 
-    monkeypatch.setattr("app.main.stream_reply", stream)
+    monkeypatch.setattr("app.database.stream_reply", stream)
     cid = str(uuid4())
     url = f"/ws/chat?conversation_id={cid}"
     with client.websocket_connect(url) as socket:
@@ -59,7 +59,7 @@ def test_continue_after_interruption(monkeypatch, storage):
         assert history[-1]["parts"][0]["text"] == "Partial"
         yield "Continued"
 
-    monkeypatch.setattr("app.main.stream_reply", stream)
+    monkeypatch.setattr("app.database.stream_reply", stream)
     with client.websocket_connect("/ws/chat") as socket:
         for message, expected in [("first", "interrupted"), ("continue", "done")]:
             socket.send_text(message)
@@ -73,7 +73,7 @@ def test_failure_before_first_chunk(monkeypatch, storage):
         raise ValueError("failure")
         yield "unreachable"
 
-    monkeypatch.setattr("app.main.stream_reply", stream)
+    monkeypatch.setattr("app.database.stream_reply", stream)
     cid = str(uuid4())
     with client.websocket_connect(f"/ws/chat?conversation_id={cid}") as socket:
         socket.receive_json()

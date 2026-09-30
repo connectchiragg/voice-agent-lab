@@ -9,8 +9,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.llm import stream_reply
-from app.database import lifespan, load_history, start_turn, update_reply
+from app.database import lifespan, load_history, stream_conversation
 
 STATIC_DIRECTORY = Path(__file__).resolve().parent.parent / "static"
 logger = logging.getLogger("uvicorn.error")
@@ -58,19 +57,10 @@ async def chat(socket: WebSocket):
                 continue
             # Two connections resuming the same ID must not interleave turns.
             await lock.acquire()
-            reply = ""
-            reply_id = None
             try:
-                history = await load_history(conversation_id)
-                reply_id = await start_turn(conversation_id, message)
-                await socket.send_json({"type": "start"})
-                async with asyncio.timeout(90), aclosing(stream_reply(message, history)) as stream:
-                    async for chunk in stream:
-                        reply += chunk
-                        # Persist before delivery so reconnects retain the partial answer.
-                        await update_reply(conversation_id, reply_id, reply)
-                        await socket.send_json({"type": "delta", "text": chunk})
-                await update_reply(conversation_id, reply_id, reply, "completed")
+                async with asyncio.timeout(90), aclosing(stream_conversation(conversation_id, message)) as stream:
+                    async for event in stream:
+                        await socket.send_json(event)
             except WebSocketDisconnect:
                 return
             except TimeoutError:

@@ -32,15 +32,25 @@ python -m pytest
 2. `static/index.html`: the message form and conversation area.
 3. `static/chat.js`: WebSocket connection and safe message rendering.
 4. `app/llm.py`: sends history and the new message to Gemini, without tools.
-5. `app/database.py`: typed conversation state and LangGraph checkpoint persistence.
+5. `app/database.py`: typed conversation state, Gemini graph node, and PostgreSQL checkpoints.
 6. `tests/test_app.py`: local tests with a mocked provider and an in-memory LangGraph checkpointer.
 
 ## Completed milestone: conversation history
 
-LangGraph now owns state storage. `Conversation` contains `messages` and
-`updated_at`; `aget_state` loads it and `aupdate_state` saves it. The graph has
-one `save` node solely to anchor these state updates. We do not run the LLM
-inside the graph yet: streaming remains explicit and easy to trace.
+LangGraph now executes the conversation: `START → generate_reply → END`.
+`Conversation` contains `messages` and `updated_at`. `stream_conversation`
+loads the previous state and submits a user message and an empty assistant
+message to `graph.astream`. Synchronous checkpoint durability saves that input
+before the Gemini node runs. The node calls our existing Gemini SDK stream and
+emits `start`/`delta` events through LangGraph's custom stream. The WebSocket
+handler forwards these events and sends `done` only when the graph finishes.
+
+The node explicitly checkpoints each accumulated partial reply before emitting
+its delta. This is an `aupdate_state` attributed to `generate_reply`; it does
+not run the node again. A provider failure or cancellation leaves that partial
+state marked interrupted. After normal generation, the node returns completed
+state for LangGraph to checkpoint. `aclosing` closes the graph and provider
+generators when streaming stops. No automatic resume or retry is performed.
 
 Startup runs the PostgreSQL checkpointer's setup, creating `checkpoints`,
 `checkpoint_blobs`, `checkpoint_writes`, and `checkpoint_migrations`.
@@ -67,7 +77,8 @@ does not itself serialize concurrent requests for the same conversation.
 - History is not trimmed yet; long conversations can hit model limits.
 - The API key stays on the backend; the model is configurable via GEMINI_MODEL.
 - One request at a time per connection, with a timeout and visible errors.
-- Reload to reconnect; no automatic retry or provider cancellation on disconnect.
+- Reload to reconnect. A disconnect detected while sending closes the stream;
+  disconnect detection while awaiting a provider chunk is not implemented yet.
 
 The WebSocket sends start, delta, done or interrupted events for each response.
 
