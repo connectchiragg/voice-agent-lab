@@ -12,7 +12,24 @@ function displayMessage(sender, text) {
   return paragraph;
 }
 
+function addPlayButton(paragraph, text) {
+  if (!text.trim()) return;
+  const playButton = document.createElement("button");
+  playButton.type = "button";
+  playButton.className = "play-speech";
+  if (text.length > 200) {
+    playButton.textContent = "Speech limit: 200 characters";
+    playButton.disabled = true;
+    playButton.title = "This reply is too long for our first speech increment. Nothing is truncated.";
+  } else {
+    playButton.textContent = "Play";
+    playButton.dataset.speechText = text;
+  }
+  paragraph.appendChild(playButton);
+}
+
 let assistantMessage = null;
+let assistantText = "";
 let receivedChunks = 0;
 
 const button = form.querySelector("button");
@@ -37,19 +54,24 @@ socket.onmessage = (event) => {
   if (response.history) {
     messages.replaceChildren();
     for (const message of response.history) {
-      displayMessage(message.role === "user" ? "You" : "Gemini",
+      const paragraph = displayMessage(message.role === "user" ? "You" : "Gemini",
         message.parts[0].text + (message.status === "interrupted" ? " [Interrupted]" : ""));
+      if (message.role === "model" && message.status === "completed") {
+        addPlayButton(paragraph, message.parts[0].text);
+      }
     }
     return;
   }
   if (response.type === "start") {
     assistantMessage = displayMessage("Gemini", "");
+    assistantText = "";
     receivedChunks = 0;
     status.textContent = "Waiting for Gemini’s first text chunk…";
     return;
   }
   if (response.type === "delta") {
     assistantMessage.appendChild(document.createTextNode(response.text));
+    assistantText += response.text;
     receivedChunks += 1;
     status.textContent = `Streaming… ${receivedChunks} chunks received`;
     messages.scrollTop = messages.scrollHeight;
@@ -58,6 +80,7 @@ socket.onmessage = (event) => {
   if (response.type === "interrupted" && assistantMessage) {
     assistantMessage.appendChild(document.createTextNode(" [Interrupted]"));
   }
+  if (response.type === "done" && assistantMessage) addPlayButton(assistantMessage, assistantText);
   if (response.error) displayMessage("Error", response.error);
   assistantMessage = null;
   status.textContent = response.type === "done"

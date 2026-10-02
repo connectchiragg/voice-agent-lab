@@ -12,3 +12,5 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
 .speech-controls { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
 #speech-status { color: #b5b8cf; font-size: 14px; }
+#playback-status { color: #b5b8cf; font-size: 14px; }
+.play-speech { display: block; margin-top: 8px; padding: 6px 12px; font-size: 14px; }

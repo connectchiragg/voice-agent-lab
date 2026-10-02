@@ -11,6 +11,7 @@ load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 logger = logging.getLogger("uvicorn.error")
 
 MAX_AUDIO_BYTES = 5 * 1024 * 1024
+MAX_SPEECH_CHARACTERS = 200
 AUDIO_FILENAMES = {
     "audio/webm": "recording.webm",
     "audio/mp4": "recording.m4a",
@@ -45,7 +46,7 @@ def provider_error(error: APIError) -> SpeechError:
         if error.status_code in (401, 403):
             return SpeechError(503, "Groq rejected the key or model access. Check your Groq account.")
         if error.status_code in (400, 422):
-            return SpeechError(422, "Groq could not process this input. Try a shorter recording.")
+            return SpeechError(422, "Groq could not process this input. Check the model, voice and input limits.")
         if error.status_code == 404:
             return SpeechError(503, "The configured Groq model is unavailable.")
     return SpeechError(502, "Groq is unavailable. Please try again.")
@@ -69,3 +70,24 @@ async def transcribe(audio: bytes, media_type: str) -> str:
     if len(transcript) > 8000:
         raise SpeechError(422, "The transcript exceeds the chat limit. Record a shorter message.")
     return transcript
+
+
+async def synthesize(text: str) -> bytes:
+    """Generate one short English reply as WAV audio, held only in memory."""
+    text = text.strip()
+    if not text or len(text) > MAX_SPEECH_CHARACTERS:
+        raise SpeechError(422, "Speech requires between 1 and 200 characters.")
+    try:
+        async with create_client() as client:
+            response = await client.audio.speech.create(
+                model=os.getenv("GROQ_SPEECH_MODEL", "canopylabs/orpheus-v1-english"),
+                voice=os.getenv("GROQ_SPEECH_VOICE", "troy"),
+                input=text,
+                response_format="wav",
+            )
+            audio = await response.read()
+    except APIError as error:
+        raise provider_error(error) from error
+    if audio[:4] != b"RIFF" or audio[8:12] != b"WAVE":
+        raise SpeechError(502, "Groq did not return WAV audio. Please try again.")
+    return audio

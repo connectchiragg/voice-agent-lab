@@ -33,6 +33,24 @@ LangGraph flow. Transcribing alone does not add a conversation turn.
 - Browser recordings are uploaded as captured; we do not implement resampling yet.
 - Free quotas vary by account; see https://console.groq.com/docs/rate-limits.
 
+## Speech output (second audio increment)
+
+Completed replies up to 200 characters have a Play button. It sends the reply
+to `/api/speak`, which calls Groq and returns WAV bytes; the browser plays them.
+`GROQ_SPEECH_MODEL` defaults to `canopylabs/orpheus-v1-english` and
+`GROQ_SPEECH_VOICE` defaults to `troy`, using the same backend key as transcription.
+
+- English output only. Multilingual transcription does not imply multilingual TTS.
+- Groq currently limits Orpheus input to 200 characters. Longer text replies stay
+  intact but cannot be played yet; we do not truncate, summarize or split them.
+- Only completed replies get Play. Interrupted text remains visible as before.
+- Click-to-play is deliberate: no autoplay, streaming TTS or barge-in yet.
+- Audio controls can pause/replay the current WAV without another provider call.
+  Clicking a message's Play button again makes a new request and uses quota.
+- Starting a recording pauses existing playback. Generated audio is not persisted.
+- Failed speech generation does not change Gemini text or conversation history.
+- Model limits and voices: https://console.groq.com/docs/text-to-speech/orpheus.
+
 ## Run locally
 
 ```sh
@@ -107,8 +125,8 @@ The WebSocket sends start, delta, done or interrupted events for each response.
 
 ## Later milestones
 
-Push-to-talk ASR/TTS → continuous
-audio and endpointing → tools and durable state → barge-in and recovery.
+Full-length/streaming speech → continuous audio and endpointing → tools →
+barge-in and recovery. PostgreSQL conversation state is already implemented.
 
 No application authentication, telephony, or deployment yet.
 This is local-only learning scaffolding, not a production service.

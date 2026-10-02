@@ -4,6 +4,10 @@
   const speechStatus = document.querySelector("#speech-status");
   const messageInput = document.querySelector("#message");
   const messageControls = document.querySelector("#message-controls");
+  const replyAudio = document.querySelector("#reply-audio");
+  const playbackStatus = document.querySelector("#playback-status");
+  let audioUrl = null;
+  let speechRequest = null;
   let recorder = null;
   let microphone = null;
   let recordingTimer = null;
@@ -40,6 +44,8 @@
   }
 
   async function startRecording() {
+    speechRequest?.abort(new DOMException("Playback cancelled to record.", "AbortError"));
+    replyAudio.pause();
     recordButton.disabled = true;
     messageControls.disabled = true;
     speechStatus.textContent = "Waiting for microphone permission…";
@@ -109,8 +115,57 @@
       startRecording();
     }
   });
+
+  document.querySelector("#messages").addEventListener("click", async (event) => {
+    const playButton = event.target.closest("button[data-speech-text]");
+    if (!playButton || speechRequest) return;
+    if (messageControls.disabled) {
+      playbackStatus.textContent = "Finish recording/transcription before playing a reply.";
+      return;
+    }
+    speechRequest = new AbortController();
+    playButton.disabled = true;
+    replyAudio.pause();
+    replyAudio.hidden = true;
+    playbackStatus.textContent = "Generating English speech with Groq…";
+    const timer = setTimeout(() => speechRequest?.abort(
+      new DOMException("Speech request timed out. Click Play to try again.", "TimeoutError"),
+    ), 40000);
+    try {
+      const response = await fetch("/api/speak", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: playButton.dataset.speechText }),
+        signal: speechRequest.signal,
+      });
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(typeof error.detail === "string" ? error.detail : "Speech input was invalid.");
+      }
+      const audio = await response.blob();
+      if (leavingPage || messageControls.disabled) return;
+      if (audioUrl) URL.revokeObjectURL(audioUrl);
+      audioUrl = URL.createObjectURL(audio);
+      replyAudio.src = audioUrl;
+      replyAudio.hidden = false;
+      await replyAudio.play();
+      playbackStatus.textContent = "Playing. Use the audio controls to pause or replay.";
+    } catch (error) {
+      if (leavingPage) return;
+      playbackStatus.textContent = error.name === "NotAllowedError"
+        ? "Audio is ready. Press Play in the audio controls." : error.message;
+    } finally {
+      clearTimeout(timer);
+      speechRequest = null;
+      playButton.disabled = false;
+    }
+  });
+
   window.addEventListener("pagehide", () => {
     leavingPage = true;
+    speechRequest?.abort();
+    replyAudio.pause();
+    if (audioUrl) URL.revokeObjectURL(audioUrl);
     // Don't upload a clip when the user leaves the page.
     if (recorder) recorder.onstop = null;
     releaseMicrophone();

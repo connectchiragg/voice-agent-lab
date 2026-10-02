@@ -6,8 +6,9 @@ import logging
 from uuid import UUID, uuid4
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
 
 from app.database import lifespan, load_history, stream_conversation
 from app import speech
@@ -18,6 +19,10 @@ conversation_locks: dict[str, asyncio.Lock] = {}
 
 app = FastAPI(title="Voice Agent Lab", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=STATIC_DIRECTORY), name="static")
+
+
+class SpeechRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=speech.MAX_SPEECH_CHARACTERS, strict=True)
 
 
 @app.get("/")
@@ -46,6 +51,15 @@ async def transcribe_audio(request: Request) -> dict[str, str]:
         return {"text": await speech.transcribe(bytes(audio), media_type)}
     except speech.SpeechError as error:
         raise HTTPException(error.status_code, str(error)) from error
+
+
+@app.post("/api/speak")
+async def speak_reply(request: SpeechRequest) -> Response:
+    try:
+        audio = await speech.synthesize(request.text)
+    except speech.SpeechError as error:
+        raise HTTPException(error.status_code, str(error)) from error
+    return Response(audio, media_type="audio/wav", headers={"Cache-Control": "no-store"})
 
 
 @app.websocket("/ws/chat")
