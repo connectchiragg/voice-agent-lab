@@ -28,7 +28,11 @@ async def stream_reply(message: str, history: list[dict]) -> AsyncIterator[str]:
         stream = await client.models.generate_content_stream(
             model=os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite"),
             contents=contents,
-            config=types.GenerateContentConfig(max_output_tokens=1024),
+            config=types.GenerateContentConfig(
+                max_output_tokens=1024,
+                system_instruction="You are a voice assistant. Reply in English, conversationally, "
+                "in at most 200 characters. Avoid Markdown. Ask to continue if more detail is needed.",
+            ),
         )
         has_text = False
         finish_reason = None

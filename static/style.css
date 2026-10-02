@@ -4,13 +4,7 @@ main { max-width: 720px; margin: 48px auto; padding: 24px; }
 h1 { font-size: 28px; }
 #status { color: #b5b8cf; }
 #messages { min-height: 260px; max-height: 50vh; overflow-y: auto; border: 1px solid #41445a; border-radius: 8px; padding: 16px; margin-bottom: 24px; overflow-wrap: anywhere; }
-label { display: block; margin-bottom: 8px; }
-.composer { display: flex; gap: 12px; }
-input { flex: 1; min-width: 0; background: #242638; color: inherit; border: 1px solid #60657d; border-radius: 6px; padding: 12px; font: inherit; }
 button { background: #b7c4ff; color: #171923; border: 0; border-radius: 6px; padding: 12px 20px; font: inherit; cursor: pointer; }
 button:disabled { opacity: 0.5; cursor: not-allowed; }
-fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
 .speech-controls { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
-#speech-status { color: #b5b8cf; font-size: 14px; }
-#playback-status { color: #b5b8cf; font-size: 14px; }
-.play-speech { display: block; margin-top: 8px; padding: 6px 12px; font-size: 14px; }
+.speech-controls span { color: #b5b8cf; font-size: 14px; }
