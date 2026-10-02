@@ -5,11 +5,12 @@ import asyncio
 import logging
 from uuid import UUID, uuid4
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.database import lifespan, load_history, stream_conversation
+from app import speech
 
 STATIC_DIRECTORY = Path(__file__).resolve().parent.parent / "static"
 logger = logging.getLogger("uvicorn.error")
@@ -27,6 +28,24 @@ async def home():
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+@app.post("/api/transcribe")
+async def transcribe_audio(request: Request) -> dict[str, str]:
+    media_type = request.headers.get("content-type", "").split(";")[0].strip().lower()
+    if media_type not in speech.AUDIO_FILENAMES:
+        raise HTTPException(415, "Send WebM, MP4, Ogg, WAV or MP3 audio.")
+    audio = bytearray()
+    async for chunk in request.stream():
+        if len(audio) + len(chunk) > speech.MAX_AUDIO_BYTES:
+            raise HTTPException(413, "Recording exceeds the 5 MB limit.")
+        audio.extend(chunk)
+    if not audio:
+        raise HTTPException(400, "The recording is empty.")
+    try:
+        return {"text": await speech.transcribe(bytes(audio), media_type)}
+    except speech.SpeechError as error:
+        raise HTTPException(error.status_code, str(error)) from error
 
 
 @app.websocket("/ws/chat")

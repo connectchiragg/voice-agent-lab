@@ -8,3 +8,7 @@ label { display: block; margin-bottom: 8px; }
 .composer { display: flex; gap: 12px; }
 input { flex: 1; min-width: 0; background: #242638; color: inherit; border: 1px solid #60657d; border-radius: 6px; padding: 12px; font: inherit; }
 button { background: #b7c4ff; color: #171923; border: 0; border-radius: 6px; padding: 12px 20px; font: inherit; cursor: pointer; }
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
+.speech-controls { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
+#speech-status { color: #b5b8cf; font-size: 14px; }

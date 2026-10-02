@@ -11,6 +11,28 @@ IDs identify conversations; they are not login credentials.
 Create a local `.env` from `.env.example` and fill in your Gemini API key.
 Prompts are sent to Google. Never put credentials in frontend code or Git.
 
+## Speech input (first audio increment)
+
+Set `GROQ_API_KEY` in the backend `.env`, then restart the app. Text chat still
+works without this key. `GROQ_TRANSCRIPTION_MODEL` defaults to
+`whisper-large-v3-turbo`: a speed-oriented multilingual transcription model.
+We use the Groq SDK for typed async calls, with a 30-second provider timeout
+and no automatic retries.
+
+Click Record, allow microphone access, then Stop. The browser sends one
+complete audio clip to `/api/transcribe`. The transcript fills the existing
+message field: review/edit it and click Send to use our unchanged Gemini and
+LangGraph flow. Transcribing alone does not add a conversation turn.
+
+- Requires localhost or HTTPS and browser microphone permission.
+- The UI stops recording after 60 seconds; the backend limits uploads to 5 MB.
+- WebM/MP4/Ogg browser recordings and WAV/MP3 uploads are accepted.
+- Audio goes to Groq and is held temporarily in memory, not saved to disk or PostgreSQL.
+- A failed transcription leaves existing typed text and chat history unchanged.
+- No continuous listening, streaming transcription or automatic message submission.
+- Browser recordings are uploaded as captured; we do not implement resampling yet.
+- Free quotas vary by account; see https://console.groq.com/docs/rate-limits.
+
 ## Run locally
 
 ```sh
@@ -34,6 +56,7 @@ python -m pytest
 4. `app/llm.py`: sends history and the new message to Gemini, without tools.
 5. `app/database.py`: typed conversation state, Gemini graph node, and PostgreSQL checkpoints.
 6. `tests/test_app.py`: local tests with a mocked provider and an in-memory LangGraph checkpointer.
+7. `app/speech.py` and `static/speech.js`: speech provider calls and browser recording, separate from chat.
 
 ## Completed milestone: conversation history
 

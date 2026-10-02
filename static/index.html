@@ -6,6 +6,7 @@
     <title>Voice Agent Lab</title>
     <link rel="stylesheet" href="/static/style.css" />
     <script src="/static/chat.js" defer></script>
+    <script src="/static/speech.js" defer></script>
   </head>
   <body>
     <main>
@@ -14,12 +15,18 @@
       <button id="new-conversation" type="button">New conversation</button>
       <p id="status" role="status">Connecting…</p>
       <section id="messages" role="log" aria-label="Chat messages"></section>
+      <div class="speech-controls">
+        <button id="record" type="button">Record</button>
+        <span id="speech-status" role="status">Record up to 60 seconds, then edit and send the transcript.</span>
+      </div>
       <form id="chat-form">
-        <label for="message">Message</label>
-        <div class="composer">
-          <input id="message" autocomplete="off" required placeholder="Hello" />
-          <button type="submit">Send</button>
-        </div>
+        <fieldset id="message-controls">
+          <label for="message">Message</label>
+          <div class="composer">
+            <input id="message" autocomplete="off" required placeholder="Hello" />
+            <button type="submit">Send</button>
+          </div>
+        </fieldset>
       </form>
     </main>
   </body>
