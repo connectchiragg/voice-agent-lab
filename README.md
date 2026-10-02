@@ -41,6 +41,8 @@ to `/api/speak`, which calls Groq and returns WAV bytes; the browser plays them.
 `GROQ_SPEECH_VOICE` defaults to `troy`, using the same backend key as transcription.
 
 - English output only. Multilingual transcription does not imply multilingual TTS.
+- Before first use, Groq may require your account's org admin to accept Orpheus
+  model terms in the Groq console. The app reports this setup requirement explicitly.
 - Groq currently limits Orpheus input to 200 characters. Longer text replies stay
   intact but cannot be played yet; we do not truncate, summarize or split them.
 - Only completed replies get Play. Interrupted text remains visible as before.

@@ -175,3 +175,13 @@ def test_invalid_speech_does_not_call_provider(
 def test_speech_rejects_invalid_audio(groq_stub: Callable[[ProviderHandler], None]) -> None:
     groq_stub(lambda request: httpx.Response(200, content=b"not-a-wav"))
     assert speech_request("/api/speak").status_code == 502
+
+
+def test_speech_explains_missing_terms(groq_stub: Callable[[ProviderHandler], None]) -> None:
+    groq_stub(lambda request: httpx.Response(400, json={"error": {
+        "code": "model_terms_required", "message": "private provider details",
+    }}))
+    response = speech_request("/api/speak")
+    assert response.status_code == 503
+    assert "Accept Orpheus model terms" in response.json()["detail"]
+    assert "private" not in response.text

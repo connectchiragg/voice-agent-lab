@@ -41,6 +41,10 @@ def provider_error(error: APIError) -> SpeechError:
     if isinstance(error, APITimeoutError):
         return SpeechError(504, "Groq timed out. Please try again.")
     if isinstance(error, APIStatusError):
+        body = error.body if isinstance(error.body, dict) else {}
+        details = body.get("error", body)
+        if isinstance(details, dict) and details.get("code") == "model_terms_required":
+            return SpeechError(503, "Accept Orpheus model terms in your Groq console, then retry speech.")
         if error.status_code == 429:
             return SpeechError(429, "Groq's rate limit was reached. Wait before trying again.")
         if error.status_code in (401, 403):
