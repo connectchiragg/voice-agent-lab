@@ -14,6 +14,7 @@ from pydantic import BaseModel, ValidationError
 
 from app import speech
 from app.database import lifespan, load_history
+from app.events import AudioChunk, EventType, VoiceEvent
 from app.voice import voice_turn
 
 STATIC_DIRECTORY = Path(__file__).resolve().parent.parent / "static"
@@ -57,8 +58,8 @@ async def home() -> FileResponse:
 
 
 async def protocol_error(socket: WebSocket, message: str) -> None:
-    await socket.send_json({"type": "error", "error": message})
-    await socket.send_json({"type": "done"})
+    await socket.send_json(VoiceEvent(EventType.ERROR, error=message).to_payload())
+    await socket.send_json(VoiceEvent(EventType.DONE).to_payload())
 
 
 @app.websocket("/ws/voice")
@@ -116,9 +117,9 @@ async def voice(socket: WebSocket) -> None:
             async with lock:
                 async with aclosing(voice_turn(conversation_id, audio, recording_type)) as stream:
                     async for event in stream:
-                        if isinstance(event, bytes):
-                            await socket.send_bytes(event)
+                        if isinstance(event, AudioChunk):
+                            await socket.send_bytes(event.data)
                         else:
-                            await socket.send_json(event)
+                            await socket.send_json(event.to_payload())
     except WebSocketDisconnect:
         pass

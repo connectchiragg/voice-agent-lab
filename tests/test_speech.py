@@ -2,7 +2,7 @@
 
 import asyncio
 import json
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from io import BytesIO
 import wave
 
@@ -11,6 +11,7 @@ import pytest
 from groq import AsyncGroq
 
 from app import speech
+from app.events import AudioChunk, AudioFormat
 
 ProviderHandler = Callable[[httpx.Request], httpx.Response]
 
@@ -32,9 +33,13 @@ def groq_stub(monkeypatch: pytest.MonkeyPatch) -> Callable[[ProviderHandler], No
     return configure
 
 
-def speech_call(operation: str) -> str | bytes:
+async def collect_speech(text: str) -> list[AudioFormat | AudioChunk]:
+    return [part async for part in speech.stream_speech(text)]
+
+
+def speech_call(operation: str) -> str | list[AudioFormat | AudioChunk]:
     if operation == "tts":
-        return asyncio.run(speech.synthesize("Hello."))
+        return asyncio.run(collect_speech("Hello."))
     return asyncio.run(speech.transcribe(b"audio", "audio/wav"))
 
 
@@ -122,7 +127,9 @@ def test_speech_contract(groq_stub: Callable[[ProviderHandler], None], text: str
         return httpx.Response(200, content=wav, headers={"Content-Type": "audio/wav"})
 
     groq_stub(provider)
-    assert asyncio.run(speech.synthesize(text)) == wav
+    assert asyncio.run(collect_speech(text)) == [
+        AudioFormat(sample_rate=24000, channels=1), AudioChunk(b"\x00\x00" * 240),
+    ]
 
 
 @pytest.mark.parametrize("text", ["", " ", "x" * 201])
@@ -131,7 +138,7 @@ def test_invalid_speech_does_not_call_provider(monkeypatch: pytest.MonkeyPatch, 
         pytest.fail("Invalid text must not reach Groq.")
     monkeypatch.setattr(speech, "create_client", unexpected_call)
     with pytest.raises(speech.SpeechError) as error:
-        asyncio.run(speech.synthesize(text))
+        asyncio.run(collect_speech(text))
     assert error.value.status_code == 422
 
 
@@ -149,4 +156,56 @@ def test_speech_explains_missing_terms(groq_stub: Callable[[ProviderHandler], No
     with pytest.raises(speech.SpeechError, match="Accept Orpheus model terms") as error:
         speech_call("tts")
     assert error.value.status_code == 503
+    assert "private" not in str(error.value)
+
+
+def test_speech_is_progressive_and_closes_on_cancellation(groq_stub: Callable[[ProviderHandler], None]) -> None:
+    buffer = BytesIO()
+    with wave.open(buffer, "wb") as audio:
+        audio.setnchannels(1)
+        audio.setsampwidth(2)
+        audio.setframerate(24000)
+        audio.writeframes(b"\x01\x00\x02\x00")
+    data = buffer.getvalue()
+
+    class Body(httpx.AsyncByteStream):
+        chunks_read = 0
+        closed = False
+
+        async def __aiter__(self) -> AsyncIterator[bytes]:
+            self.chunks_read += 1
+            yield data[:46]  # Header and one complete sample.
+            self.chunks_read += 1
+            yield data[46:]
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    body = Body()
+    groq_stub(lambda request: httpx.Response(200, stream=body))
+
+    async def exercise() -> None:
+        stream = speech.stream_speech("Hello.")
+        assert await anext(stream) == AudioFormat(24000, 1)
+        assert await anext(stream) == AudioChunk(b"\x01\x00")
+        assert body.chunks_read == 1  # Audio is yielded without reading the final chunk.
+        await stream.aclose()
+        assert body.closed
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("error_class, status", [(httpx.ReadError, 502), (httpx.ReadTimeout, 504)])
+def test_midstream_transport_failure_is_safe(
+    groq_stub: Callable[[ProviderHandler], None], error_class: type[httpx.TransportError], status: int,
+) -> None:
+    class Body(httpx.AsyncByteStream):
+        async def __aiter__(self) -> AsyncIterator[bytes]:
+            yield b"RIFF"
+            raise error_class("private provider details")
+
+    groq_stub(lambda request: httpx.Response(200, stream=Body()))
+    with pytest.raises(speech.SpeechError) as error:
+        speech_call("tts")
+    assert error.value.status_code == status
     assert "private" not in str(error.value)

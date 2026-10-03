@@ -2,10 +2,15 @@
 
 import logging
 import os
+from collections.abc import AsyncIterator
 from pathlib import Path
 
 from dotenv import load_dotenv
 from groq import APIError, APIStatusError, APITimeoutError, AsyncGroq
+from httpx import TimeoutException, TransportError
+
+from app.audio import AudioDecodeError, WavStreamDecoder
+from app.events import AudioChunk, AudioFormat
 
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 logger = logging.getLogger("uvicorn.error")
@@ -76,22 +81,34 @@ async def transcribe(audio: bytes, media_type: str) -> str:
     return transcript
 
 
-async def synthesize(text: str) -> bytes:
-    """Generate one short English reply as WAV audio, held only in memory."""
+async def stream_speech(text: str) -> AsyncIterator[AudioFormat | AudioChunk]:
+    """Yield format once, then aligned PCM chunks as Groq's WAV arrives."""
     text = text.strip()
     if not text or len(text) > MAX_SPEECH_CHARACTERS:
         raise SpeechError(422, "Speech requires between 1 and 200 characters.")
     try:
         async with create_client() as client:
-            response = await client.audio.speech.create(
+            async with client.audio.speech.with_streaming_response.create(
                 model=os.getenv("GROQ_SPEECH_MODEL", "canopylabs/orpheus-v1-english"),
                 voice=os.getenv("GROQ_SPEECH_VOICE", "troy"),
                 input=text,
                 response_format="wav",
-            )
-            audio = await response.read()
+            ) as response:
+                decoder = WavStreamDecoder()
+                announced_format = False
+                async for chunk in response.iter_bytes():
+                    pcm = decoder.feed(chunk)
+                    if decoder.format is not None and not announced_format:
+                        yield decoder.format
+                        announced_format = True
+                    if pcm:
+                        yield AudioChunk(pcm)
+                decoder.finish()
     except APIError as error:
         raise provider_error(error) from error
-    if audio[:4] != b"RIFF" or audio[8:12] != b"WAVE":
-        raise SpeechError(502, "Groq did not return WAV audio. Please try again.")
-    return audio
+    except AudioDecodeError as error:
+        raise SpeechError(502, str(error)) from error
+    except TimeoutException as error:
+        raise SpeechError(504, "Groq timed out while streaming speech. Please try again.") from error
+    except TransportError as error:
+        raise SpeechError(502, "Groq's speech stream was interrupted. Please try again.") from error

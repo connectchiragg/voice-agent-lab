@@ -1,7 +1,8 @@
+import {StreamAudioPlayer} from "./audio-player.js";
+
 const recordButton = document.querySelector("#record");
 const messages = document.querySelector("#messages");
 const status = document.querySelector("#status");
-const replyAudio = document.querySelector("#reply-audio");
 const microphoneSupported = Boolean(navigator.mediaDevices?.getUserMedia && window.MediaRecorder);
 let recorder = null;
 let microphone = null;
@@ -9,8 +10,15 @@ let recordingTimer = null;
 let leavingPage = false;
 let busy = true;
 let playing = false;
-let assistantMessage = null;
-let audioUrl = null;
+let turnError = false;
+let audioFailed = false;
+const player = new StreamAudioPlayer(active => {
+  playing = active;
+  if (!active && !busy && !turnError && socket.readyState === WebSocket.OPEN) {
+    status.textContent = "Ready. Click Record for another turn.";
+  }
+  updateButton();
+});
 
 let conversationId = sessionStorage.getItem("conversationId");
 if (!conversationId) {
@@ -41,28 +49,24 @@ function releaseMicrophone() {
   recordButton.textContent = "Record";
 }
 
-async function playReply(bytes) {
-  playing = true;
-  updateButton();
-  if (audioUrl) URL.revokeObjectURL(audioUrl);
-  audioUrl = URL.createObjectURL(new Blob([bytes], {type: "audio/wav"}));
-  replyAudio.src = audioUrl;
-  replyAudio.hidden = false;
-  try {
-    await replyAudio.play();
-    status.textContent = "Playing reply…";
-  } catch (error) {
-    playing = false;
-    status.textContent = error.name === "NotAllowedError"
-      ? "Audio is ready. Your browser requires Play in the audio controls."
-      : "Audio playback failed. The text reply is still saved.";
-    updateButton();
-  }
+function playbackFailed() {
+  audioFailed = true;
+  turnError = true;
+  player.reset();
+  status.textContent = "Audio playback failed. The text reply is still saved; record again to retry.";
+  displayMessage("Error", status.textContent);
 }
 
 socket.onmessage = event => {
   if (typeof event.data !== "string") {
-    playReply(event.data);
+    if (!audioFailed) {
+      try {
+        player.enqueue(event.data);
+        status.textContent = "Playing streamed reply…";
+      } catch {
+        playbackFailed();
+      }
+    }
     return;
   }
   const message = JSON.parse(event.data);
@@ -80,59 +84,52 @@ socket.onmessage = event => {
     status.textContent = "Transcribing…";
   } else if (message.type === "transcript") {
     displayMessage("You", message.text);
-  } else if (message.type === "start") {
-    assistantMessage = displayMessage("Gemini", "");
+  } else if (message.type === "generating") {
     status.textContent = "Waiting for Gemini…";
-  } else if (message.type === "delta") {
-    assistantMessage.appendChild(document.createTextNode(message.text));
-    messages.scrollTop = messages.scrollHeight;
-    status.textContent = "Receiving reply…";
   } else if (message.type === "reply_complete") {
-    assistantMessage = null;
+    displayMessage("Gemini", message.text);
   } else if (message.type === "synthesizing") {
     status.textContent = "Generating speech…";
   } else if (message.type === "interrupted") {
-    assistantMessage?.appendChild(document.createTextNode(" [Interrupted]"));
+    displayMessage("Gemini", message.text + " [Interrupted]");
     displayMessage("Error", message.error);
-    assistantMessage = null;
+    turnError = true;
+    status.textContent = message.error;
+  } else if (message.type === "audio_start") {
+    try {
+      player.start(message.format);
+    } catch {
+      playbackFailed();
+    }
+  } else if (message.type === "audio_end") {
+    player.finish();
   } else if (message.type === "error" || message.type === "notice") {
     displayMessage(message.type === "error" ? "Error" : "Notice", message.error || message.text);
+    turnError = true;
+    status.textContent = message.error || message.text;
   } else if (message.type === "done") {
     busy = false;
-    assistantMessage = null;
-    if (!playing) status.textContent = "Ready. Click Record for another turn.";
+    if (!playing && !turnError) status.textContent = "Ready. Click Record for another turn.";
     updateButton();
   }
 };
 socket.onclose = () => {
   if (recorder) recorder.onstop = null;
   releaseMicrophone();
-  replyAudio.pause();
-  assistantMessage?.appendChild(document.createTextNode(" [Connection lost]"));
+  player.reset();
   status.textContent = "Disconnected. Reload to reconnect.";
   updateButton();
 };
 socket.onerror = () => { status.textContent = "Connection error."; };
-replyAudio.onplay = () => { playing = true; updateButton(); };
-replyAudio.onpause = () => { playing = false; updateButton(); };
-replyAudio.onended = () => {
-  playing = false;
-  status.textContent = "Ready. Click Record for another turn.";
-  updateButton();
-};
-replyAudio.onerror = () => {
-  playing = false;
-  status.textContent = "Audio playback failed. The text reply is still saved.";
-  updateButton();
-};
-
 async function startRecording() {
   busy = true;
+  turnError = false;
+  audioFailed = false;
   updateButton();
-  replyAudio.pause();
-  replyAudio.hidden = true;
+  player.reset();
   status.textContent = "Waiting for microphone permission…";
   try {
+    await player.unlock();
     microphone = await navigator.mediaDevices.getUserMedia({audio: true});
     if (leavingPage || socket.readyState !== WebSocket.OPEN) {
       releaseMicrophone();
@@ -208,7 +205,6 @@ window.addEventListener("pagehide", () => {
   leavingPage = true;
   if (recorder) recorder.onstop = null;
   releaseMicrophone();
-  replyAudio.pause();
-  if (audioUrl) URL.revokeObjectURL(audioUrl);
+  player.close();
   socket.close();
 });

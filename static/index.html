@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Voice Agent Lab</title>
     <link rel="stylesheet" href="/static/style.css" />
-    <script src="/static/voice.js" defer></script>
+    <script src="/static/voice.js" type="module"></script>
   </head>
   <body>
     <main>
@@ -14,7 +14,6 @@
       <button id="new-conversation" type="button">New conversation</button>
       <p id="status" role="status">Connecting…</p>
       <section id="messages" role="log" aria-label="Chat messages"></section>
-      <audio id="reply-audio" controls hidden></audio>
       <div class="speech-controls">
         <button id="record" type="button" disabled>Record</button>
         <span>Up to 60 seconds. English speech replies up to 200 characters.</span>

@@ -2,7 +2,7 @@
 
 A local learning project with one voice API: `/ws/voice`.
 Click Record, speak, then Stop. The server transcribes the completed recording,
-runs the Gemini/LangGraph conversation, and returns audio for automatic playback.
+runs the Gemini/LangGraph conversation, and streams audio for automatic playback.
 Visible transcripts are debugging output, not a text-chat input.
 
 The old `/ws/chat`, `/api/transcribe`, `/api/speak`, health endpoint and API docs
@@ -46,11 +46,18 @@ We deliberately still send one completed clip, not live microphone frames.
 Server events, in order on a successful short reply:
 
 - `transcribing`, then `transcript` with recognized text.
-- `start`, then `delta` text events from Gemini.
-- `reply_complete`: Gemini's completed text is saved.
-- `synthesizing`, then `audio` with `media_type: audio/wav`.
-- One binary message containing the complete WAV.
+- `generating`: Gemini runs and checkpoints its text internally.
+- `reply_complete` with `text`: the saved reply is shown once, not token by token.
+- `synthesizing`, then `audio_start` with a `format`, for example:
+  `{"sample_rate":24000,"channels":1,"encoding":"pcm_s16le"}`.
+- Multiple binary messages containing aligned signed 16-bit little-endian PCM.
+  Format is announced once per reply, not before each chunk.
+- `audio_end` with `partial: false` (or `true` after a speech-stream failure).
 - `done`: the server is ready for another turn.
+
+The browser schedules arriving PCM chunks with Web Audio. It can play before the
+provider finishes sending the response. `done` does not mean playback has finished;
+Record stays disabled until the scheduled audio drains.
 
 Errors are visible as `error` or `interrupted` events; `notice` explains limitations.
 A failed turn finishes with `done` so another recording can be attempted.
@@ -65,19 +72,23 @@ is still limited. Reload to reconnect. Existing history is never automatically s
 - `GROQ_SPEECH_MODEL` defaults to `canopylabs/orpheus-v1-english`,
   with `GROQ_SPEECH_VOICE=troy`. Both speech stages use the same backend key.
 - Groq provider requests use a 30-second timeout and no automatic retries.
+  The complete TTS stream also has a 45-second deadline.
 - Speech output is English and limited to 200 characters. Gemini is asked to stay
   within that limit, but the server still checks it. Oversized replies stay intact
   as text; no truncation, summarization, splitting or TTS call is performed.
 - Groq may require the org admin to accept Orpheus model terms before first use.
 - After Stop, transcription, Gemini and TTS happen automatically on the same socket.
   Record is disabled during processing and active playback.
-- Browser audio controls can pause/replay the current WAV. If autoplay is blocked,
-  the controls provide a fallback. Playback completion is local, not server-acknowledged.
+- Clicking Record unlocks Web Audio playback. Chunks play automatically with a small
+  initial buffer. This increment does not retain a replayable WAV or provide the old
+  file-based pause/replay controls. Playback completion is local, not server-acknowledged.
 - Transcription failure creates no conversation turn. Gemini failure preserves
   successfully checkpointed partial text. TTS failure does not undo completed text.
 - Microphone and generated audio are held temporarily in memory, not saved to disk
   or PostgreSQL. Audio goes to Groq; transcripts and context go to Google.
-- No continuous listening, streaming ASR/TTS, sentence chunking, tools, VAD,
+- Input transcription is still complete-clip. Gemini finishes before TTS begins;
+  there is no LLM/TTS overlap, background producer, or sentence chunking.
+- No continuous listening, streaming ASR, tools, VAD,
   barge-in, automatic reconnect, authentication, telephony or deployment yet.
 
 This is local-only learning scaffolding, not a production service.
@@ -90,8 +101,11 @@ and https://console.groq.com/docs/rate-limits.
 2. `app/voice.py`: one recording through ASR, conversation generation and TTS.
 3. `static/voice.js`: browser recording, protocol events and automatic playback.
 4. `app/speech.py`: direct Groq speech calls and safe provider errors.
-5. `app/llm.py`: Gemini text streaming with short English voice-style replies.
-6. `app/database.py`: LangGraph conversation state and PostgreSQL checkpoints.
+5. `app/events.py`: small event enums/dataclasses and the PCM audio format.
+6. `app/audio.py` and `static/audio-player.js`: strip the streamed WAV header,
+   preserve complete sample frames, and schedule browser playback.
+7. `app/llm.py`: Gemini text streaming with short English voice-style replies.
+8. `app/database.py`: LangGraph conversation state and PostgreSQL checkpoints.
 
 ## Conversation persistence
 
