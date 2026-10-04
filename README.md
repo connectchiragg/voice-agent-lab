@@ -26,6 +26,7 @@ Open http://127.0.0.1:8000. Microphone recording needs localhost/HTTPS and permi
 
 ```sh
 python -m pytest
+node --test tests/audio-player.test.mjs
 ```
 
 ## Voice WebSocket protocol
@@ -45,18 +46,27 @@ We deliberately still send one completed clip, not live microphone frames.
 
 Server events, in order on a successful short reply:
 
-- `transcribing`, then `transcript` with recognized text.
-- `generating`: Gemini runs and checkpoints its text internally.
+- `transcript` with recognized text; Gemini then runs and checkpoints internally.
 - `reply_complete` with `text`: the saved reply is shown once, not token by token.
-- `synthesizing`, then `audio_start` with a `format`, for example:
-  `{"sample_rate":24000,"channels":1,"encoding":"pcm_s16le"}`.
-- Multiple binary messages containing aligned signed 16-bit little-endian PCM.
-  Format is announced once per reply, not before each chunk.
+- `audio_start` when the first provider audio chunk is ready.
+- Multiple binary messages containing the original WAV stream, unchanged.
+  The WAV header carries sample rate/channels; it can span multiple messages.
 - `audio_end` with `partial: false` (or `true` after a speech-stream failure).
 - `done`: the server is ready for another turn.
 
-The browser schedules arriving PCM chunks with Web Audio. It can play before the
-provider finishes sending the response. `done` does not mean playback has finished;
+The browser uses the bundled `@audio/decode-wav` 2.0.0 library to incrementally
+decode WAV chunks, then schedules samples with Web Audio. The backend has no WAV
+parser. No separate sample-format event or hardcoded provider sample rate is needed.
+The library is vendored unchanged with its MIT license and npm integrity recorded
+under `static/vendor/decode-wav`; no CDN, npm install or frontend build is required.
+The pinned library is not a strict WAV validator: it drops incomplete trailing
+samples and cannot parse odd-sized padded metadata chunks. Groq's observed header
+works; malformed/unsupported headers or streams with no playable samples show a
+playback error. Provider transport failures still surface separately.
+
+The UI infers progress from recording/transcript/reply events instead of receiving
+three additional progress-only events. Playback can begin before the provider
+finishes sending the response. `done` does not mean playback has finished;
 Record stays disabled until the scheduled audio drains.
 
 Errors are visible as `error` or `interrupted` events; `notice` explains limitations.
@@ -101,9 +111,8 @@ and https://console.groq.com/docs/rate-limits.
 2. `app/voice.py`: one recording through ASR, conversation generation and TTS.
 3. `static/voice.js`: browser recording, protocol events and automatic playback.
 4. `app/speech.py`: direct Groq speech calls and safe provider errors.
-5. `app/events.py`: small event enums/dataclasses and the PCM audio format.
-6. `app/audio.py` and `static/audio-player.js`: strip the streamed WAV header,
-   preserve complete sample frames, and schedule browser playback.
+5. `app/events.py`: small event enums/dataclasses.
+6. `static/audio-player.js`: delegate WAV decoding to the library and schedule playback.
 7. `app/llm.py`: Gemini text streaming with short English voice-style replies.
 8. `app/database.py`: LangGraph conversation state and PostgreSQL checkpoints.
 

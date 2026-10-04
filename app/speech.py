@@ -9,8 +9,7 @@ from dotenv import load_dotenv
 from groq import APIError, APIStatusError, APITimeoutError, AsyncGroq
 from httpx import TimeoutException, TransportError
 
-from app.audio import AudioDecodeError, WavStreamDecoder
-from app.events import AudioChunk, AudioFormat
+from app.events import AudioChunk
 
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 logger = logging.getLogger("uvicorn.error")
@@ -30,6 +29,10 @@ class SpeechError(Exception):
     def __init__(self, status_code: int, message: str) -> None:
         super().__init__(message)
         self.status_code = status_code
+
+
+class SpeechInputError(SpeechError):
+    """A completed reply cannot be spoken within this learning phase's limit."""
 
 
 def create_client() -> AsyncGroq:
@@ -81,33 +84,29 @@ async def transcribe(audio: bytes, media_type: str) -> str:
     return transcript
 
 
-async def stream_speech(text: str) -> AsyncIterator[AudioFormat | AudioChunk]:
-    """Yield format once, then aligned PCM chunks as Groq's WAV arrives."""
-    text = text.strip()
-    if not text or len(text) > MAX_SPEECH_CHARACTERS:
-        raise SpeechError(422, "Speech requires between 1 and 200 characters.")
+async def stream_speech(text: str) -> AsyncIterator[AudioChunk]:
+    """Validate once, then forward Groq's WAV chunks without decoding them."""
+    speech_text = text.strip()
+    if not speech_text or len(text) > MAX_SPEECH_CHARACTERS:
+        raise SpeechInputError(422,
+            "Speech supports nonempty replies up to 200 characters. Full text is saved; audio was skipped.")
     try:
         async with create_client() as client:
             async with client.audio.speech.with_streaming_response.create(
                 model=os.getenv("GROQ_SPEECH_MODEL", "canopylabs/orpheus-v1-english"),
                 voice=os.getenv("GROQ_SPEECH_VOICE", "troy"),
-                input=text,
+                input=speech_text,
                 response_format="wav",
             ) as response:
-                decoder = WavStreamDecoder()
-                announced_format = False
+                received_audio = False
                 async for chunk in response.iter_bytes():
-                    pcm = decoder.feed(chunk)
-                    if decoder.format is not None and not announced_format:
-                        yield decoder.format
-                        announced_format = True
-                    if pcm:
-                        yield AudioChunk(pcm)
-                decoder.finish()
+                    if chunk:
+                        received_audio = True
+                        yield AudioChunk(chunk)
+                if not received_audio:
+                    raise SpeechError(502, "Groq returned no speech audio. Please try again.")
     except APIError as error:
         raise provider_error(error) from error
-    except AudioDecodeError as error:
-        raise SpeechError(502, str(error)) from error
     except TimeoutException as error:
         raise SpeechError(504, "Groq timed out while streaming speech. Please try again.") from error
     except TransportError as error:

@@ -1,10 +1,13 @@
-// The server removes the WAV header. Each binary message contains signed PCM.
+import {decoder} from "./vendor/decode-wav/decode-wav.js";
+
+// WAV parsing belongs to the library; this class only schedules decoded samples.
 export class StreamAudioPlayer {
   constructor(onActiveChange) {
     this.onActiveChange = onActiveChange;
     this.context = null;
     this.sources = new Set();
-    this.format = null;
+    this.decoder = null;
+    this.hasAudio = false;
     this.nextStartTime = 0;
     this.streamEnded = true;
   }
@@ -17,32 +20,25 @@ export class StreamAudioPlayer {
     if (this.context.state !== "running") throw new Error("Audio playback is blocked.");
   }
 
-  start(format) {
+  start() {
     if (!this.context || this.context.state !== "running") throw new Error("Audio playback is blocked.");
-    if (format.encoding !== "pcm_s16le" || ![1, 2].includes(format.channels) ||
-        !Number.isInteger(format.sample_rate) || format.sample_rate < 8000 || format.sample_rate > 96000) {
-      throw new Error("Unsupported audio format.");
-    }
     this.reset();
-    this.format = format;
+    this.decoder = decoder();
     this.streamEnded = false;
     this.nextStartTime = this.context.currentTime + 0.08;
     this.onActiveChange(true);
   }
 
   enqueue(bytes) {
-    if (!this.format || this.streamEnded) throw new Error("Audio arrived outside a stream.");
-    const {channels, sample_rate: sampleRate} = this.format;
-    if (!bytes.byteLength || bytes.byteLength % (channels * 2)) throw new Error("Incomplete audio samples.");
-    const frames = bytes.byteLength / (channels * 2);
-    const buffer = this.context.createBuffer(channels, frames, sampleRate);
-    const samples = new DataView(bytes);
-    for (let channel = 0; channel < channels; channel++) {
-      const output = buffer.getChannelData(channel);
-      for (let frame = 0; frame < frames; frame++) {
-        output[frame] = samples.getInt16((frame * channels + channel) * 2, true) / 32768;
-      }
+    if (!this.decoder || this.streamEnded) throw new Error("Audio arrived outside a stream.");
+    const {channelData, sampleRate} = this.decoder.decode(new Uint8Array(bytes));
+    // Header-only chunks and partial samples need more input, not a playback error.
+    if (!channelData.length || !channelData[0].length) return false;
+    const buffer = this.context.createBuffer(channelData.length, channelData[0].length, sampleRate);
+    for (let channel = 0; channel < channelData.length; channel++) {
+      buffer.copyToChannel(channelData[channel], channel);
     }
+    this.hasAudio = true;
     const source = this.context.createBufferSource();
     source.buffer = buffer;
     source.connect(this.context.destination);
@@ -56,16 +52,19 @@ export class StreamAudioPlayer {
     const start = Math.max(this.nextStartTime, this.context.currentTime + 0.02);
     source.start(start);
     this.nextStartTime = start + buffer.duration;
+    return true;
   }
 
   finish() {
+    if (!this.hasAudio) throw new Error("Speech stream contained no playable audio.");
+    this.decoder?.free();
+    this.decoder = null;
     this.streamEnded = true;
     this.finishIfDrained();
   }
 
   finishIfDrained() {
     if (this.streamEnded && this.sources.size === 0) {
-      this.format = null;
       this.onActiveChange(false);
     }
   }
@@ -77,7 +76,9 @@ export class StreamAudioPlayer {
       source.disconnect();
     }
     this.sources.clear();
-    this.format = null;
+    this.decoder?.free();
+    this.decoder = null;
+    this.hasAudio = false;
     this.streamEnded = true;
     this.onActiveChange(false);
   }

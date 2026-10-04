@@ -61,8 +61,7 @@ socket.onmessage = event => {
   if (typeof event.data !== "string") {
     if (!audioFailed) {
       try {
-        player.enqueue(event.data);
-        status.textContent = "Playing streamed reply…";
+        if (player.enqueue(event.data)) status.textContent = "Playing streamed reply…";
       } catch {
         playbackFailed();
       }
@@ -80,15 +79,11 @@ socket.onmessage = event => {
     status.textContent = microphoneSupported
       ? "Ready. Click Record, speak, then Stop." : "Microphone recording requires a supported browser on localhost/HTTPS.";
     updateButton();
-  } else if (message.type === "transcribing") {
-    status.textContent = "Transcribing…";
   } else if (message.type === "transcript") {
     displayMessage("You", message.text);
-  } else if (message.type === "generating") {
     status.textContent = "Waiting for Gemini…";
   } else if (message.type === "reply_complete") {
     displayMessage("Gemini", message.text);
-  } else if (message.type === "synthesizing") {
     status.textContent = "Generating speech…";
   } else if (message.type === "interrupted") {
     displayMessage("Gemini", message.text + " [Interrupted]");
@@ -97,12 +92,18 @@ socket.onmessage = event => {
     status.textContent = message.error;
   } else if (message.type === "audio_start") {
     try {
-      player.start(message.format);
+      player.start();
     } catch {
       playbackFailed();
     }
   } else if (message.type === "audio_end") {
-    player.finish();
+    if (!audioFailed) {
+      try {
+        player.finish();
+      } catch {
+        playbackFailed();
+      }
+    }
   } else if (message.type === "error" || message.type === "notice") {
     displayMessage(message.type === "error" ? "Error" : "Notice", message.error || message.text);
     turnError = true;
@@ -169,7 +170,7 @@ async function startRecording() {
       }
       socket.send(JSON.stringify({type: "recording", media_type: clip.type}));
       socket.send(clip);
-      status.textContent = "Recording sent…";
+      status.textContent = "Transcribing…";
     };
     recorder.start(1000);
     recordingTimer = setTimeout(() => {

@@ -14,11 +14,11 @@ from starlette.testclient import WebSocketTestSession
 from starlette.websockets import WebSocketDisconnect
 
 from app import database, main, speech
-from app.events import AudioChunk, AudioFormat
+from app.events import AudioChunk
 
 client = TestClient(main.app)
-PCM = b"\x01\x00" * 240
-FORMAT = AudioFormat(sample_rate=24000, channels=1)
+WAV_CHUNK = b"provider-wav-bytes"
+real_stream_speech = speech.stream_speech
 
 
 @pytest.fixture
@@ -30,11 +30,10 @@ def storage(monkeypatch: pytest.MonkeyPatch) -> None:
         assert media_type in speech.AUDIO_FILENAMES
         return audio.decode()
 
-    async def stream_speech(text: str) -> AsyncIterator[AudioFormat | AudioChunk]:
+    async def stream_speech(text: str) -> AsyncIterator[AudioChunk]:
         assert 0 < len(text) <= 200
-        yield FORMAT
-        yield AudioChunk(PCM)
-        yield AudioChunk(PCM)
+        yield AudioChunk(WAV_CHUNK)
+        yield AudioChunk(WAV_CHUNK)
 
     async def stream(message: str, history: list[dict]) -> AsyncIterator[str]:
         yield "Hello"
@@ -95,18 +94,17 @@ def test_voice_turn_persistence_and_reconnect(monkeypatch: pytest.MonkeyPatch, s
         assert socket.receive_json() == {"type": "history", "messages": [], "conversation_id": cid}
         send_recording(socket, b"hi")
         events = receive_turn(socket)
-        assert events[:3] == [{"type": "transcribing"}, {"type": "transcript", "text": "hi"},
-                              {"type": "generating"}]
-        assert not any(isinstance(event, dict) and event["type"] in ("start", "delta") for event in events)
+        assert events[0] == {"type": "transcript", "text": "hi"}
+        assert not any(isinstance(event, dict) and event["type"] in
+                       ("start", "delta", "transcribing", "generating", "synthesizing") for event in events)
         assert "private" not in str(events)
         if fail:
             assert events[-2]["type"] == "interrupted"
-            assert PCM not in events
+            assert WAV_CHUNK not in events
         else:
-            assert events[3:] == [
-                {"type": "reply_complete", "text": "Hello there"}, {"type": "synthesizing"},
-                {"type": "audio_start", "format": {"sample_rate": 24000, "channels": 1, "encoding": "pcm_s16le"}},
-                PCM, PCM, {"type": "audio_end", "partial": False}, {"type": "done"},
+            assert events[1:] == [
+                {"type": "reply_complete", "text": "Hello there"}, {"type": "audio_start"},
+                WAV_CHUNK, WAV_CHUNK, {"type": "audio_end", "partial": False}, {"type": "done"},
             ]
     with client.websocket_connect(url) as socket:
         history = socket.receive_json()["messages"]
@@ -156,7 +154,7 @@ def test_failure_before_first_token_keeps_transcript(monkeypatch: pytest.MonkeyP
         assert history[1]["parts"][0]["text"] == ""
         assert history[1]["status"] == "interrupted"
         send_recording(socket, b"retry")
-        assert PCM in receive_turn(socket)
+        assert WAV_CHUNK in receive_turn(socket)
 
 
 def test_transcription_failure_does_not_save_turn_and_can_retry(monkeypatch: pytest.MonkeyPatch, storage: None) -> None:
@@ -174,18 +172,18 @@ def test_transcription_failure_does_not_save_turn_and_can_retry(monkeypatch: pyt
     with client.websocket_connect(f"/ws/voice?conversation_id={cid}") as socket:
         socket.receive_json()
         send_recording(socket, b"bad")
-        assert receive_turn(socket) == [{"type": "transcribing"}, {"type": "error", "error": "Speech quota reached"},
+        assert receive_turn(socket) == [{"type": "error", "error": "Speech quota reached"},
                                         {"type": "done"}]
         assert asyncio.run(database.load_history(cid)) == []
         send_recording(socket, b"good")
-        assert PCM in receive_turn(socket)
+        assert WAV_CHUNK in receive_turn(socket)
 
 
 def test_tts_failure_preserves_completed_text(monkeypatch: pytest.MonkeyPatch, storage: None) -> None:
     async def stream(message: str, history: list[dict]) -> AsyncIterator[str]:
         yield "Completed reply"
 
-    async def fail_tts(text: str) -> AsyncIterator[AudioFormat | AudioChunk]:
+    async def fail_tts(text: str) -> AsyncIterator[AudioChunk]:
         raise speech.SpeechError(503, "Speech unavailable")
         yield AudioChunk(b"")  # Make this a generator even when it fails before audio.
 
@@ -204,14 +202,13 @@ def test_tts_failure_preserves_completed_text(monkeypatch: pytest.MonkeyPatch, s
 def test_partial_audio_failure_can_retry(monkeypatch: pytest.MonkeyPatch, storage: None) -> None:
     attempts = 0
 
-    async def stream_speech(text: str) -> AsyncIterator[AudioFormat | AudioChunk]:
+    async def stream_speech(text: str) -> AsyncIterator[AudioChunk]:
         nonlocal attempts
         attempts += 1
-        yield FORMAT
-        yield AudioChunk(PCM)
+        yield AudioChunk(WAV_CHUNK)
         if attempts == 1:
             raise speech.SpeechError(502, "Speech stream interrupted")
-        yield AudioChunk(PCM)
+        yield AudioChunk(WAV_CHUNK)
 
     monkeypatch.setattr(speech, "stream_speech", stream_speech)
     cid = str(uuid4())
@@ -221,7 +218,7 @@ def test_partial_audio_failure_can_retry(monkeypatch: pytest.MonkeyPatch, storag
         events = receive_turn(socket)
         assert events[-3:] == [{"type": "error", "error": "Speech stream interrupted"},
                               {"type": "audio_end", "partial": True}, {"type": "done"}]
-        assert PCM in events
+        assert WAV_CHUNK in events
         assert asyncio.run(database.load_history(cid))[-1]["status"] == "completed"
         send_recording(socket, b"retry")
         assert receive_turn(socket)[-2:] == [{"type": "audio_end", "partial": False}, {"type": "done"}]
@@ -230,11 +227,10 @@ def test_partial_audio_failure_can_retry(monkeypatch: pytest.MonkeyPatch, storag
 def test_closing_turn_closes_its_speech_stream(monkeypatch: pytest.MonkeyPatch, storage: None) -> None:
     closed = False
 
-    async def stream_speech(text: str) -> AsyncIterator[AudioFormat | AudioChunk]:
+    async def stream_speech(text: str) -> AsyncIterator[AudioChunk]:
         nonlocal closed
         try:
-            yield FORMAT
-            yield AudioChunk(PCM)
+            yield AudioChunk(WAV_CHUNK)
             await asyncio.sleep(60)
         finally:
             closed = True
@@ -251,19 +247,19 @@ def test_closing_turn_closes_its_speech_stream(monkeypatch: pytest.MonkeyPatch, 
     asyncio.run(exercise())
 
 
-@pytest.mark.parametrize("reply", ["x" * 201, "x" * 200 + " "])
+@pytest.mark.parametrize("reply", ["x" * 201, "x" * 200 + " ", " "])
 def test_long_reply_is_saved_without_truncation_or_tts(
     monkeypatch: pytest.MonkeyPatch, storage: None, reply: str,
 ) -> None:
     async def stream(message: str, history: list[dict]) -> AsyncIterator[str]:
         yield reply
 
-    async def unexpected_tts(text: str) -> AsyncIterator[AudioFormat | AudioChunk]:
-        pytest.fail("Long replies must not reach TTS")
-        yield AudioChunk(b"")
+    def unexpected_provider() -> None:
+        pytest.fail("Invalid speech must not call the provider")
 
     monkeypatch.setattr(database, "stream_reply", stream)
-    monkeypatch.setattr(speech, "stream_speech", unexpected_tts)
+    monkeypatch.setattr(speech, "stream_speech", real_stream_speech)
+    monkeypatch.setattr(speech, "create_client", unexpected_provider)
     cid = str(uuid4())
     with client.websocket_connect(f"/ws/voice?conversation_id={cid}") as socket:
         socket.receive_json()
@@ -282,7 +278,7 @@ def test_invalid_headers_can_recover(storage: None, header: str) -> None:
         socket.send_text(header)
         assert receive_turn(socket)[0]["type"] == "error"
         send_recording(socket, b"hi")
-        assert PCM in receive_turn(socket)
+        assert WAV_CHUNK in receive_turn(socket)
 
 
 @pytest.mark.parametrize("audio", [b"", b"12345"])

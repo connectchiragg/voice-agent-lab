@@ -11,7 +11,7 @@ import pytest
 from groq import AsyncGroq
 
 from app import speech
-from app.events import AudioChunk, AudioFormat
+from app.events import AudioChunk
 
 ProviderHandler = Callable[[httpx.Request], httpx.Response]
 
@@ -33,11 +33,11 @@ def groq_stub(monkeypatch: pytest.MonkeyPatch) -> Callable[[ProviderHandler], No
     return configure
 
 
-async def collect_speech(text: str) -> list[AudioFormat | AudioChunk]:
+async def collect_speech(text: str) -> list[AudioChunk]:
     return [part async for part in speech.stream_speech(text)]
 
 
-def speech_call(operation: str) -> str | list[AudioFormat | AudioChunk]:
+def speech_call(operation: str) -> str | list[AudioChunk]:
     if operation == "tts":
         return asyncio.run(collect_speech("Hello."))
     return asyncio.run(speech.transcribe(b"audio", "audio/wav"))
@@ -127,23 +127,21 @@ def test_speech_contract(groq_stub: Callable[[ProviderHandler], None], text: str
         return httpx.Response(200, content=wav, headers={"Content-Type": "audio/wav"})
 
     groq_stub(provider)
-    assert asyncio.run(collect_speech(text)) == [
-        AudioFormat(sample_rate=24000, channels=1), AudioChunk(b"\x00\x00" * 240),
-    ]
+    assert asyncio.run(collect_speech(text)) == [AudioChunk(wav)]
 
 
-@pytest.mark.parametrize("text", ["", " ", "x" * 201])
+@pytest.mark.parametrize("text", ["", " ", "x" * 201, "x" * 200 + " "])
 def test_invalid_speech_does_not_call_provider(monkeypatch: pytest.MonkeyPatch, text: str) -> None:
     def unexpected_call() -> AsyncGroq:
         pytest.fail("Invalid text must not reach Groq.")
     monkeypatch.setattr(speech, "create_client", unexpected_call)
-    with pytest.raises(speech.SpeechError) as error:
+    with pytest.raises(speech.SpeechInputError) as error:
         asyncio.run(collect_speech(text))
     assert error.value.status_code == 422
 
 
-def test_speech_rejects_invalid_audio(groq_stub: Callable[[ProviderHandler], None]) -> None:
-    groq_stub(lambda request: httpx.Response(200, content=b"not-a-wav"))
+def test_speech_rejects_empty_audio(groq_stub: Callable[[ProviderHandler], None]) -> None:
+    groq_stub(lambda request: httpx.Response(200, content=b""))
     with pytest.raises(speech.SpeechError) as error:
         speech_call("tts")
     assert error.value.status_code == 502
@@ -186,13 +184,27 @@ def test_speech_is_progressive_and_closes_on_cancellation(groq_stub: Callable[[P
 
     async def exercise() -> None:
         stream = speech.stream_speech("Hello.")
-        assert await anext(stream) == AudioFormat(24000, 1)
-        assert await anext(stream) == AudioChunk(b"\x01\x00")
+        assert await anext(stream) == AudioChunk(data[:46])
         assert body.chunks_read == 1  # Audio is yielded without reading the final chunk.
         await stream.aclose()
         assert body.closed
 
     asyncio.run(exercise())
+
+
+def test_speech_forwards_arbitrary_provider_chunks_unchanged(groq_stub: Callable[[ProviderHandler], None]) -> None:
+    chunks = [b"R", b"IFF", b"header", b"\x01", b"\x00"]
+
+    class Body(httpx.AsyncByteStream):
+        async def __aiter__(self) -> AsyncIterator[bytes]:
+            for chunk in chunks:
+                yield chunk
+
+        async def aclose(self) -> None:
+            pass
+
+    groq_stub(lambda request: httpx.Response(200, stream=Body()))
+    assert asyncio.run(collect_speech("Hello.")) == [AudioChunk(chunk) for chunk in chunks]
 
 
 @pytest.mark.parametrize("error_class, status", [(httpx.ReadError, 502), (httpx.ReadTimeout, 504)])
