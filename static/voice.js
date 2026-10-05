@@ -84,7 +84,7 @@ socket.onmessage = event => {
     status.textContent = "Waiting for Gemini…";
   } else if (message.type === "reply_complete") {
     displayMessage("Gemini", message.text);
-    status.textContent = "Generating speech…";
+    if (!turnError) status.textContent = playing ? "Playing streamed reply…" : "Finishing speech…";
   } else if (message.type === "interrupted") {
     displayMessage("Gemini", message.text + " [Interrupted]");
     displayMessage("Error", message.error);
@@ -92,7 +92,7 @@ socket.onmessage = event => {
     status.textContent = message.error;
   } else if (message.type === "audio_start") {
     try {
-      player.start();
+      player.start(message);
     } catch {
       playbackFailed();
     }

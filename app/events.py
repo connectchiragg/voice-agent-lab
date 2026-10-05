@@ -26,6 +26,8 @@ class VoiceEvent:
     text: str | None = None
     error: str | None = None
     partial: bool | None = None
+    sample_rate: int | None = None
+    encoding: str | None = None
 
     def to_payload(self) -> dict[str, object]:
         return {key: value for key, value in asdict(self).items() if value is not None}
