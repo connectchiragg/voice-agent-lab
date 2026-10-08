@@ -1,5 +1,10 @@
 # Voice Agent Lab
 
+MiniCPM migration is being prepared separately: see
+[the authenticated proxy and adapter plan](docs/minicpm-integration.md).
+It is CPU-tested only, not deployed or selected by the current app; the Lightning
+Studio must stay asleep until explicit approval.
+
 A local learning project with one voice API: `/ws/voice`.
 Click Record, speak, then Stop. The server transcribes the completed recording,
 runs the Gemini/LangGraph conversation, and streams audio for automatic playback.
