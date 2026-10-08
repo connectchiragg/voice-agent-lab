@@ -47,7 +47,8 @@ We deliberately still send one completed clip, not live microphone frames.
 Server events on a successful reply:
 
 - `transcript` with recognized text.
-- Gemini checkpoints its text deltas and sends them to one Cartesia speech context.
+- Gemini sends text deltas immediately to one Cartesia speech context; the
+  accumulated reply is checkpointed when generation ends, not on every chunk.
 - `audio_start` with `sample_rate: 24000` and `encoding: "pcm_f32le"`.
 - Binary messages containing raw mono little-endian Float32 PCM samples.
 - `reply_complete` with saved text, shown once, not token by token.
@@ -91,8 +92,8 @@ is still limited. Reload to reconnect. Existing history is never automatically s
 - Clicking Record unlocks Web Audio playback. Chunks play automatically with a small
   initial buffer. This increment does not retain replayable audio or provide the old
   file-based pause/replay controls. Playback completion is local, not server-acknowledged.
-- Transcription failure creates no conversation turn. Gemini failure preserves
-  successfully checkpointed partial text. TTS failure does not undo completed text.
+- Transcription failure creates no conversation turn. Gemini failure attempts one
+  save of its accumulated partial text. TTS failure does not undo completed text.
 - Microphone and generated audio are held temporarily in memory, not saved to disk
   or PostgreSQL. Input audio goes to Groq; transcripts and context go to Google;
   reply text goes to Cartesia.
@@ -128,16 +129,19 @@ and shared between its speech services; this app keeps transcription on Groq.
 The graph remains `START -> generate_reply -> END`; this migration changes the
 interface, not the storage schema. A `Conversation` contains `messages` and
 `updated_at`, keyed by UUID (`thread_id`). The user transcript is checkpointed
-before generation. Each accumulated text chunk is saved before delivery and
-marked interrupted until Gemini finishes normally. Completed text stays completed
-even if speech synthesis later fails.
+at the start of generation. Text deltas stream without database writes. LangGraph
+checkpoints the complete reply at the node boundary with asynchronous durability;
+a provider failure attempts one save of the accumulated interrupted reply.
+A process crash or cancellation can lose in-flight text. Completed text stays
+completed even if speech synthesis later fails. Saving after browser audio delivery
+is not implemented yet.
 
 Startup creates `checkpoints`, `checkpoint_blobs`, `checkpoint_writes` and
 `checkpoint_migrations`. These are the only application tables.
 Server restarts preserve saved history. There is one in-memory lock per conversation
 around the complete voice turn; use one server process because these locks do not
-coordinate multiple workers. History is not trimmed yet. Frequent checkpoints
-favor learning/recovery over storage efficiency and throughput.
+coordinate multiple workers. History is not trimmed yet. Async checkpoints overlap
+graph execution, but pending writes can be lost if the process crashes.
 
 ## Local PostgreSQL and pgAdmin
 

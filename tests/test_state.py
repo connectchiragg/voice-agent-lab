@@ -47,7 +47,7 @@ def test_checkpoint_recovery_and_isolation(monkeypatch):
     asyncio.run(scenario())
 
 
-def test_chunks_are_saved_before_delivery_and_close_cancels_provider(monkeypatch):
+def test_chunks_stream_without_saving_and_close_cancels_provider(monkeypatch):
     async def scenario():
         closed = asyncio.Event()
 
@@ -65,16 +65,17 @@ def test_chunks_are_saved_before_delivery_and_close_cancels_provider(monkeypatch
             assert (await anext(stream))["type"] == "start"
             assert (await anext(stream))["text"] == "partial"
             history = await database.load_history(cid)
-            assert history[-1]["parts"][0]["text"] == "partial"
+            assert history[-1]["parts"][0]["text"] == ""
             assert history[-1]["status"] == "interrupted"
         await asyncio.wait_for(closed.wait(), timeout=1)
 
     asyncio.run(scenario())
 
 
-def test_failed_checkpoint_stops_chunk_delivery(monkeypatch):
+def test_failed_recovery_save_does_not_block_earlier_chunks(monkeypatch):
     async def provider(message, history):
-        yield "must not reach UI"
+        yield "reaches UI before saving"
+        raise RuntimeError("provider disconnected")
 
     async def fail_save(conversation_id, messages):
         raise RuntimeError("storage unavailable")
@@ -92,10 +93,35 @@ def test_failed_checkpoint_stops_chunk_delivery(monkeypatch):
             assert str(error) == "storage unavailable"
         else:
             raise AssertionError("Storage failure should stop generation")
-        assert events == [{"type": "start"}]
+        assert events == [{"type": "start"}, {"type": "delta", "text": "reaches UI before saving"}]
         history = await database.load_history(cid)
         assert history[0]["parts"][0]["text"] == "hello"
         assert history[1]["parts"][0]["text"] == ""
+
+    asyncio.run(scenario())
+
+
+def test_successful_reply_uses_only_graph_checkpoints(monkeypatch):
+    async def provider(message, history):
+        yield "First"
+        yield " second"
+        yield " third"
+
+    async def unexpected_manual_save(conversation_id, messages):
+        raise AssertionError("Successful generation must not manually save chunks")
+
+    async def scenario():
+        monkeypatch.setattr(database, "graph", database.build_graph(InMemorySaver()))
+        monkeypatch.setattr(database, "stream_reply", provider)
+        monkeypatch.setattr(database, "save_history", unexpected_manual_save)
+        cid = str(uuid4())
+        events = [event async for event in database.stream_conversation(cid, "hello")]
+        assert [event["text"] for event in events if event["type"] == "delta"] == [
+            "First", " second", " third",
+        ]
+        history = await database.load_history(cid)
+        assert history[-1]["parts"][0]["text"] == "First second third"
+        assert history[-1]["status"] == "completed"
 
     asyncio.run(scenario())
 

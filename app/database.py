@@ -48,21 +48,24 @@ graph: ConversationGraph | None = None
 
 
 async def generate_reply(state: Conversation, config: RunnableConfig) -> Conversation:
-    """Run Gemini inside the graph; checkpoint text before publishing each chunk."""
-    messages = state["messages"]
+    """Stream immediately; persist the accumulated reply only when generation ends."""
+    messages = list(state["messages"])
     message = messages[-2]["parts"][0]["text"]
     conversation_id = config["configurable"]["thread_id"]
     writer = get_stream_writer()
-    # The graph's input checkpoint already holds the user and empty assistant.
+    # The input checkpoint holds the user and empty assistant, not streamed deltas.
     writer({"type": "start"})
     reply = ""
-    async with aclosing(stream_reply(message, messages[:-2])) as stream:
-        async for chunk in stream:
-            reply += chunk
-            messages[-1] = {"role": "model", "parts": [{"text": reply}], "status": "interrupted"}
-            # Node-boundary checkpoints alone would lose an unfinished stream.
-            await save_history(conversation_id, messages)
-            writer({"type": "delta", "text": chunk})
+    try:
+        async with aclosing(stream_reply(message, messages[:-2])) as stream:
+            async for chunk in stream:
+                reply += chunk
+                writer({"type": "delta", "text": chunk})
+    except Exception:
+        # Retain a failed reply once, rather than writing every token to storage.
+        messages[-1] = {"role": "model", "parts": [{"text": reply}], "status": "interrupted"}
+        await save_history(conversation_id, messages)
+        raise
     messages[-1] = {"role": "model", "parts": [{"text": reply}], "status": "completed"}
     # LangGraph persists this returned state before the workflow finishes.
     return {"messages": messages, "updated_at": datetime.now(timezone.utc).isoformat()}
@@ -123,7 +126,7 @@ async def stream_conversation(conversation_id: str, message: str) -> AsyncIterat
     ])
     state: Conversation = {"messages": messages, "updated_at": datetime.now(timezone.utc).isoformat()}
     async with aclosing(graph.astream(
-        state, config(conversation_id), stream_mode="custom", durability="sync",
+        state, config(conversation_id), stream_mode="custom", durability="async",
     )) as stream:
         async for event in stream:
             yield cast(ChatEvent, event)
