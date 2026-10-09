@@ -1,4 +1,4 @@
-// Cartesia sends raw mono Float32 PCM; no WAV container needs decoding.
+// Provider sends raw mono Float32 PCM; no WAV container needs decoding.
 export class StreamAudioPlayer {
   constructor(onActiveChange) {
     this.onActiveChange = onActiveChange;
@@ -12,7 +12,7 @@ export class StreamAudioPlayer {
   }
 
   async unlock() {
-    // Record is a user gesture, so unlock playback before the provider responds.
+    // Start call is a user gesture: unlock before the provider responds.
     const AudioContext = window.AudioContext || window.webkitAudioContext;
     this.context ??= new AudioContext();
     await this.context.resume();
@@ -28,7 +28,6 @@ export class StreamAudioPlayer {
     this.sampleRate = sample_rate;
     this.streamEnded = false;
     this.nextStartTime = this.context.currentTime + 0.08;
-    this.onActiveChange(true);
   }
 
   enqueue(bytes) {
@@ -53,6 +52,7 @@ export class StreamAudioPlayer {
     source.buffer = buffer;
     source.connect(this.context.destination);
     this.sources.add(source);
+    this.onActiveChange(true);
     source.onended = () => {
       source.disconnect();
       this.sources.delete(source);
@@ -60,6 +60,11 @@ export class StreamAudioPlayer {
     };
     // Schedule in order; a late packet starts after a small gap rather than in the past.
     const start = Math.max(this.nextStartTime, this.context.currentTime + 0.02);
+    if (start - this.context.currentTime > 3) {
+      this.sources.delete(source);
+      source.disconnect();
+      throw new Error("Playback cannot keep up with live audio.");
+    }
     source.start(start);
     this.nextStartTime = start + buffer.duration;
     return true;
@@ -73,7 +78,7 @@ export class StreamAudioPlayer {
   }
 
   finishIfDrained() {
-    if (this.streamEnded && this.sources.size === 0) {
+    if (this.sources.size === 0) {
       this.onActiveChange(false);
     }
   }

@@ -23,5 +23,6 @@ No fabricated classification scores are emitted. No cancellation, playback
 control, input dropping or history writes exist in this path. Logs contain
 probabilities, timing and state only, not raw audio or transcripts.
 
-The browser is unchanged and does not connect to this endpoint yet. Live capture
-integration and real microphone/backchannel/echo evaluation remain deferred.
+The call endpoint now observes continuous microphone input using this same VAD
+logic. The standalone diagnostics endpoint remains useful for isolated tests.
+Real microphone/backchannel/echo evaluation remains deferred.

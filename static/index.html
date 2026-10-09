@@ -10,13 +10,12 @@
   <body>
     <main>
       <h1>Voice Agent Lab</h1>
-      <p>Record, speak, then Stop. The reply plays automatically. Transcripts are saved and shown below.</p>
-      <button id="new-conversation" type="button">New conversation</button>
-      <p id="status" role="status">Connecting…</p>
+      <p>Continuous two-way audio. Speech detection is diagnostic only. No saved history.</p>
+      <p id="status" role="status">Ready to start a call.</p>
       <section id="messages" role="log" aria-label="Chat messages"></section>
       <div class="speech-controls">
-        <button id="record" type="button" disabled>Record</button>
-        <span>Up to 60 seconds. English speech replies up to 200 characters.</span>
+        <button id="call" type="button">Start call</button>
+        <span id="diagnostics">Speech diagnostics will appear here.</span>
       </div>
     </main>
   </body>

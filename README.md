@@ -1,29 +1,33 @@
 # Voice Agent Lab
 
-MiniCPM migration is being prepared separately: see
-[the authenticated proxy and adapter plan](docs/minicpm-integration.md).
-It is CPU-tested only, not deployed or selected by the current app; the Lightning
-Studio must stay asleep until explicit approval.
+A local continuous-call learning project. Click Start call, speak freely, then
+End call. `/ws/voice` carries 16 kHz microphone PCM upstream and 24 kHz MiniCPM
+audio downstream concurrently, including while the assistant speaks. VAD emits
+diagnostics only; it never gates microphone input or stops playback.
 
-A local learning project with one voice API: `/ws/voice`.
-Click Record, speak, then Stop. The server transcribes the completed recording,
-runs the Gemini/LangGraph conversation, and streams audio for automatic playback.
-Visible transcripts are debugging output, not a text-chat input.
+MiniCPM is now selected by the app, but real inference remains unverified.
+The secure remote endpoint is not established yet. See
+[the proxy plan](docs/minicpm-integration.md). Do not wake the Studio/GPU without
+explicit approval. Without configured connectivity, Start call fails clearly.
 
 The old `/ws/chat`, `/api/transcribe`, `/api/speak`, health endpoint and API docs
 are removed. HTTP only serves the browser page at `/` and assets under `/static`.
-This is a full interface replacement, not two parallel APIs.
+The recorded-turn interface is replaced, not retained as a fallback.
+`/ws/diagnostics` remains an isolated diagnostic test endpoint.
+No PostgreSQL history is loaded or written in this phase. Legacy provider/state
+modules remain in the repository for learning, but are not used by the call API.
 
 ## Run locally
 
 Create `.env` from `.env.example` on a fresh setup, and fill in
-`GEMINI_API_KEY`, `GROQ_API_KEY` and `CARTESIA_API_KEY`. Never put keys in frontend code or Git.
-Start PostgreSQL as described below, then:
+`MINICPM_URL` and `MINICPM_TOKEN`. Never put tokens in frontend code or Git.
+Install the local Silero model as described in [speech diagnostics](SPEECH_DIAGNOSTICS.md).
+PostgreSQL is not required for calls:
 
 ```sh
 python3 -m venv .venv
 source .venv/bin/activate
-python -m pip install -e '.[dev]'
+python -m pip install -e '.[diagnostics,dev]'
 python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
@@ -32,7 +36,16 @@ Open http://127.0.0.1:8000. Microphone recording needs localhost/HTTPS and permi
 ```sh
 python -m pytest
 node --test tests/audio-player.test.mjs
+node tests/audio-worklet.test.mjs
 ```
+
+The browser requests echo cancellation (not guaranteed by every device).
+AudioWorklet emits 100 ms PCM packets. Its lightweight interpolating resampler
+is a learning implementation, not a production band-limited DSP resampler.
+Slow microphone upload ends the call rather than silently dropping model input.
+Only diagnostic copies may be skipped/reset under overload, with a warning.
+Model-native interruption behavior is distinct from our diagnostic-only VAD and
+must be checked during real inference. Real mic quality/AEC remain untested.
 
 ## Voice WebSocket protocol
 
