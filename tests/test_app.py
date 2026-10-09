@@ -63,8 +63,8 @@ def receive_turn(socket: WebSocketTestSession) -> list[dict | bytes]:
 
 def test_one_api_and_voice_only_ui() -> None:
     paths = [route.path for route in main.app.routes if isinstance(route, APIWebSocketRoute)]
-    assert paths == ["/ws/voice"]
-    assert {route.path for route in main.app.routes} == {"/", "/static", "/ws/voice"}
+    assert paths == ["/ws/diagnostics", "/ws/voice"]
+    assert {route.path for route in main.app.routes} == {"/", "/static", "/ws/voice", "/ws/diagnostics"}
     html = client.get("/").text
     assert "Voice Agent Lab" in html
     assert "<input" not in html and "<form" not in html

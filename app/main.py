@@ -13,6 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ValidationError
 
 from app import speech
+from app.diagnostics import observe_speech
 from app.database import lifespan, load_history
 from app.events import AudioChunk, EventType, VoiceEvent
 from app.voice import voice_turn
@@ -24,6 +25,7 @@ conversation_locks: dict[str, asyncio.Lock] = {}
 app = FastAPI(title="Voice Agent Lab", lifespan=lifespan,
               docs_url=None, redoc_url=None, openapi_url=None)
 app.mount("/static", StaticFiles(directory=STATIC_DIRECTORY), name="static")
+app.add_api_websocket_route("/ws/diagnostics", observe_speech)
 
 
 class RecordingHeader(BaseModel):
