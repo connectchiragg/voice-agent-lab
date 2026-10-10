@@ -58,10 +58,12 @@ async def voice(socket: WebSocket) -> None:
     try:
         async with asyncio.timeout(15):
             settings = CallSettings.model_validate_json(await socket.receive_text())
-        from app.vad import SileroGate, SpeechDiagnostics
-        gate = await asyncio.to_thread(SileroGate, os.getenv("SILERO_MODEL_PATH",
-                          str(ROOT / ".cache/speech-diagnostics/silero_vad.onnx")))
-        observer = SpeechDiagnostics(gate, echo_cancelled=settings.echo_cancelled)
+        from app.vad import VapModel, SpeechDiagnostics
+        try:
+            gate = await asyncio.to_thread(VapModel)
+            observer = SpeechDiagnostics(gate, echo_cancelled=settings.echo_cancelled)
+        except Exception as error:
+            logger.warning("VAP diagnostics disabled: %s", type(error).__name__)
         async with minicpm.open_session(minicpm.MiniCPMSettings.from_env(),
                                        "You are a helpful voice assistant.") as session:
             await send({"type": "ready", "sample_rate": minicpm.OUTPUT_SAMPLE_RATE,
@@ -82,6 +84,8 @@ async def voice(socket: WebSocket) -> None:
                     if audio is None:
                         raise ValueError("Expected PCM")
                     await session.send_audio(audio)
+                    if observer is None:
+                        continue
                     if not diagnostic_audio.full():
                         diagnostic_audio.put_nowait((audio, playing))
                     else:
@@ -102,6 +106,8 @@ async def voice(socket: WebSocket) -> None:
 
             async def diagnostics() -> None:
                 nonlocal observer
+                if observer is None:
+                    await asyncio.Future()  # Remain idle; do not end the call.
                 while True:
                     audio, active = await diagnostic_audio.get()
                     if not audio:
@@ -116,6 +122,11 @@ async def voice(socket: WebSocket) -> None:
                         # A CPU thread cannot be cancelled; finish before clearing state.
                         await inference
                         raise
+                    except Exception as error:
+                        logger.warning("VAP diagnostics disabled: %s", type(error).__name__)
+                        observer.close()
+                        observer = None
+                        await asyncio.Future()
                     for report in reports:
                         logger.info("Speech diagnostic: %s", report.to_payload())
                         await send(report.to_payload())
@@ -137,7 +148,7 @@ async def voice(socket: WebSocket) -> None:
     except Exception as error:
         logger.warning("Voice call failed: %s", type(error).__name__)
         try:
-            await send({"type": "error", "error": "Call unavailable. Check MiniCPM connectivity and the local VAD model."})
+            await send({"type": "error", "error": "Call unavailable. Check MiniCPM connectivity."})
         except (RuntimeError, WebSocketDisconnect):
             pass
     finally:

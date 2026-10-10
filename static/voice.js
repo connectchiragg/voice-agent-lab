@@ -72,7 +72,7 @@ async function startCall() {
         } else if (message.type === "text") {
           messages.textContent += message.text;
         } else if (message.type === "speech_diagnostic") {
-          diagnostic.textContent = `Speech: ${message.speech_detected} | probability: ${message.speech_probability.toFixed(2)} | VAD: ${message.inference_ms.toFixed(1)} ms | classifier disabled`;
+          diagnostic.textContent = `Speech: ${message.speech_detected} | now: ${message.p_now.toFixed(2)} | future: ${message.p_future.toFixed(2)} | VAP: ${message.inference_ms.toFixed(1)} ms`;
         } else if (message.type === "error") {
           endCall(current);
           status.textContent = message.error;

@@ -21,7 +21,7 @@ modules remain in the repository for learning, but are not used by the call API.
 
 Create `.env` from `.env.example` on a fresh setup, and fill in
 `MINICPM_URL` and `MINICPM_TOKEN`. Never put tokens in frontend code or Git.
-Install the local Silero model as described in [speech diagnostics](SPEECH_DIAGNOSTICS.md).
+Use the experimental VAP runtime described in [speech diagnostics](SPEECH_DIAGNOSTICS.md).
 PostgreSQL is not required for calls:
 
 ```sh
@@ -30,6 +30,9 @@ source .venv/bin/activate
 python -m pip install -e '.[diagnostics,dev]'
 python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
+
+The generic install above does not install the patched, pinned MaAI source.
+For the active VAP experiment use the runtime command in the VAP section below.
 
 Open http://127.0.0.1:8000. Microphone recording needs localhost/HTTPS and permission.
 
@@ -186,3 +189,28 @@ automatically during app startup; no manual SQL schema setup is needed.
 - These environment variables initialize credentials on the first launch only;
   changing them later does not change passwords already stored in the volumes.
 - Both published ports bind only to this Mac's loopback interface.
+# VAP diagnostic increment
+
+The active microphone observer uses dedicated single-channel English VAP instead
+of Silero. It processes every 100 ms of 16 kHz PCM, including silence, and reports
+current speech probability, `p_now` (0–600 ms), `p_future` (600–2000 ms), and CPU time.
+These are observations, not interruption classifications. Playback, generation,
+input forwarding and history are unchanged. Model failure disables diagnostics
+without terminating a working provider call. Audio gaps reset the temporal state.
+
+Local experimental runtime: Python 3.11 environment at
+`/Users/omen/projects/vap-cpu-trial/.venv`; pinned MaAI source
+`b61b96d7dd68f4047170d6cefa20ced4e940832e`. Set `VAP_MODEL_PATH` to the dedicated
+mono CPC 10 Hz / 20-second checkpoint and `VAP_CPC_PATH` to its CPC encoder.
+The trial source makes PyAudio optional for chunk-only input and fixes cache
+directory creation. This setup is deliberately experimental, not a deployment package.
+English checkpoint revision: `7135e1b30e2e660e8f40076df1872e055eaf8ddc`;
+license CC BY-NC-ND 4.0: non-commercial learning only, not commercial deployment.
+
+```sh
+PYTHONPATH=/Users/omen/projects/vap-cpu-trial/MaAI-b61b96d7dd68f4047170d6cefa20ced4e940832e/src /Users/omen/projects/vap-cpu-trial/.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+```
+
+Recorded-speech WebSocket verification passed; live microphone, echo, Hinglish,
+and labeled prediction accuracy remain unverified. The displayed speech threshold
+of 0.5 is provisional, not calibrated. Per-connection model instances increase memory.

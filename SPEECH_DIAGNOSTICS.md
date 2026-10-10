@@ -1,28 +1,28 @@
-# Observation-only speech diagnostics
+# Observation-only VAP diagnostics
 
-Install `pip install -e '.[diagnostics,dev]'`. Download the official Silero model:
-https://raw.githubusercontent.com/snakers4/silero-vad/1e261b036686cd0017d500ee96acd1c4ba572a9d/src/silero_vad/data/silero_vad.onnx
-Place it at `.cache/speech-diagnostics/silero_vad.onnx`, or set `SILERO_MODEL_PATH`.
-SHA256: `1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3`.
-Silero is MIT licensed. The implementation follows its pinned utils_vad.py.
+Silero is replaced by dedicated English mono VAP (CPC, 10 Hz, 20-second context).
+Use the pinned experimental MaAI source and Python 3.11 runtime documented in
+the README. Set VAP_MODEL_PATH and VAP_CPC_PATH to local downloaded files.
+Weights have a non-commercial license; this setup is for learning, not deployment.
 
-`/ws/diagnostics` accepts this complete settings frame first:
+`/ws/diagnostics` accepts a complete settings frame first:
 `{"type":"settings","sample_rate":16000,"encoding":"pcm_f32le","echo_cancelled":true,"assistant_speaking":false}`.
-Then send binary mono float32 little-endian PCM (up to one second per frame).
-Send another complete settings frame when playback status changes.
-One socket owns one session; closing clears audio buffers and recurrent state.
+Then send binary mono float32 little-endian PCM (up to one second per message).
+Send another settings frame when playback status changes. Each connection owns
+independent model state; disconnect clears buffers and prediction context.
 
-Silero evaluates 512 samples (32 ms). Reports occur at the first completed
-VAD frame after each 100 ms boundary, not exactly every 100 ms. The rolling
-window retains two seconds in memory. A provisional 0.5 speech gate is NOT an
-interruption threshold. Echo cancellation must come from the capture client;
-the flag reports the client's claim, not independently verified AEC.
+Every 1600 samples (100 ms), VAP reports current speech probability, p_now
+(expected voice activity over 0–600 ms), and p_future (600–2000 ms).
+Silence is processed too. There is no separately imposed two-second window.
+The provisional speech probability threshold 0.5 is not an interruption threshold.
+Echo cancellation is requested in the browser, not performed by this observer.
 
-The classifier stays disabled because its published preprocessing is incomplete.
-No fabricated classification scores are emitted. No cancellation, playback
-control, input dropping or history writes exist in this path. Logs contain
-probabilities, timing and state only, not raw audio or transcripts.
+The continuous call uses the same observer through a bounded diagnostic queue.
+Only diagnostic copies can be skipped on overload; a gap resets model state.
+VAP loading or inference failure disables diagnostics without ending the call.
+No playback cancellation, input suppression, or history writes are performed.
+Logs contain probabilities and timing, not audio or transcripts.
 
-The call endpoint now observes continuous microphone input using this same VAD
-logic. The standalone diagnostics endpoint remains useful for isolated tests.
-Real microphone/backchannel/echo evaluation remains deferred.
+Real public recorded speech passed through both TestClient and a network socket.
+Live mic, backchannel, deliberate interruption, echo and Hinglish checks remain
+pending. VAP is a voice-activity predictor, not a trained interruption classifier.

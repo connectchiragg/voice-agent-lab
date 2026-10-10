@@ -2,8 +2,6 @@
 
 import asyncio
 import logging
-import os
-from pathlib import Path
 from typing import Literal
 
 from fastapi import WebSocket, WebSocketDisconnect
@@ -27,14 +25,12 @@ async def observe_speech(socket: WebSocket) -> None:
     try:
         settings = DiagnosticSettings.model_validate_json(await socket.receive_text())
         # Optional dependencies/model are loaded only for this opt-in endpoint.
-        from app.vad import SileroGate, SpeechDiagnostics
+        from app.vad import VapModel, SpeechDiagnostics
 
-        path = os.getenv("SILERO_MODEL_PATH", str(Path(__file__).resolve().parent.parent
-                        / ".cache/speech-diagnostics/silero_vad.onnx"))
-        gate = await asyncio.to_thread(SileroGate, path)
+        gate = await asyncio.to_thread(VapModel)
         observer = SpeechDiagnostics(gate, echo_cancelled=settings.echo_cancelled)
         await socket.send_json({"type": "diagnostics_ready",
-                                "classifier_status": "disabled_missing_preprocessing"})
+                                "classifier_status": "prediction_only", "model": "vap_mono"})
         while True:
             frame = await socket.receive()
             if frame["type"] == "websocket.disconnect":

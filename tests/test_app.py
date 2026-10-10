@@ -14,8 +14,8 @@ PCM = struct.pack("<f", 0.1) * 1600
 
 
 class FakeGate:
-    def score(self, samples):
-        return 0.9
+    def predict(self, samples):
+        return vad.SpeechPrediction(0.9, 0.8, 0.7)
     def reset(self):
         pass
 
@@ -47,7 +47,7 @@ def provider(monkeypatch):
             session.closed = True
     monkeypatch.setattr(minicpm, "open_session", open_session)
     monkeypatch.setattr(minicpm.MiniCPMSettings, "from_env", lambda: object())
-    monkeypatch.setattr(vad, "SileroGate", lambda path: FakeGate())
+    monkeypatch.setattr(vad, "VapModel", lambda: FakeGate())
     return session
 
 
@@ -111,3 +111,34 @@ def test_unavailable_provider_is_safe(provider, monkeypatch):
         message = socket.receive_json()
         assert message["type"] == "error"
         assert "private" not in str(message)
+
+
+def test_vap_unavailable_does_not_break_audio(provider, monkeypatch):
+    def unavailable():
+        raise RuntimeError("model missing")
+    monkeypatch.setattr(vad, "VapModel", unavailable)
+    with TestClient(main.app).websocket_connect("/ws/voice") as socket:
+        socket.send_json(START)
+        assert socket.receive_json()["type"] == "ready"
+        assert socket.receive_bytes() == PCM
+        socket.send_bytes(PCM)
+        assert socket.receive_json()["type"] == "text"
+        assert socket.receive_bytes() == PCM
+    assert provider.closed
+
+
+def test_vap_inference_failure_does_not_break_call(provider, monkeypatch):
+    class BrokenModel(FakeGate):
+        def predict(self, samples):
+            raise RuntimeError("inference failed")
+    monkeypatch.setattr(vad, "VapModel", BrokenModel)
+    with TestClient(main.app).websocket_connect("/ws/voice") as socket:
+        socket.send_json(START)
+        socket.receive_json()
+        socket.receive_bytes()
+        for _ in range(2):
+            socket.send_bytes(PCM)
+            assert socket.receive_json()["type"] == "text"
+            assert socket.receive_bytes() == PCM
+    assert provider.received == [PCM, PCM]
+    assert provider.closed
