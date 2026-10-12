@@ -114,8 +114,8 @@ test("playback needs a user-unlocked context and an active stream", async () => 
   assert.throws(() => player.enqueue(pcm().buffer), /outside a stream/);
 });
 
-// Barge-in increment (not built yet): todo until interrupt() exists in static/audio-player.js.
-test("interrupt stops scheduled audio and reports playback inactive", {todo: true}, async () => {
+// Barge-in: interrupt() flushes queued audio and reports how much was heard.
+test("interrupt stops scheduled audio and reports playback inactive", async () => {
   const {player, changes} = await playerWithAudio();
   player.enqueue(pcm([0.5]).buffer);
   player.enqueue(pcm([0.25]).buffer);
@@ -125,11 +125,23 @@ test("interrupt stops scheduled audio and reports playback inactive", {todo: tru
   assert.equal(changes.at(-1), false);
 });
 
-test("audio after an interrupt plays immediately, not after the discarded reply", {todo: true}, async () => {
+test("audio after an interrupt plays immediately, not after the discarded reply", async () => {
   const {player} = await playerWithAudio();
   player.enqueue(pcm(new Array(24000).fill(0.1)).buffer);  // one second queued
   player.interrupt();
   player.context.currentTime = 0.1;
   player.enqueue(pcm([0.5]).buffer);  // the stream stays open for the next reply
   assert.ok(player.context.sources.at(-1).startTime < 0.5);
+});
+
+test("interrupt reports seconds of the current reply that were played", async () => {
+  const {player} = await playerWithAudio();
+  player.markReply();
+  player.enqueue(pcm(new Array(24000).fill(0.1)).buffer);  // 1 s, starts at 0.08
+  player.enqueue(pcm(new Array(24000).fill(0.1)).buffer);  // 1 s, starts at 1.08
+  player.context.sources[0].onended();                     // first second finished
+  player.context.currentTime = 1.58;                       // half of the second
+  assert.ok(Math.abs(player.interrupt() - 1.5) < 1e-9);
+  player.markReply();
+  assert.equal(player.interrupt(), 0);
 });

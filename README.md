@@ -43,12 +43,32 @@ How a call flows (`app/pipeline.py`):
 5. Audio goes back in 200 ms packets; the browser plays them gap-free.
 
 Events sent to the browser: `ready`, `transcript`, `text` (reply deltas),
-`metrics`, `notice`, `reply_end`, `error`. Postgres is used when running,
+`metrics`, `notice`, `reply_end`, `interrupt`, `error`. Postgres is used when running,
 otherwise history is in memory (logged at startup).
 
-Not built yet: barge-in. Speech while the assistant talks is ignored
-(`player.interrupt()` tests are written as todo). Then tool calling, then
-post-call Temporal and CrewAI workflows.
+### Barge-in
+
+Talking over the assistant stops it, the way OpenAI Realtime, LiveKit and
+Pipecat handle interruptions:
+
+1. While a reply is in progress, 250 ms of confident speech (Silero >= 0.8)
+   counts as an interruption. Shorter sounds (a cough, "mm-hmm") are ignored.
+2. The server cancels the LLM and TTS and sends `interrupt`. The browser flushes
+   queued audio and answers `{"type": "interrupted", "played_s": ...}`.
+3. History keeps only what was heard: whole sentences that played, plus the
+   playing sentence cut by word proportion, stored with status `interrupted`.
+4. The interrupting speech continues as the user's next turn.
+
+Measured: audio stops about 300 ms after the user starts talking. Barge-in is
+disabled when the browser reports no echo cancellation, because the assistant's
+own voice would otherwise interrupt it. Headphones are the most reliable setup.
+
+Groq occasionally stalls before the first token. If none arrives within 3.5 s
+the request is abandoned and retried once (cause not yet identified; seen
+mostly right after an interruption).
+
+Next: cut first-sentence TTS time, tool calling, then post-call Temporal and
+CrewAI workflows.
 
 ## Run locally
 

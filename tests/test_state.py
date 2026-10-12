@@ -148,3 +148,31 @@ def test_completed_turns_reach_next_node_without_duplicate_messages(monkeypatch)
         assert len(await database.load_history(cid)) == 4
 
     asyncio.run(scenario())
+
+
+def test_interrupted_reply_keeps_only_heard_text(monkeypatch):
+    async def provider(message, history):
+        yield "Full reply nobody finished hearing."
+
+    monkeypatch.setattr(database, "stream_reply", provider)
+
+    async def scenario():
+        monkeypatch.setattr(database, "graph", database.build_graph(InMemorySaver()))
+        cid = str(uuid4())
+        async for event in database.stream_conversation(cid, "hello"):
+            pass
+        # Completed turn, then an interruption whose input may not be checkpointed.
+        await database.record_interruption(cid, "tell me more", "Well, it...")
+        history = await database.load_history(cid)
+        assert [(m["role"], m["parts"][0]["text"], m["status"]) for m in history] == [
+            ("user", "hello", "completed"),
+            ("model", "Full reply nobody finished hearing.", "completed"),
+            ("user", "tell me more", "completed"),
+            ("model", "Well, it...", "interrupted"),
+        ]
+        # Interrupting a turn whose empty reply was checkpointed replaces, not appends.
+        await database.record_interruption(cid, "tell me more", "Well, it is...")
+        history = await database.load_history(cid)
+        assert len(history) == 4 and history[-1]["parts"][0]["text"] == "Well, it is..."
+
+    asyncio.run(scenario())

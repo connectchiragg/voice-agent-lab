@@ -9,6 +9,14 @@ export class StreamAudioPlayer {
     this.hasAudio = false;
     this.nextStartTime = 0;
     this.streamEnded = true;
+    this.replyId = 0;
+    this.replyPlayed = 0;  // Seconds of the current reply fully played.
+  }
+
+  // Start counting played audio for a new reply (barge-in reports this count).
+  markReply() {
+    this.replyId += 1;
+    this.replyPlayed = 0;
   }
 
   async unlock() {
@@ -50,10 +58,12 @@ export class StreamAudioPlayer {
     this.hasAudio = true;
     const source = this.context.createBufferSource();
     source.buffer = buffer;
+    source.replyId = this.replyId;
     source.connect(this.context.destination);
     this.sources.add(source);
     this.onActiveChange(true);
     source.onended = () => {
+      if (source.replyId === this.replyId) this.replyPlayed += buffer.duration;
       source.disconnect();
       this.sources.delete(source);
       this.finishIfDrained();
@@ -66,6 +76,7 @@ export class StreamAudioPlayer {
       throw new Error("Playback cannot keep up with live audio.");
     }
     source.start(start);
+    source.scheduledStart = start;
     this.nextStartTime = start + buffer.duration;
     return true;
   }
@@ -81,6 +92,27 @@ export class StreamAudioPlayer {
     if (this.sources.size === 0) {
       this.onActiveChange(false);
     }
+  }
+
+  // Barge-in: silence everything queued now, keep the stream open for the next
+  // reply, and return how many seconds of the current reply the user heard.
+  interrupt() {
+    const now = this.context?.currentTime ?? 0;
+    let played = this.replyPlayed;
+    for (const source of this.sources) {
+      if (source.replyId === this.replyId) {
+        played += Math.min(source.buffer.duration, Math.max(0, now - source.scheduledStart));
+      }
+      source.onended = null;
+      source.stop();
+      source.disconnect();
+    }
+    this.sources.clear();
+    this.pendingBytes = new Uint8Array();
+    this.nextStartTime = now;
+    this.replyPlayed = 0;
+    this.onActiveChange(false);
+    return played;
   }
 
   reset() {

@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 
 from app import pipeline
-from app.pipeline import Call, Engines, SentenceBuffer, TurnDetector, decode_pcm
+from app.pipeline import Call, Engines, SentenceBuffer, TurnDetector, decode_pcm, heard_text
 from app.vad import CHUNK
 
 LOUD, QUIET = 0.3, 0.0
@@ -169,11 +169,124 @@ def test_silence_or_empty_transcript_does_not_reply():
     assert seen["replies"] == []
 
 
-def test_speech_while_assistant_is_playing_is_ignored():
+def test_short_sound_during_playback_does_not_interrupt():
     engines, seen = fake_engines()
-    sent = asyncio.run(run_call(engines, speech_then_pause(), playing=True))
+    blip = np.concatenate([chunks(LOUD, 5), chunks(QUIET, 40)]).astype("<f4")  # 160 ms "mm-hmm"
+    sent = asyncio.run(run_call(engines, [p.tobytes() for p in np.split(blip, 45)], playing=True))
     assert sent == []
     assert seen["replies"] == []
+
+
+def test_barge_in_disabled_without_echo_cancellation():
+    engines, seen = fake_engines()
+
+    async def scenario():
+        sent = []
+
+        async def send(data):
+            sent.append(data)
+
+        call = Call(engines, send, "call-1", barge_in=False)
+        call.set_playing(True)
+        for packet in speech_then_pause():
+            await call.hear(packet)
+        return sent
+
+    assert asyncio.run(scenario()) == []
+    assert seen["replies"] == []
+
+
+def test_heard_text_keeps_only_what_was_played():
+    spoken = [("Coorg is lovely.", 1.0), ("It is five hours away by road.", 2.0)]
+    assert heard_text(spoken, 0) == ""
+    assert heard_text(spoken, 1.0) == "Coorg is lovely."
+    assert heard_text(spoken, 2.0) == "Coorg is lovely. It is five..."
+    assert heard_text(spoken, 9.0) == "Coorg is lovely. It is five hours away by road."
+
+
+async def wait_until(condition):
+    for _ in range(1000):
+        if condition():
+            return
+        await asyncio.sleep(0)
+    raise AssertionError("condition never became true")
+
+
+def test_barge_in_cancels_reply_records_heard_text_and_answers_new_turn():
+    recorded, calls = [], []
+    never = asyncio.Event()
+
+    async def transcribe(audio):
+        return ["what's up", "wait, stop"][len(calls)]
+
+    async def reply(conversation_id, text):
+        calls.append(text)
+        if len(calls) == 1:
+            yield "First sentence here. "
+            await never.wait()  # Still generating when the user interrupts.
+        else:
+            yield "Okay."
+
+    async def synthesize(text):
+        return np.zeros(24000, dtype=np.float32)  # One second per piece.
+
+    async def record_interruption(conversation_id, user_text, heard):
+        recorded.append((conversation_id, user_text, heard))
+
+    engines = Engines(new_detector=detector, transcribe=transcribe, reply=reply,
+                      synthesize=synthesize, record_interruption=record_interruption)
+
+    async def scenario():
+        sent = []
+
+        async def send(data):
+            sent.append(data)
+
+        call = Call(engines, send, "call-1")
+        for packet in speech_then_pause():
+            await call.hear(packet)
+        await wait_until(lambda: call.spoken)
+        call.set_playing(True)
+        first_reply = call.reply_task
+        for packet in speech_then_pause():
+            await call.hear(packet)
+            if {"type": "interrupt"} in sent and call.played is not None and not call.played.done():
+                call.report_played(0.5)  # The browser flushed after half a second.
+        assert first_reply.cancelled()
+        await call.reply_task
+        await call.close()
+        return sent
+
+    sent = asyncio.run(scenario())
+    events = [item for item in sent if isinstance(item, dict)]
+    types = [e["type"] for e in events]
+    assert types.index("interrupt") < types.index("transcript", types.index("interrupt"))
+    assert recorded == [("call-1", "what's up", "First...")]
+    assert calls == ["what's up", "wait, stop"]
+    assert events[-1] == {"type": "reply_end"}
+
+
+def test_missing_played_report_records_nothing_heard():
+    recorded = []
+
+    async def record_interruption(conversation_id, user_text, heard):
+        recorded.append(heard)
+
+    engines, _ = fake_engines()
+    engines.record_interruption = record_interruption
+
+    async def scenario():
+        async def send(data):
+            pass
+
+        call = Call(engines, send, "call-1", played_report_timeout_s=0.01)
+        call.user_text, call.spoken = "hello", [("Hi there.", 1.0)]
+        call.set_playing(True)
+        await call.interrupt()
+        await call.history_task
+
+    asyncio.run(scenario())
+    assert recorded == [""]
 
 
 def test_llm_failure_still_speaks_what_was_generated():

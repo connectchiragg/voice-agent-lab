@@ -5,7 +5,7 @@ import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 from uuid import uuid4
 
 import numpy as np
@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
 from app import database, speech
 from app.pipeline import Call, Engines, Samples, TurnDetector
@@ -61,6 +61,7 @@ def load_engines() -> Engines:
 
     return Engines(new_detector=lambda: TurnDetector(SileroVad(vad_session), turn),
                    transcribe=transcribe, reply=reply, synthesize=synthesize,
+                   record_interruption=database.record_interruption,
                    output_sample_rate=OUTPUT_SAMPLE_RATE)
 
 
@@ -90,6 +91,16 @@ class PlaybackState(BaseModel):
     active: bool
 
 
+class PlayedReport(BaseModel):
+    """Sent after an interrupt: seconds of the interrupted reply's audio played."""
+    model_config = ConfigDict(extra="forbid", strict=True)
+    type: Literal["interrupted"]
+    played_s: float = Field(ge=0, le=3600)
+
+
+ClientEvent = TypeAdapter(Annotated[PlaybackState | PlayedReport, Field(discriminator="type")])
+
+
 @app.get("/")
 async def home() -> FileResponse:
     return FileResponse(ROOT / "static/index.html")
@@ -111,11 +122,14 @@ async def voice(socket: WebSocket) -> None:
 
     try:
         async with asyncio.timeout(15):
-            CallSettings.model_validate_json(await socket.receive_text())
+            settings = CallSettings.model_validate_json(await socket.receive_text())
         if engines is None:
             await send({"type": "error", "error": "Voice models are not loaded."})
             return
-        call = Call(engines, send, str(uuid4()))
+        if not settings.echo_cancelled:
+            logger.warning("No browser echo cancellation; barge-in disabled for this call.")
+        # Without echo cancellation the assistant's own voice would interrupt it.
+        call = Call(engines, send, str(uuid4()), barge_in=settings.echo_cancelled)
         await send({"type": "ready", "sample_rate": engines.output_sample_rate,
                     "encoding": "pcm_f32le"})
         while True:
@@ -123,7 +137,11 @@ async def voice(socket: WebSocket) -> None:
             if frame["type"] == "websocket.disconnect":
                 break
             if frame.get("text") is not None:
-                call.set_playing(PlaybackState.model_validate_json(frame["text"]).active)
+                event = ClientEvent.validate_json(frame["text"])
+                if isinstance(event, PlaybackState):
+                    call.set_playing(event.active)
+                else:
+                    call.report_played(event.played_s)
                 continue
             packet = frame.get("bytes")
             if packet is None:

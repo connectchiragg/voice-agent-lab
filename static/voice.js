@@ -82,6 +82,13 @@ async function startCall() {
         } else if (message.type === "transcript") {
           addLine("user", message.text);
           assistantLine = null;
+          current.player.markReply();
+        } else if (message.type === "interrupt") {
+          // Barge-in: stop speaking now and tell the server how much was heard.
+          const played = current.player.interrupt();
+          socket.send(JSON.stringify({type: "interrupted", played_s: played}));
+          assistantLine?.classList.add("interrupted");
+          assistantLine = null;
         } else if (message.type === "text") {
           assistantLine ??= addLine("assistant", "");
           assistantLine.textContent += message.text;

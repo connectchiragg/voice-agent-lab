@@ -38,6 +38,7 @@ class Utterance:
     audio: Samples
     pause_ms: float  # Silence waited after the last speech before ending the turn.
     completion: float | None  # Smart Turn probability, None if the pause timed out.
+    confident_ms: float = 0  # Speech above the confident threshold, for barge-in checks.
 
 
 class TurnDetector:
@@ -47,15 +48,20 @@ class TurnDetector:
     syllable is kept). After `pause_ms` of silence Smart Turn scores the whole
     utterance; a confident "complete" ends the turn immediately, otherwise we
     keep listening until speech resumes or `max_pause_ms` forces the end.
+
+    It also counts chunks above a stricter `confident_threshold`; while the
+    assistant talks, only that much clear speech counts as an interruption.
     """
 
     def __init__(self, vad: SpeechProbability, turn: TurnCompletion, *,
-                 speech_threshold: float = 0.5, completion_threshold: float = 0.5,
+                 speech_threshold: float = 0.5, confident_threshold: float = 0.8,
+                 completion_threshold: float = 0.5,
                  start_ms: float = 96, pause_ms: float = 200, max_pause_ms: float = 1500,
                  preroll_ms: float = 320, max_turn_s: float = 30) -> None:
         self.vad = vad
         self.turn = turn
         self.speech_threshold = speech_threshold
+        self.confident_threshold = confident_threshold
         self.completion_threshold = completion_threshold
         self.start_chunks = max(1, round(start_ms / CHUNK_MS))
         self.pause_chunks = max(1, round(pause_ms / CHUNK_MS))
@@ -69,10 +75,16 @@ class TurnDetector:
     def speaking(self) -> bool:
         return self.utterance is not None
 
+    @property
+    def confident_ms(self) -> float:
+        """Clear speech in the current utterance so far (0 when not speaking)."""
+        return self.confident * CHUNK_MS if self.speaking else 0
+
     def discard(self) -> None:
         """Drop any partial turn (for example, echo of the assistant's own voice)."""
         self.utterance: list[Samples] | None = None
         self.voiced = 0
+        self.confident = 0  # Consecutive before speech starts; total during it.
         self.silent = 0
         self.preroll.clear()
 
@@ -87,15 +99,19 @@ class TurnDetector:
         return finished
 
     def step(self, chunk: Samples) -> Utterance | None:
-        voiced = self.vad.probability(chunk) >= self.speech_threshold
+        probability = self.vad.probability(chunk)
+        voiced = probability >= self.speech_threshold
+        confident = probability >= self.confident_threshold
         if self.utterance is None:
             self.preroll.append(chunk)
             self.voiced = self.voiced + 1 if voiced else 0
+            self.confident = self.confident + 1 if confident else 0
             if self.voiced >= self.start_chunks:
                 self.utterance = list(self.preroll)
                 self.silent = 0
             return None
         self.utterance.append(chunk)
+        self.confident += confident
         if voiced:
             self.silent = 0
             return None
@@ -113,9 +129,9 @@ class TurnDetector:
     def finish(self, completion: float | None) -> Utterance:
         assert self.utterance is not None
         audio = np.concatenate(self.utterance)
-        pause_ms = self.silent * CHUNK_MS
+        pause_ms, confident_ms = self.silent * CHUNK_MS, self.confident_ms
         self.discard()
-        return Utterance(audio, pause_ms, completion)
+        return Utterance(audio, pause_ms, completion, confident_ms)
 
 
 SENTENCE_END = re.compile(r"(?<=[.!?])[\"')\]]*\s+|\n+")
@@ -155,6 +171,10 @@ class SentenceBuffer:
         return piece or None
 
 
+async def forget_interruption(conversation_id: str, user_text: str, heard: str) -> None:
+    """Default for engines without history: nothing to record."""
+
+
 @dataclass
 class Engines:
     """Everything a call needs, injected so tests can replace any stage."""
@@ -162,7 +182,29 @@ class Engines:
     transcribe: Callable[[Samples], Awaitable[str]]
     reply: Callable[[str, str], AsyncIterator[str]]  # (conversation_id, user text)
     synthesize: Callable[[str], Awaitable[Samples]]
+    # (conversation_id, user text, assistant text the user actually heard)
+    record_interruption: Callable[[str, str, str], Awaitable[None]] = forget_interruption
     output_sample_rate: int = 24000
+
+
+def heard_text(spoken: list[tuple[str, float]], played_s: float) -> str:
+    """The part of a reply the user heard, given seconds of its audio played.
+
+    Whole pieces count while their audio fits; the piece playing at the
+    interruption is cut proportionally by words (speech rate is roughly even).
+    """
+    heard = []
+    for text, seconds in spoken:
+        if played_s >= seconds:
+            heard.append(text)
+            played_s -= seconds
+            continue
+        words = text.split()
+        keep = int(len(words) * max(0.0, played_s) / seconds) if seconds > 0 else 0
+        if keep:
+            heard.append(" ".join(words[:keep]) + "...")
+        break
+    return " ".join(heard)
 
 
 @dataclass
@@ -198,15 +240,30 @@ def decode_pcm(packet: bytes) -> Samples:
 
 
 class Call:
-    """One live call. Mic audio is always consumed; at most one reply runs at a time."""
+    """One live call. Mic audio is always consumed; at most one reply runs at a time.
 
-    def __init__(self, engines: Engines, send: Send, conversation_id: str) -> None:
+    Barge-in: while the assistant is busy, `barge_in_ms` of confident user speech
+    cancels the reply, tells the browser to flush its audio, and records only
+    what the user actually heard. That speech then continues as the next turn.
+    """
+
+    def __init__(self, engines: Engines, send: Send, conversation_id: str, *,
+                 barge_in: bool = True, barge_in_ms: float = 250,
+                 played_report_timeout_s: float = 1.0) -> None:
         self.engines = engines
         self.send = send
         self.conversation_id = conversation_id
         self.detector = engines.new_detector()
+        self.barge_in = barge_in
+        self.barge_in_ms = barge_in_ms
+        self.played_report_timeout_s = played_report_timeout_s
         self.reply_task: asyncio.Task[None] | None = None
+        self.history_task: asyncio.Task[None] | None = None
+        self.played: asyncio.Future[float] | None = None
         self.playing = False  # Reported by the browser player.
+        self.user_text: str | None = None  # Transcript the current reply answers.
+        self.spoken: list[tuple[str, float]] = []  # (piece, audio seconds) sent so far.
+        self.overlapped = False  # Current utterance began while the assistant spoke.
 
     @property
     def assistant_busy(self) -> bool:
@@ -215,21 +272,62 @@ class Call:
     def set_playing(self, active: bool) -> None:
         self.playing = active
 
+    def report_played(self, seconds: float) -> None:
+        """Browser reply to an interrupt: seconds of the reply's audio it played."""
+        if self.played is not None and not self.played.done():
+            self.played.set_result(max(0.0, seconds))
+
     async def hear(self, packet: bytes) -> None:
         samples = decode_pcm(packet)
-        busy = self.assistant_busy
         utterances = await asyncio.to_thread(self.detector.feed, samples)
-        if busy:
-            # Barge-in is not built yet: speech during a reply is the user talking
-            # over it or echo of our own voice. Neither starts a new turn yet.
-            if utterances:
-                logger.info("Ignored %d utterance(s) while the assistant was speaking", len(utterances))
-            self.detector.discard()
-            return
+        if self.assistant_busy:
+            if self.detector.speaking:
+                self.overlapped = True
+            if self.barge_in and self.detector.confident_ms >= self.barge_in_ms:
+                logger.info("Barge-in after %.0f ms of user speech", self.detector.confident_ms)
+                await self.interrupt()
+            else:
+                # Too short or unclear to interrupt: a cough, "mm-hmm", or echo.
+                if utterances:
+                    logger.info("Ignored %d short utterance(s) during the reply", len(utterances))
+                self.overlapped = self.detector.speaking
+                return
         for utterance in utterances:
+            if self.overlapped and utterance.confident_ms < self.barge_in_ms:
+                # Began under the assistant's voice and never became clear speech.
+                self.overlapped = False
+                continue
+            self.overlapped = False
             self.reply_task = asyncio.create_task(self.respond(utterance))
 
+    async def interrupt(self) -> None:
+        """Stop the reply now; record what was heard once the browser reports it."""
+        if self.reply_task is not None and not self.reply_task.done():
+            self.reply_task.cancel()
+            await asyncio.gather(self.reply_task, return_exceptions=True)
+        self.playing = False
+        user_text, spoken = self.user_text, self.spoken
+        self.user_text, self.spoken = None, []
+        self.played = asyncio.get_running_loop().create_future()
+        await self.send({"type": "interrupt"})
+        if user_text is not None:
+            self.history_task = asyncio.create_task(self.record_heard(user_text, spoken))
+
+    async def record_heard(self, user_text: str, spoken: list[tuple[str, float]]) -> None:
+        assert self.played is not None
+        try:
+            played_s = await asyncio.wait_for(asyncio.shield(self.played), self.played_report_timeout_s)
+        except TimeoutError:
+            played_s = 0.0  # No report: assume nothing was heard rather than everything.
+        heard = heard_text(spoken, played_s)
+        logger.info("Interrupted after %.1f s of playback; heard %d chars", played_s, len(heard))
+        await self.engines.record_interruption(self.conversation_id, user_text, heard)
+
     async def respond(self, utterance: Utterance) -> None:
+        if self.history_task is not None:
+            # The next reply must see the trimmed history of the interrupted one.
+            await asyncio.gather(self.history_task, return_exceptions=True)
+            self.history_task = None
         metrics = TurnMetrics(endpoint_ms=utterance.pause_ms)
         started = time.perf_counter()
         try:
@@ -241,6 +339,7 @@ class Call:
         metrics.stt_ms = (time.perf_counter() - started) * 1000
         if not text:
             return
+        self.user_text, self.spoken = text, []
         await self.send({"type": "transcript", "text": text})
 
         pieces: asyncio.Queue[str | None] = asyncio.Queue(maxsize=8)
@@ -255,9 +354,10 @@ class Call:
             await pieces.put(None)
             await speaker
         finally:
-            if not speaker.done():  # Cancelled mid-reply (call ended, or later: barge-in).
+            if not speaker.done():  # Cancelled mid-reply: barge-in or the call ended.
                 speaker.cancel()
                 await asyncio.gather(speaker, return_exceptions=True)
+        self.user_text = None
         await self.send({"type": "reply_end"})
 
     async def think(self, text: str, pieces: "asyncio.Queue[str | None]", metrics: TurnMetrics) -> None:
@@ -283,17 +383,21 @@ class Call:
             except Exception as error:
                 logger.warning("Speech synthesis failed: %s", type(error).__name__)
                 continue
-            if first and len(audio):
+            if not len(audio):
+                continue
+            if first:
                 metrics.tts_first_audio_ms = (time.perf_counter() - started) * 1000
+            self.spoken.append((piece, len(audio) / self.engines.output_sample_rate))
             for start in range(0, len(audio), OUTPUT_PACKET_SAMPLES):
                 await self.send(audio[start:start + OUTPUT_PACKET_SAMPLES].astype("<f4").tobytes())
-            if first and len(audio):
+            if first:
                 first = False
                 payload = metrics.to_payload(metrics.response_ms())
                 logger.info("Turn latency: %s", payload)
                 await self.send(payload)
 
     async def close(self) -> None:
-        if self.reply_task is not None and not self.reply_task.done():
-            self.reply_task.cancel()
-            await asyncio.gather(self.reply_task, return_exceptions=True)
+        for task in (self.reply_task, self.history_task):
+            if task is not None and not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)

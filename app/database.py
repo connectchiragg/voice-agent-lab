@@ -141,3 +141,25 @@ async def stream_conversation(conversation_id: str, message: str) -> AsyncIterat
     )) as stream:
         async for event in stream:
             yield cast(ChatEvent, event)
+
+
+async def record_interruption(conversation_id: str, user_text: str, heard: str) -> None:
+    """Store the interrupted reply as only the text the user actually heard.
+
+    The cancelled graph run may or may not have checkpointed its input (the user
+    turn plus an empty reply), so match on the user text instead of assuming.
+    """
+    messages = await load_history(conversation_id)
+    reply: Message = {"role": "model", "parts": [{"text": heard}], "status": "interrupted"}
+    user: Message = {"role": "user", "parts": [{"text": user_text}], "status": "completed"}
+
+    def is_user_turn(message: Message) -> bool:
+        return message["role"] == "user" and message["parts"][0]["text"] == user_text
+
+    if len(messages) >= 2 and messages[-1]["role"] == "model" and is_user_turn(messages[-2]):
+        messages[-1] = reply
+    elif messages and is_user_turn(messages[-1]):
+        messages.append(reply)
+    else:
+        messages.extend([user, reply])
+    await save_history(conversation_id, messages)
