@@ -43,8 +43,11 @@ How a call flows (`app/pipeline.py`):
    Kokoro synthesizes each while the previous one plays.
 5. Audio goes back in 200 ms packets; the browser plays them gap-free.
 
-Events sent to the browser: `ready`, `transcript`, `text` (reply deltas),
-`metrics`, `notice`, `reply_end`, `interrupt`, `error`. Postgres is used when running,
+Events sent to the browser: `ready`, `transcript`, `caption` (each spoken
+piece's text and audio length, just before its audio), `metrics`, `notice`,
+`reply_end`, `interrupt`, `error`. The browser reveals caption words in time with
+playback, so the screen never runs ahead of the voice; on an interruption the
+remaining words are dropped, matching the history saved on the server. Postgres is used when running,
 otherwise history is in memory (logged at startup).
 
 ### Barge-in

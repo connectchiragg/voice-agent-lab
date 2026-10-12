@@ -1,4 +1,5 @@
 // Provider sends raw mono Float32 PCM; no WAV container needs decoding.
+const MAX_QUEUED_SECONDS = 60;  // Sanity bound only.
 export class StreamAudioPlayer {
   constructor(onActiveChange) {
     this.onActiveChange = onActiveChange;
@@ -45,7 +46,7 @@ export class StreamAudioPlayer {
     combined.set(new Uint8Array(bytes), this.pendingBytes.length);
     const sampleCount = Math.floor(combined.length / 4);
     this.pendingBytes = combined.slice(sampleCount * 4);
-    if (!sampleCount) return false;
+    if (!sampleCount) return null;
     const view = new DataView(combined.buffer);
     const samples = new Float32Array(sampleCount);
     for (let index = 0; index < sampleCount; index++) {
@@ -69,16 +70,17 @@ export class StreamAudioPlayer {
       this.finishIfDrained();
     };
     // Schedule in order; a late packet starts after a small gap rather than in the past.
+    // TTS runs faster than real time, so replies queue well ahead; barge-in flushes them.
     const start = Math.max(this.nextStartTime, this.context.currentTime + 0.02);
-    if (start - this.context.currentTime > 3) {
+    if (start - this.context.currentTime > MAX_QUEUED_SECONDS) {
       this.sources.delete(source);
       source.disconnect();
-      throw new Error("Playback cannot keep up with live audio.");
+      throw new Error("Too much audio queued.");
     }
     source.start(start);
     source.scheduledStart = start;
     this.nextStartTime = start + buffer.duration;
-    return true;
+    return start;  // AudioContext time when this audio begins playing.
   }
 
   finish() {

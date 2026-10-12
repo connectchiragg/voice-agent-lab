@@ -229,8 +229,9 @@ class Engines:
 def heard_text(spoken: list[tuple[str, float]], played_s: float) -> str:
     """The part of a reply the user heard, given seconds of its audio played.
 
-    Whole pieces count while their audio fits; the piece playing at the
-    interruption is cut proportionally by words (speech rate is roughly even).
+    Whole pieces count while their audio fits; in the piece playing at the
+    interruption, words are spread evenly over its audio and the word being
+    spoken counts as heard. The browser reveals captions on the same rule.
     """
     heard = []
     for text, seconds in spoken:
@@ -239,7 +240,8 @@ def heard_text(spoken: list[tuple[str, float]], played_s: float) -> str:
             played_s -= seconds
             continue
         words = text.split()
-        keep = int(len(words) * max(0.0, played_s) / seconds) if seconds > 0 else 0
+        keep = (min(len(words), int(len(words) * played_s / seconds) + 1)
+                if played_s > 0 and seconds > 0 else 0)
         if keep:
             heard.append(" ".join(words[:keep]) + "...")
         break
@@ -400,13 +402,16 @@ class Call:
         await self.send({"type": "reply_end"})
 
     async def think(self, text: str, pieces: "asyncio.Queue[str | None]", metrics: TurnMetrics) -> None:
-        """Stream LLM text to the browser and hand speakable pieces to TTS."""
+        """Hand speakable pieces of the streamed LLM reply to TTS.
+
+        The browser gets text only as captions alongside each piece's audio, so
+        the screen never runs ahead of (or past an interruption of) the speech.
+        """
         chunker = SpeechChunker()
         started = time.perf_counter()
         async for delta in self.engines.reply(self.conversation_id, text):
             if not metrics.llm_first_token_ms:
                 metrics.llm_first_token_ms = (time.perf_counter() - started) * 1000
-            await self.send({"type": "text", "text": delta})
             for piece in chunker.push(delta):
                 await pieces.put(piece)
         for piece in chunker.flush():
@@ -438,6 +443,8 @@ class Call:
                 gaps_s += now - playhead
             playhead = max(playhead or now, now) + seconds
             self.spoken.append((piece, seconds))
+            # Sent just before the piece's audio; the browser reveals it as it plays.
+            await self.send({"type": "caption", "text": piece, "seconds": round(seconds, 3)})
             for start in range(0, len(audio), OUTPUT_PACKET_SAMPLES):
                 await self.send(audio[start:start + OUTPUT_PACKET_SAMPLES].astype("<f4").tobytes())
             if first:

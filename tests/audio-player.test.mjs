@@ -145,3 +145,12 @@ test("interrupt reports seconds of the current reply that were played", async ()
   player.markReply();
   assert.equal(player.interrupt(), 0);
 });
+
+test("enqueue returns when the audio starts, and long replies may queue far ahead", async () => {
+  const {player} = await playerWithAudio();
+  assert.equal(player.enqueue(pcm([0.1, 0.2]).buffer), 0.08);
+  const tenSeconds = pcm(new Array(240000).fill(0.1)).buffer;
+  player.enqueue(tenSeconds);
+  assert.ok(player.enqueue(pcm([0.1]).buffer) > 10);  // Was rejected beyond 3 s.
+  assert.equal(player.enqueue(new Uint8Array([1]).buffer), null);  // Partial sample only.
+});

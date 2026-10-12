@@ -4,6 +4,29 @@ const status = document.querySelector("#status");
 const messages = document.querySelector("#messages");
 const metrics = document.querySelector("#metrics");
 let assistantLine = null;
+let pendingCaption = null;  // Caption whose audio has not been queued yet.
+const captionTimers = new Set();
+
+// Reveal a spoken piece word by word across its audio, starting when it plays.
+function scheduleCaption(player, caption, startTime) {
+  const line = assistantLine ??= addLine("assistant", "");
+  const words = caption.text.split(/\s+/).filter(Boolean);
+  const startDelay = Math.max(0, startTime - player.context.currentTime) * 1000;
+  words.forEach((word, index) => {
+    const timer = setTimeout(() => {
+      captionTimers.delete(timer);
+      line.textContent += (line.textContent ? " " : "") + word;
+      messages.scrollTop = messages.scrollHeight;
+    }, startDelay + (caption.seconds * 1000 * index) / words.length);
+    captionTimers.add(timer);
+  });
+}
+
+function cancelCaptions() {
+  captionTimers.forEach(clearTimeout);
+  captionTimers.clear();
+  pendingCaption = null;
+}
 
 function addLine(role, text) {
   const line = document.createElement("p");
@@ -18,6 +41,7 @@ let call = null;
 function endCall(expected = call) {
   if (!expected || expected !== call) return;
   call = null;
+  cancelCaptions();
   expected.microphone?.getTracks().forEach(track => track.stop());
   expected.capture?.disconnect();
   expected.source?.disconnect();
@@ -58,7 +82,11 @@ async function startCall() {
       if (call !== current) return;
       try {
         if (typeof event.data !== "string") {
-          current.player.enqueue(event.data);
+          const startTime = current.player.enqueue(event.data);
+          if (pendingCaption && startTime !== null) {
+            scheduleCaption(current.player, pendingCaption, startTime);
+            pendingCaption = null;
+          }
           return;
         }
         const message = JSON.parse(event.data);
@@ -82,19 +110,19 @@ async function startCall() {
         } else if (message.type === "transcript") {
           addLine("user", message.text);
           assistantLine = null;
+          pendingCaption = null;
           current.player.markReply();
         } else if (message.type === "interrupt") {
           // Barge-in: stop speaking now and tell the server how much was heard.
           const played = current.player.interrupt();
           socket.send(JSON.stringify({type: "interrupted", played_s: played}));
+          cancelCaptions();  // The screen keeps only what was heard.
           assistantLine?.classList.add("interrupted");
           assistantLine = null;
-        } else if (message.type === "text") {
-          assistantLine ??= addLine("assistant", "");
-          assistantLine.textContent += message.text;
-          messages.scrollTop = messages.scrollHeight;
+        } else if (message.type === "caption") {
+          pendingCaption = message;
         } else if (message.type === "reply_end") {
-          assistantLine = null;
+          // Captions may still be revealing; the next transcript starts a new line.
         } else if (message.type === "notice") {
           addLine("notice", message.text);
         } else if (message.type === "metrics") {

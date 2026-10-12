@@ -189,7 +189,12 @@ def test_finished_turn_is_transcribed_answered_and_spoken():
     events = [item for item in sent if isinstance(item, dict)]
     audio = b"".join(item for item in sent if isinstance(item, bytes))
     assert events[0] == {"type": "transcript", "text": "what's up"}
-    assert [e["text"] for e in events if e["type"] == "text"] == ["Hi there. ", "All good!"]
+    # Each spoken piece is captioned just before its own audio.
+    captions = [e for e in events if e["type"] == "caption"]
+    assert [c["text"] for c in captions] == ["Hi there.", "All good!"]
+    assert all(c["seconds"] == 0.25 for c in captions)
+    first_caption = sent.index(captions[0])
+    assert isinstance(sent[first_caption + 1], bytes)
     assert events[-1] == {"type": "reply_end"}
     (metrics,) = [e for e in events if e["type"] == "metrics"]
     assert metrics["endpoint_ms"] == round(6 * 32)
@@ -237,7 +242,8 @@ def test_heard_text_keeps_only_what_was_played():
     spoken = [("Coorg is lovely.", 1.0), ("It is five hours away by road.", 2.0)]
     assert heard_text(spoken, 0) == ""
     assert heard_text(spoken, 1.0) == "Coorg is lovely."
-    assert heard_text(spoken, 2.0) == "Coorg is lovely. It is five..."
+    assert heard_text(spoken, 2.0) == "Coorg is lovely. It is five hours..."  # 4th word playing.
+    assert heard_text(spoken, 1.01) == "Coorg is lovely. It..."
     assert heard_text(spoken, 9.0) == "Coorg is lovely. It is five hours away by road."
 
 
@@ -298,7 +304,7 @@ def test_barge_in_cancels_reply_records_heard_text_and_answers_new_turn():
     events = [item for item in sent if isinstance(item, dict)]
     types = [e["type"] for e in events]
     assert types.index("interrupt") < types.index("transcript", types.index("interrupt"))
-    assert recorded == [("call-1", "what's up", "First...")]
+    assert recorded == [("call-1", "what's up", "First sentence...")]
     assert calls == ["what's up", "wait, stop"]
     assert events[-1] == {"type": "reply_end"}
 

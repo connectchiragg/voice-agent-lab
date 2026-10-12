@@ -31,7 +31,7 @@ def test_call_hears_a_turn_and_replies_with_audio(engines):
                 audio += len(frame["bytes"])
             else:
                 kinds.append(__import__("json").loads(frame["text"])["type"])
-        assert "metrics" in kinds and "text" in kinds
+        assert "metrics" in kinds and kinds.count("caption") == 2
         assert audio == 2 * 6000 * 4
         socket.send_json({"type": "playback", "active": False})
     assert len(engines["replies"]) == 1

@@ -177,5 +177,5 @@ async def voice(socket: WebSocket) -> None:
             await call.close()
         try:
             await socket.close()
-        except RuntimeError:
-            pass
+        except (RuntimeError, WebSocketDisconnect):
+            pass  # Already closed by the browser.
