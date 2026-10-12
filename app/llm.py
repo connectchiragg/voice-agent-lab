@@ -2,12 +2,14 @@
 import asyncio
 import logging
 import os
+import time
 from collections.abc import AsyncIterator, Sequence
+from contextlib import nullcontext
 from typing import Any
 
-from groq import APIConnectionError, APIError, APITimeoutError, AsyncGroq
+from groq import APIConnectionError, APIError, APITimeoutError, AsyncGroq, RateLimitError
 
-from app.speech import SpeechError, create_client, provider_error
+from app.speech import SpeechError, groq_client, provider_error, rate_limit_wait_s
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -60,31 +62,41 @@ async def stream_reply(message: str, history: Sequence[Any], client: AsyncGroq |
 
     Groq's first token normally arrives in well under a second, but a request
     occasionally stalls. A caller is waiting in silence, so if nothing arrives
-    within `first_token_s` we abandon that request and retry once. Nothing has
-    been yielded yet at that point, so a retry cannot duplicate text.
+    within `first_token_s` we abandon that request and retry once. A short
+    rate-limit wait (429 with retry-after <= 3 s) is also retried once. Nothing
+    has been yielded before a retry, so text is never duplicated.
     """
-    owned = client is None
-    client = client or create_client()
     messages = to_chat_messages(message, history)
-    try:
-        for attempt in (1, 2):
-            try:
-                stream, deltas, first = await asyncio.wait_for(open_reply(client, messages), first_token_s)
-                break
-            except (TimeoutError, APITimeoutError, APIConnectionError) as error:
-                if attempt == 2:
-                    raise
-                logger.warning("No first token from Groq (%s); retrying once", type(error).__name__)
+    async with (nullcontext(client) if client is not None else groq_client()) as groq:
         try:
-            yield first
-            async for delta in deltas:
-                yield delta
-        finally:
-            await stream.close()
-    except TimeoutError:
-        raise SpeechError(504, "The language model did not respond in time.") from None
-    except APIError as error:
-        raise provider_error(error) from error
-    finally:
-        if owned:
-            await client.close()
+            for attempt in (1, 2):
+                started = time.perf_counter()
+                try:
+                    stream, deltas, first = await asyncio.wait_for(open_reply(groq, messages), first_token_s)
+                except (TimeoutError, APITimeoutError, APIConnectionError) as error:
+                    logger.warning("No first token from Groq after %.0f ms (%s), attempt %d",
+                                   (time.perf_counter() - started) * 1000, type(error).__name__, attempt)
+                    if attempt == 2:
+                        raise
+                    continue
+                except RateLimitError as error:
+                    wait = rate_limit_wait_s(error)
+                    if attempt == 2 or wait is None:
+                        raise
+                    logger.warning("Groq LLM rate limited; retrying in %.1f s", wait)
+                    await asyncio.sleep(wait)
+                    continue
+                elapsed_ms = (time.perf_counter() - started) * 1000
+                if elapsed_ms > 1000:
+                    logger.warning("Slow Groq first token: %.0f ms, attempt %d", elapsed_ms, attempt)
+                break
+            try:
+                yield first
+                async for delta in deltas:
+                    yield delta
+            finally:
+                await stream.close()
+        except TimeoutError:
+            raise SpeechError(504, "The language model did not respond in time.") from None
+        except APIError as error:
+            raise provider_error(error) from error

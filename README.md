@@ -63,9 +63,19 @@ Measured: audio stops about 300 ms after the user starts talking. Barge-in is
 disabled when the browser reports no echo cancellation, because the assistant's
 own voice would otherwise interrupt it. Headphones are the most reliable setup.
 
-Groq occasionally stalls before the first token. If none arrives within 3.5 s
-the request is abandoned and retried once (cause not yet identified; seen
-mostly right after an interruption).
+### Groq reliability
+
+Free-tier limits for the LLM: 30 requests per minute (only stated in 429
+bodies), 1,000 per day and 8,000 tokens per minute; Whisper allows 2,000 per day.
+Each user turn makes two requests (STT and LLM).
+
+- One shared Groq client for the process (connection reuse; first token about
+  110-170 ms instead of opening a TLS connection per request).
+- A 429 asking for a wait of 3 s or less is waited out and retried once.
+- Groq occasionally sends no first token. After 3.5 s the request is abandoned
+  and retried once. Root cause is not confirmed: not rate limiting (that returns
+  an immediate 429) and no event-loop blocking was seen. A watchdog logs any
+  event-loop block over 250 ms, and slow first tokens are logged per attempt.
 
 Next: cut first-sentence TTS time, tool calling, then post-call Temporal and
 CrewAI workflows.

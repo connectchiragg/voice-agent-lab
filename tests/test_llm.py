@@ -66,3 +66,38 @@ def test_history_marks_cut_off_replies():
     messages = llm.to_chat_messages("go on", history)
     assert messages[2]["role"] == "assistant"
     assert "cut off" in messages[2]["content"]
+
+
+def test_short_rate_limit_wait_is_retried(monkeypatch):
+    import httpx
+    from groq import RateLimitError
+
+    response = httpx.Response(429, headers={"retry-after": "0"},
+                              request=httpx.Request("POST", "https://api.groq.com"))
+    limited = RateLimitError("limit", response=response, body=None)
+
+    class LimitedOnce(Client):
+        async def create(self, **request):
+            if not self.created:
+                self.created.append(None)
+                raise limited
+            return await super().create(**request)
+
+    client = LimitedOnce([Stream(["Hi"])])
+    assert asyncio.run(collect(client)) == ["Hi"]
+
+
+def test_long_rate_limit_wait_fails_fast():
+    import httpx
+    from groq import RateLimitError
+
+    response = httpx.Response(429, headers={"retry-after": "30"},
+                              request=httpx.Request("POST", "https://api.groq.com"))
+
+    class Limited(Client):
+        async def create(self, **request):
+            raise RateLimitError("limit", response=response, body=None)
+
+    with pytest.raises(SpeechError) as error:
+        asyncio.run(collect(Limited([])))
+    assert error.value.status_code == 429

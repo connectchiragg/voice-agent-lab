@@ -65,11 +65,26 @@ def load_engines() -> Engines:
                    output_sample_rate=OUTPUT_SAMPLE_RATE)
 
 
+async def watch_event_loop(interval_s: float = 0.1, threshold_s: float = 0.25) -> None:
+    """Warn when something blocks the event loop: audio and network both stall then."""
+    loop = asyncio.get_running_loop()
+    while True:
+        started = loop.time()
+        await asyncio.sleep(interval_s)
+        lag = loop.time() - started - interval_s
+        if lag > threshold_s:
+            logger.warning("Event loop blocked for %.0f ms", lag * 1000)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.engines = await asyncio.to_thread(load_engines)
-    async with database.lifespan(app):
-        yield
+    watcher = asyncio.create_task(watch_event_loop())
+    try:
+        async with speech.shared_groq_client(), database.lifespan(app):
+            yield
+    finally:
+        watcher.cancel()
 
 
 app = FastAPI(title="Voice Agent Lab", docs_url=None, redoc_url=None, openapi_url=None,
