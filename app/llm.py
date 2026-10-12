@@ -1,4 +1,4 @@
-"""Streamed replies and tool calls from an open-weight model on Groq (default: Qwen)."""
+"""Streamed replies and tool calls from an open-weight model on Groq (default: gpt-oss-120b)."""
 import asyncio
 import logging
 import os
@@ -119,9 +119,9 @@ async def open_reply(client: AsyncGroq, messages: list[dict[str, Any]],
     if tools and tool_choice:
         options["tool_choice"] = tool_choice
     stream = await client.with_options(timeout=10).chat.completions.create(
-        model=os.getenv("GROQ_LLM_MODEL", "qwen/qwen3.8-27b"),
+        model=os.getenv("GROQ_LLM_MODEL", "openai/gpt-oss-120b"),
         messages=messages,  # type: ignore[arg-type]
-        reasoning_effort=os.getenv("GROQ_LLM_REASONING", "none"),  # type: ignore[arg-type]
+        reasoning_effort=os.getenv("GROQ_LLM_REASONING", "low"),  # type: ignore[arg-type]
         max_completion_tokens=400,
         stream=True,
         **options,

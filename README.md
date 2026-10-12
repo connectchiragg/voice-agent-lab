@@ -11,7 +11,7 @@ mic (16 kHz PCM) -> VAD + turn detection -> STT -> LLM -> TTS -> speaker (24 kHz
 | VAD | Silero VAD | local CPU |
 | Turn detection | Smart Turn v3 | local CPU |
 | STT | Whisper large-v3-turbo | Groq free tier |
-| LLM | Qwen 3.8 27B (open weights) | Groq free tier |
+| LLM | gpt-oss-120b, low reasoning (open weights) | Groq free tier |
 | TTS | Kokoro-82M | local |
 
 No frontier or paid APIs. Earlier experiments (Gemini, Cartesia, MiniCPM-o,
@@ -26,7 +26,7 @@ M2 / 8 GB with recorded speech over the real WebSocket (3 turns):
 |---|---|
 | End of turn (Silero pause + Smart Turn) | 192 ms |
 | STT (Groq Whisper) | 224–341 ms |
-| LLM first token (Groq Qwen, reasoning off) | 161–317 ms |
+| LLM first token (Groq; measured with Qwen) | 161–317 ms |
 | TTS first piece (Kokoro, local) | 515–1320 ms |
 | **User stops speaking to first audio sent** | **1.1–2.2 s** |
 
@@ -101,9 +101,10 @@ Voice-specific behaviour:
   at 12 messages: Groq's free tier allows 7,000 input tokens per minute.
   Input tokens and Groq queue time are logged for every call.
 
-Model choice (`GROQ_LLM_MODEL`): Qwen 3.8 27B is fastest but skipped tools on
-follow-up questions (6/9 correct in a tool-use check); gpt-oss-120b with low
-reasoning was 9/9 correct, about 250 ms slower to the first token.
+Model choice (`GROQ_LLM_MODEL`): the default is gpt-oss-120b with low reasoning,
+9/9 correct in a tool-use check. Qwen 3.8 27B (reasoning off) is about 250 ms
+faster to the first token but skipped tools on follow-up questions (6/9) and
+made up answers instead.
 
 Next: post-call Temporal and CrewAI workflows.
 
