@@ -11,6 +11,15 @@ from phonemizer.backend import EspeakBackend
 OUTPUT_SAMPLE_RATE = 24000
 # Markdown and symbols that a voice should not read aloud.
 UNSPOKEN = re.compile(r"[*_#`~>|\[\]]+")
+# Typographic characters some models emit, mapped to what espeak pronounces well.
+PLAIN = str.maketrans({"\u2010": "-", "\u2011": "-", "\u2012": "-", "\u2013": ",",
+                       "\u2014": ",", "\u00a0": " ", "\u202f": " ", "\u2009": " ",
+                       "\u2018": "'", "\u2019": "'", "\u201c": '"', "\u201d": '"', "\u2026": "..."})
+
+
+def speakable(text: str) -> str:
+    text = UNSPOKEN.sub("", text.translate(PLAIN))
+    return re.sub(r"\s+", " ", re.sub(r"\s+,", ",", text)).strip()
 
 
 class KokoroVoice:
@@ -29,7 +38,7 @@ class KokoroVoice:
         return "".join(char for char in raw if char in self.kokoro.tokenizer.vocab).strip()
 
     def synthesize(self, text: str) -> NDArray[np.float32]:
-        text = UNSPOKEN.sub("", text).strip()
+        text = speakable(text)
         if not text:
             return np.empty(0, dtype=np.float32)
         with self.lock:

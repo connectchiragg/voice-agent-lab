@@ -78,8 +78,34 @@ Each user turn makes two requests (STT and LLM).
   an immediate 429) and no event-loop blocking was seen. A watchdog logs any
   event-loop block over 250 ms, and slow first tokens are logged per attempt.
 
-Next: cut first-sentence TTS time, tool calling, then post-call Temporal and
-CrewAI workflows.
+### Tool calling
+
+The agent (`app/database.py`) is a LangGraph loop: `agent -> tools -> agent`,
+at most three tool rounds per turn, each step checkpointed. Tools
+(`app/tools.py`) are free and keyless:
+
+- `get_weather`: Open-Meteo geocoding (most populous match, cached) and a
+  three-day forecast, returned as short phrases to save input tokens.
+- `get_time`: any other time zone, as 12-hour time. The user's own date and
+  time are in the system prompt on every call, so the model never invents them.
+
+Voice-specific behaviour:
+
+- If a tool is still running after 300 ms and nothing has been said, the
+  assistant says "Let me check that." Instant tools get no filler.
+- Tool errors and timeouts (5 s) return to the model as results, so it can
+  apologise or retry with another place name. Open-Meteo 429/5xx is retried once.
+- A short reply that promises a lookup without calling a tool ("Let me look
+  that up.") is retried once with `tool_choice="required"`.
+- Earlier turns' tool calls and results are not re-sent, and history is capped
+  at 12 messages: Groq's free tier allows 7,000 input tokens per minute.
+  Input tokens and Groq queue time are logged for every call.
+
+Model choice (`GROQ_LLM_MODEL`): Qwen 3.8 27B is fastest but skipped tools on
+follow-up questions (6/9 correct in a tool-use check); gpt-oss-120b with low
+reasoning was 9/9 correct, about 250 ms slower to the first token.
+
+Next: post-call Temporal and CrewAI workflows.
 
 ## Run locally
 
