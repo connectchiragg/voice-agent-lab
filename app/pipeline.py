@@ -134,41 +134,80 @@ class TurnDetector:
         return Utterance(audio, pause_ms, completion, confident_ms)
 
 
-SENTENCE_END = re.compile(r"(?<=[.!?])[\"')\]]*\s+|\n+")
-CLAUSE_END = re.compile(r"(?<=[,;:—])\s+")
+WORD = re.compile(r"\S+(\s+|$)")
+SENTENCE_END = re.compile(r"[.!?][\"'”’)\]]*$")
+CLAUSE_END = re.compile(r"[,;:—–]$")
+# Words a spoken piece should not end on ("...a top choice for").
+DANGLING = frozenset("a an the to of for in on at by with from and or but nor so as is are was "
+                     "were be my your our their its his her this that these those which who".split())
 
 
-class SentenceBuffer:
-    """Cut streamed text into speakable pieces as early as is natural.
+class SpeechChunker:
+    """Cut streamed LLM text into pieces for TTS, growing them over the reply.
 
-    The first piece may end at a clause boundary (a comma) so speech starts
-    sooner; later pieces end at sentences, which sound smoother.
+    Kokoro costs ~240 ms plus ~0.22 s per second of speech, so a short first
+    piece starts audio sooner. Each later piece is synthesized while the
+    previous one plays, so it may be longer; after the schedule, pieces are
+    whole sentences for the most natural prosody.
+
+    Within a piece's word budget (plus a little lookahead) we cut at the first
+    sentence end, or a clause end once a few words are in. With no boundary,
+    we cut at the budget, never on a dangling word like "the" or "for".
     """
 
-    def __init__(self, first_clause_chars: int = 24) -> None:
+    def __init__(self, schedule: tuple[int, ...] = (6, 12), sentence_cap: int = 30,
+                 lookahead: int = 3, min_clause_words: int = 3) -> None:
         self.text = ""
-        self.started = False
-        self.first_clause_chars = first_clause_chars
+        self.pieces = 0
+        self.schedule = schedule
+        self.sentence_cap = sentence_cap
+        self.lookahead = lookahead
+        self.min_clause_words = min_clause_words
 
     def push(self, delta: str) -> list[str]:
         self.text += delta
+        return self.drain(final=False)
+
+    def flush(self) -> list[str]:
+        return self.drain(final=True)
+
+    def drain(self, *, final: bool) -> list[str]:
         pieces = []
-        while True:
-            match = SENTENCE_END.search(self.text)
-            if match is None and not self.started:
-                clause = CLAUSE_END.search(self.text)
-                if clause and clause.start() >= self.first_clause_chars:
-                    match = clause
-            if match is None:
-                return pieces
-            piece, self.text = self.text[:match.start()].strip(), self.text[match.end():]
+        while (cut := self.next_cut(final)) is not None:
+            piece, self.text = self.text[:cut].strip(), self.text[cut:]
             if piece:
                 pieces.append(piece)
-                self.started = True
+                self.pieces += 1
+        return pieces
 
-    def flush(self) -> str | None:
-        piece, self.text = self.text.strip(), ""
-        return piece or None
+    def next_cut(self, final: bool) -> int | None:
+        """Character offset ending the next piece, or None to wait for more text."""
+        words = [match for match in WORD.finditer(self.text)
+                 if final or match.group(1)]  # Unless final, the last word may be partial.
+        if not words:
+            return None
+        sentences_only = self.pieces >= len(self.schedule)
+        budget = self.sentence_cap if sentences_only else self.schedule[self.pieces]
+        for count, match in enumerate(words, start=1):
+            word = match.group(0).strip()
+            if SENTENCE_END.search(word) or "\n" in match.group(1):
+                return match.end()
+            if (not sentences_only and count >= self.min_clause_words
+                    and CLAUSE_END.search(word)):
+                return match.end()
+            if count >= budget + self.lookahead:
+                return self.forced_cut(words, budget)
+        return words[-1].end() if final else None
+
+    def forced_cut(self, words: list[re.Match[str]], budget: int) -> int:
+        """No natural boundary in reach: prefer the last clause end, else trim danglers."""
+        for index in range(budget, self.min_clause_words - 1, -1):
+            if CLAUSE_END.search(words[index - 1].group(0).strip()):
+                return words[index - 1].end()
+        index = budget
+        while index > 2 and words[index - 1].group(0).strip().lower() in DANGLING:
+            index -= 1
+        return words[index - 1].end()
 
 
 async def forget_interruption(conversation_id: str, user_text: str, heard: str) -> None:
@@ -362,20 +401,26 @@ class Call:
 
     async def think(self, text: str, pieces: "asyncio.Queue[str | None]", metrics: TurnMetrics) -> None:
         """Stream LLM text to the browser and hand speakable pieces to TTS."""
-        sentences = SentenceBuffer()
+        chunker = SpeechChunker()
         started = time.perf_counter()
         async for delta in self.engines.reply(self.conversation_id, text):
             if not metrics.llm_first_token_ms:
                 metrics.llm_first_token_ms = (time.perf_counter() - started) * 1000
             await self.send({"type": "text", "text": delta})
-            for piece in sentences.push(delta):
+            for piece in chunker.push(delta):
                 await pieces.put(piece)
-        if (rest := sentences.flush()) is not None:
-            await pieces.put(rest)
+        for piece in chunker.flush():
+            await pieces.put(piece)
 
     async def speak(self, pieces: "asyncio.Queue[str | None]", metrics: TurnMetrics) -> None:
-        """Synthesize pieces in order while the LLM is still generating."""
+        """Synthesize pieces in order while the LLM is still generating.
+
+        Also estimates silent gaps: if a piece is ready only after the previous
+        audio would have finished playing, the listener hears a pause.
+        """
         first = True
+        playhead: float | None = None  # When the audio sent so far finishes playing.
+        gaps_s = 0.0
         while (piece := await pieces.get()) is not None:
             started = time.perf_counter()
             try:
@@ -387,7 +432,12 @@ class Call:
                 continue
             if first:
                 metrics.tts_first_audio_ms = (time.perf_counter() - started) * 1000
-            self.spoken.append((piece, len(audio) / self.engines.output_sample_rate))
+            seconds = len(audio) / self.engines.output_sample_rate
+            now = time.perf_counter()
+            if playhead is not None and now > playhead:
+                gaps_s += now - playhead
+            playhead = max(playhead or now, now) + seconds
+            self.spoken.append((piece, seconds))
             for start in range(0, len(audio), OUTPUT_PACKET_SAMPLES):
                 await self.send(audio[start:start + OUTPUT_PACKET_SAMPLES].astype("<f4").tobytes())
             if first:
@@ -395,6 +445,8 @@ class Call:
                 payload = metrics.to_payload(metrics.response_ms())
                 logger.info("Turn latency: %s", payload)
                 await self.send(payload)
+        if gaps_s > 0.05:
+            logger.info("Estimated playback gaps: %.0f ms over %d pieces", gaps_s * 1000, len(self.spoken))
 
     async def close(self) -> None:
         for task in (self.reply_task, self.history_task):

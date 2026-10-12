@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 
 from app import pipeline
-from app.pipeline import Call, Engines, SentenceBuffer, TurnDetector, decode_pcm, heard_text
+from app.pipeline import Call, Engines, SpeechChunker, TurnDetector, decode_pcm, heard_text
 from app.vad import CHUNK
 
 LOUD, QUIET = 0.3, 0.0
@@ -88,14 +88,51 @@ def test_discard_drops_partial_turn():
     assert turns.feed(chunks(QUIET, 10)) == []
 
 
-def test_sentence_buffer_starts_early_then_speaks_whole_sentences():
-    buffer = SentenceBuffer(first_clause_chars=10)
+def chunk_all(deltas, **options):
+    chunker = SpeechChunker(**options)
     pieces = []
-    for delta in ["Sure thing, ", "Coorg is lovely", " in winter. It's about ", "five hours away! ", "Want tips?"]:
-        pieces += buffer.push(delta)
-    pieces.append(buffer.flush())
-    assert pieces == ["Sure thing,", "Coorg is lovely in winter.", "It's about five hours away!", "Want tips?"]
-    assert buffer.flush() is None
+    for delta in deltas:
+        pieces += chunker.push(delta)
+    return pieces + chunker.flush()
+
+
+def stream_words(text):
+    """Deliver text the way an LLM does: small deltas that split words."""
+    return [text[i:i + 3] for i in range(0, len(text), 3)]
+
+
+def test_chunker_grows_pieces_and_prefers_natural_boundaries():
+    text = ("Sure thing, Coorg is lovely in winter. It is about five hours away, "
+            "so most people stay a night or two. The coffee estates are worth a visit. Want tips?")
+    assert chunk_all(stream_words(text)) == [
+        "Sure thing, Coorg is lovely in winter.",     # Sentence end within 6 + 3 words.
+        "It is about five hours away,",               # Clause end in piece two.
+        "so most people stay a night or two.",        # Sentences from here on.
+        "The coffee estates are worth a visit.",
+        "Want tips?",
+    ]
+
+
+def test_chunker_cuts_long_openers_without_dangling_words():
+    text = "Heading out to the Western Ghats for the weekend is a great plan for you."
+    pieces = chunk_all(stream_words(text))
+    assert pieces[0] == "Heading out to the Western Ghats"  # Not "...Ghats for".
+    assert " ".join(pieces) == text
+
+
+def test_chunker_waits_for_partial_words_and_flushes_the_rest():
+    chunker = SpeechChunker()
+    assert chunker.push("Hello there") == []          # "there" may be incomplete.
+    assert chunker.push(". How") == ["Hello there."]
+    assert chunker.flush() == ["How"]
+    assert chunker.flush() == []
+
+
+def test_chunker_caps_run_on_sentences():
+    words = " ".join(f"word{i}" for i in range(80))
+    pieces = chunk_all([words], schedule=(), sentence_cap=30, lookahead=3)
+    assert all(len(piece.split()) <= 30 for piece in pieces)
+    assert " ".join(pieces) == words
 
 
 def test_decode_pcm_rejects_bad_packets():

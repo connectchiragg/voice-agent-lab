@@ -38,8 +38,9 @@ How a call flows (`app/pipeline.py`):
    more speech or a 1.5 s timeout.
 3. `Call.respond`: Groq Whisper transcribes the turn; the LangGraph agent
    (`app/database.py`) streams the reply from Groq and checkpoints history.
-4. `SentenceBuffer` cuts streamed text into speakable pieces (the first may end
-   at a comma) and Kokoro synthesizes them while the LLM keeps generating.
+4. `SpeechChunker` cuts streamed text into pieces that grow over the reply
+   (about 6 words, then 12, then whole sentences) at natural boundaries, and
+   Kokoro synthesizes each while the previous one plays.
 5. Audio goes back in 200 ms packets; the browser plays them gap-free.
 
 Events sent to the browser: `ready`, `transcript`, `text` (reply deltas),
