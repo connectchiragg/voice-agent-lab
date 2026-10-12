@@ -1,10 +1,14 @@
 """Groq transcription of complete clips, separate from speech synthesis."""
 
+import io
 import logging
 import os
+import wave
 from pathlib import Path
 
+import numpy as np
 from dotenv import load_dotenv
+from numpy.typing import NDArray
 from groq import APIError, APIStatusError, APITimeoutError, AsyncGroq
 
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
@@ -49,6 +53,18 @@ def provider_error(error: APIError) -> SpeechError:
         if error.status_code == 404:
             return SpeechError(503, "The configured Groq model is unavailable.")
     return SpeechError(502, "Groq is unavailable. Please try again.")
+
+
+def pcm_to_wav(samples: NDArray[np.float32], sample_rate: int = 16000) -> bytes:
+    """Wrap float32 PCM as 16-bit mono WAV, a format Groq accepts directly."""
+    pcm16 = (np.clip(samples, -1, 1) * 32767).astype("<i2")
+    output = io.BytesIO()
+    with wave.open(output, "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(sample_rate)
+        wav.writeframes(pcm16.tobytes())
+    return output.getvalue()
 
 
 async def transcribe(audio: bytes, media_type: str) -> str:

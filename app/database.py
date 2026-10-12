@@ -1,7 +1,8 @@
-"""A one-node conversation workflow with PostgreSQL checkpoints."""
+"""A one-node conversation workflow with PostgreSQL (or in-memory) checkpoints."""
+import logging
 import os
 from collections.abc import AsyncIterator
-from contextlib import aclosing, asynccontextmanager
+from contextlib import AsyncExitStack, aclosing, asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal, NotRequired, TypedDict, cast
@@ -10,14 +11,17 @@ from dotenv import load_dotenv
 from fastapi import FastAPI
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import BaseCheckpointSaver
+from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from psycopg.conninfo import make_conninfo
 
+from app.llm import stream_reply
 
 load_dotenv(Path(__file__).resolve().parent.parent / ".env.docker")
+logger = logging.getLogger("uvicorn.error")
 
 MessageStatus = Literal["completed", "interrupted"]
 
@@ -40,12 +44,6 @@ class Conversation(TypedDict):
 class ChatEvent(TypedDict):
     type: Literal["start", "delta"]
     text: NotRequired[str]
-
-
-async def stream_reply(message: str, history: list[Message]) -> AsyncIterator[str]:
-    """LLM seam: the Groq open-weight model replaces the retired Gemini client here."""
-    raise NotImplementedError("LLM not wired yet.")
-    yield ""  # Unreachable; marks this as an async generator.
 
 
 ConversationGraph = CompiledStateGraph[Conversation, None, Conversation, Conversation]
@@ -86,14 +84,22 @@ def build_graph(checkpointer: BaseCheckpointSaver[str]) -> ConversationGraph:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """Use local Postgres when it is running; otherwise keep history in memory."""
     global graph
-    connection_string = make_conninfo(
-        host="127.0.0.1", port=5432, dbname="voice_agent", user="voice_agent",
-        password=os.environ["POSTGRES_PASSWORD"], connect_timeout=5,
-        options="-c statement_timeout=5000",
-    )
-    async with AsyncPostgresSaver.from_conn_string(connection_string) as saver:
-        await saver.setup()
+    async with AsyncExitStack() as stack:
+        try:
+            connection_string = make_conninfo(
+                host="127.0.0.1", port=5432, dbname="voice_agent", user="voice_agent",
+                password=os.environ["POSTGRES_PASSWORD"], connect_timeout=5,
+                options="-c statement_timeout=5000",
+            )
+            saver: BaseCheckpointSaver[str] = await stack.enter_async_context(
+                AsyncPostgresSaver.from_conn_string(connection_string))
+            await saver.setup()
+        except Exception as error:
+            logger.warning("Postgres unavailable (%s); conversation history is in memory "
+                           "and lost on restart.", type(error).__name__)
+            saver = InMemorySaver()
         graph = build_graph(saver)
         try:
             yield

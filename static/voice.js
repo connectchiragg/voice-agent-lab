@@ -2,6 +2,17 @@ import {StreamAudioPlayer} from "./audio-player.js";
 const button = document.querySelector("#call");
 const status = document.querySelector("#status");
 const messages = document.querySelector("#messages");
+const metrics = document.querySelector("#metrics");
+let assistantLine = null;
+
+function addLine(role, text) {
+  const line = document.createElement("p");
+  line.className = role;
+  line.textContent = text;
+  messages.append(line);
+  messages.scrollTop = messages.scrollHeight;
+  return line;
+}
 let call = null;
 
 function endCall(expected = call) {
@@ -68,8 +79,19 @@ async function startCall() {
           // Processor output is silence: never play the microphone back.
           current.capture.connect(current.player.context.destination);
           status.textContent = "Connected. Microphone stays live while the assistant speaks.";
+        } else if (message.type === "transcript") {
+          addLine("user", message.text);
+          assistantLine = null;
         } else if (message.type === "text") {
-          messages.textContent += message.text;
+          assistantLine ??= addLine("assistant", "");
+          assistantLine.textContent += message.text;
+          messages.scrollTop = messages.scrollHeight;
+        } else if (message.type === "reply_end") {
+          assistantLine = null;
+        } else if (message.type === "notice") {
+          addLine("notice", message.text);
+        } else if (message.type === "metrics") {
+          metrics.textContent = `Response ${message.response_ms} ms = end of turn ${message.endpoint_ms} + STT ${message.stt_ms} + LLM first token ${message.llm_first_token_ms} + TTS ${message.tts_first_audio_ms} (+ overhead)`;
         } else if (message.type === "error") {
           endCall(current);
           status.textContent = message.error;

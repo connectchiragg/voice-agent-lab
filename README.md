@@ -11,7 +11,7 @@ mic (16 kHz PCM) -> VAD + turn detection -> STT -> LLM -> TTS -> speaker (24 kHz
 | VAD | Silero VAD | local CPU |
 | Turn detection | Smart Turn v3 | local CPU |
 | STT | Whisper large-v3-turbo | Groq free tier |
-| LLM | open-weight model (gpt-oss / Llama) | Groq free tier |
+| LLM | Qwen 3.8 27B (open weights) | Groq free tier |
 | TTS | Kokoro-82M | local |
 
 No frontier or paid APIs. Earlier experiments (Gemini, Cartesia, MiniCPM-o,
@@ -19,24 +19,41 @@ VAP diagnostics) are retired and live only in Git history.
 
 ## Status
 
-The pipeline is being rebuilt. What exists today:
+Working end to end: speak, pause, and the assistant answers aloud. Measured on an
+M2 / 8 GB with recorded speech over the real WebSocket (3 turns):
 
-- Browser call UI: AudioWorklet microphone capture in 100 ms, 16 kHz float32 packets
-  (`static/microphone-worklet.js`) and a raw-PCM Web Audio player
-  (`static/audio-player.js`).
-- `/ws/voice` validates the call handshake, then reports
-  `Voice pipeline not built yet.`
-- `app/speech.py`: Groq transcription of complete clips.
-- `app/database.py`: LangGraph conversation state with Postgres checkpoints.
-  Its `stream_reply` LLM seam is a stub until the Groq LLM is wired in.
+| Stage | Time |
+|---|---|
+| End of turn (Silero pause + Smart Turn) | 192 ms |
+| STT (Groq Whisper) | 224–341 ms |
+| LLM first token (Groq Qwen, reasoning off) | 161–317 ms |
+| TTS first piece (Kokoro, local) | 515–1320 ms |
+| **User stops speaking to first audio sent** | **1.1–2.2 s** |
 
-Next: the streaming cascaded loop, then barge-in (`player.interrupt()` tests are
-already written as todo), tool calling, per-stage latency metrics, then post-call
-Temporal and CrewAI workflows.
+How a call flows (`app/pipeline.py`):
+
+1. The browser streams 100 ms packets of 16 kHz PCM over `/ws/voice`.
+2. `TurnDetector`: Silero scores every 32 ms. After 200 ms of silence, Smart Turn
+   scores the whole utterance; "complete" ends the turn, otherwise it waits for
+   more speech or a 1.5 s timeout.
+3. `Call.respond`: Groq Whisper transcribes the turn; the LangGraph agent
+   (`app/database.py`) streams the reply from Groq and checkpoints history.
+4. `SentenceBuffer` cuts streamed text into speakable pieces (the first may end
+   at a comma) and Kokoro synthesizes them while the LLM keeps generating.
+5. Audio goes back in 200 ms packets; the browser plays them gap-free.
+
+Events sent to the browser: `ready`, `transcript`, `text` (reply deltas),
+`metrics`, `notice`, `reply_end`, `error`. Postgres is used when running,
+otherwise history is in memory (logged at startup).
+
+Not built yet: barge-in. Speech while the assistant talks is ignored
+(`player.interrupt()` tests are written as todo). Then tool calling, then
+post-call Temporal and CrewAI workflows.
 
 ## Run locally
 
 Create `.env` from `.env.example` and set `GROQ_API_KEY`. Never commit keys.
+Download the local models once (~365 MB) with `scripts/download-models.sh`.
 
 ```sh
 python3 -m venv .venv

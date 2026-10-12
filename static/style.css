@@ -8,3 +8,7 @@ button { background: #b7c4ff; color: #171923; border: 0; border-radius: 6px; pad
 button:disabled { opacity: 0.5; cursor: not-allowed; }
 .speech-controls { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
 .speech-controls span { color: #b5b8cf; font-size: 14px; }
+#messages p { margin: 0 0 10px; }
+#messages .user::before { content: "You: "; color: #b7c4ff; font-weight: 600; }
+#messages .assistant::before { content: "Assistant: "; color: #9fe3b5; font-weight: 600; }
+#messages .notice { color: #b5b8cf; font-style: italic; }

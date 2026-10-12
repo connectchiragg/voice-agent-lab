@@ -1,19 +1,78 @@
-"""Browser page and the call WebSocket; the cascaded voice pipeline plugs in here."""
+"""Browser page and the call WebSocket, wired to the cascaded voice pipeline."""
 import asyncio
 import logging
+import os
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal
+from uuid import uuid4
 
+import numpy as np
 from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, ValidationError
 
+from app import database, speech
+from app.pipeline import Call, Engines, Samples, TurnDetector
+
 ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT / ".env")
 logger = logging.getLogger("uvicorn.error")
-app = FastAPI(title="Voice Agent Lab", docs_url=None, redoc_url=None, openapi_url=None)
+MODEL_FILES = ("silero_vad.onnx", "smart-turn-v3.2-cpu.onnx", "kokoro-v1.0.onnx", "voices-v1.0.bin")
+
+
+def load_engines() -> Engines:
+    """Load local models once per process; each call gets its own VAD state."""
+    from app.tts import OUTPUT_SAMPLE_RATE, KokoroVoice
+    from app.turn import SmartTurn
+    from app.vad import SileroVad, load_session
+
+    models = Path(os.getenv("MODELS_DIR", ROOT / ".cache/models"))
+    missing = [name for name in MODEL_FILES if not (models / name).is_file()]
+    if missing:
+        raise RuntimeError(f"Missing models in {models}: {', '.join(missing)}. "
+                           "Run scripts/download-models.sh first.")
+    vad_session = load_session(str(models / "silero_vad.onnx"))
+    turn = SmartTurn(load_session(str(models / "smart-turn-v3.2-cpu.onnx")))
+    voice = KokoroVoice(str(models / "kokoro-v1.0.onnx"), str(models / "voices-v1.0.bin"),
+                        os.getenv("KOKORO_VOICE", "af_heart"))
+    # Warm up so the first real turn does not pay one-off initialisation costs.
+    turn.completion_probability(np.zeros(16000, dtype=np.float32))
+    voice.synthesize("Hello.")
+
+    async def transcribe(audio: Samples) -> str:
+        try:
+            return await speech.transcribe(speech.pcm_to_wav(audio), "audio/wav")
+        except speech.SpeechError as error:
+            if error.status_code == 422:  # No words, or unusable audio: not a turn.
+                return ""
+            raise
+
+    async def reply(conversation_id: str, text: str) -> AsyncIterator[str]:
+        async for event in database.stream_conversation(conversation_id, text):
+            if event["type"] == "delta":
+                yield event["text"]
+
+    async def synthesize(text: str) -> Samples:
+        return await asyncio.to_thread(voice.synthesize, text)
+
+    return Engines(new_detector=lambda: TurnDetector(SileroVad(vad_session), turn),
+                   transcribe=transcribe, reply=reply, synthesize=synthesize,
+                   output_sample_rate=OUTPUT_SAMPLE_RATE)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    app.state.engines = await asyncio.to_thread(load_engines)
+    async with database.lifespan(app):
+        yield
+
+
+app = FastAPI(title="Voice Agent Lab", docs_url=None, redoc_url=None, openapi_url=None,
+              lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
 
 
@@ -25,6 +84,12 @@ class CallSettings(BaseModel):
     echo_cancelled: bool
 
 
+class PlaybackState(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    type: Literal["playback"]
+    active: bool
+
+
 @app.get("/")
 async def home() -> FileResponse:
     return FileResponse(ROOT / "static/index.html")
@@ -33,14 +98,51 @@ async def home() -> FileResponse:
 @app.websocket("/ws/voice")
 async def voice(socket: WebSocket) -> None:
     await socket.accept()
+    engines: Engines | None = getattr(socket.app.state, "engines", None)
+    send_lock = asyncio.Lock()
+    call: Call | None = None
+
+    async def send(data: dict[str, object] | bytes) -> None:
+        async with send_lock:  # The reply task and this loop both send.
+            if isinstance(data, bytes):
+                await socket.send_bytes(data)
+            else:
+                await socket.send_json(data)
+
     try:
         async with asyncio.timeout(15):
             CallSettings.model_validate_json(await socket.receive_text())
-        # STT -> LLM -> TTS is being rebuilt; refuse clearly instead of faking a call.
-        await socket.send_json({"type": "error", "error": "Voice pipeline not built yet."})
+        if engines is None:
+            await send({"type": "error", "error": "Voice models are not loaded."})
+            return
+        call = Call(engines, send, str(uuid4()))
+        await send({"type": "ready", "sample_rate": engines.output_sample_rate,
+                    "encoding": "pcm_f32le"})
+        while True:
+            frame = await socket.receive()
+            if frame["type"] == "websocket.disconnect":
+                break
+            if frame.get("text") is not None:
+                call.set_playing(PlaybackState.model_validate_json(frame["text"]).active)
+                continue
+            packet = frame.get("bytes")
+            if packet is None:
+                raise ValueError("Expected PCM bytes")
+            await call.hear(packet)
     except WebSocketDisconnect:
-        return
-    except (ValidationError, TimeoutError):
+        pass
+    except (ValidationError, ValueError, TimeoutError):
         await socket.close(code=1008)
-        return
-    await socket.close()
+    except Exception as error:
+        logger.warning("Voice call failed: %s", type(error).__name__)
+        try:
+            await send({"type": "error", "error": "The call failed. Please start a new one."})
+        except (RuntimeError, WebSocketDisconnect):
+            pass
+    finally:
+        if call is not None:
+            await call.close()
+        try:
+            await socket.close()
+        except RuntimeError:
+            pass
