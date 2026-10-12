@@ -2,7 +2,6 @@ import {StreamAudioPlayer} from "./audio-player.js";
 const button = document.querySelector("#call");
 const status = document.querySelector("#status");
 const messages = document.querySelector("#messages");
-const diagnostic = document.querySelector("#diagnostics");
 let call = null;
 
 function endCall(expected = call) {
@@ -71,8 +70,6 @@ async function startCall() {
           status.textContent = "Connected. Microphone stays live while the assistant speaks.";
         } else if (message.type === "text") {
           messages.textContent += message.text;
-        } else if (message.type === "speech_diagnostic") {
-          diagnostic.textContent = `Speech: ${message.speech_detected} | now: ${message.p_now.toFixed(2)} | future: ${message.p_future.toFixed(2)} | VAP: ${message.inference_ms.toFixed(1)} ms`;
         } else if (message.type === "error") {
           endCall(current);
           status.textContent = message.error;

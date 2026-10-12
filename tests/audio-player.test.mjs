@@ -113,3 +113,23 @@ test("playback needs a user-unlocked context and an active stream", async () => 
   await player.unlock();
   assert.throws(() => player.enqueue(pcm().buffer), /outside a stream/);
 });
+
+// Barge-in increment (not built yet): todo until interrupt() exists in static/audio-player.js.
+test("interrupt stops scheduled audio and reports playback inactive", {todo: true}, async () => {
+  const {player, changes} = await playerWithAudio();
+  player.enqueue(pcm([0.5]).buffer);
+  player.enqueue(pcm([0.25]).buffer);
+  player.interrupt();
+  assert.ok(player.context.sources.every(source => source.stopped));
+  assert.equal(player.sources.size, 0);
+  assert.equal(changes.at(-1), false);
+});
+
+test("audio after an interrupt plays immediately, not after the discarded reply", {todo: true}, async () => {
+  const {player} = await playerWithAudio();
+  player.enqueue(pcm(new Array(24000).fill(0.1)).buffer);  // one second queued
+  player.interrupt();
+  player.context.currentTime = 0.1;
+  player.enqueue(pcm([0.5]).buffer);  // the stream stays open for the next reply
+  assert.ok(player.context.sources.at(-1).startTime < 0.5);
+});

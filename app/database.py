@@ -16,7 +16,6 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from psycopg.conninfo import make_conninfo
 
-from app.llm import stream_reply
 
 load_dotenv(Path(__file__).resolve().parent.parent / ".env.docker")
 
@@ -41,6 +40,12 @@ class Conversation(TypedDict):
 class ChatEvent(TypedDict):
     type: Literal["start", "delta"]
     text: NotRequired[str]
+
+
+async def stream_reply(message: str, history: list[Message]) -> AsyncIterator[str]:
+    """LLM seam: the Groq open-weight model replaces the retired Gemini client here."""
+    raise NotImplementedError("LLM not wired yet.")
+    yield ""  # Unreachable; marks this as an async generator.
 
 
 ConversationGraph = CompiledStateGraph[Conversation, None, Conversation, Conversation]
