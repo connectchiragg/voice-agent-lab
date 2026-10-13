@@ -23,7 +23,7 @@ from psycopg.conninfo import make_conninfo
 from app.llm import ToolCallRequest, stream_model, to_chat_messages
 from app.tools import SCHEMAS, run_tool
 
-load_dotenv(Path(__file__).resolve().parent.parent / ".env.docker")
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 logger = logging.getLogger("uvicorn.error")
 
 MessageStatus = Literal["completed", "interrupted"]
@@ -178,7 +178,7 @@ def build_graph(checkpointer: BaseCheckpointSaver[str]) -> ConversationGraph:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """Use local Postgres when it is running; otherwise keep history in memory."""
+    """Use local Postgres (Homebrew, see README) when running; otherwise keep history in memory."""
     global graph
     async with AsyncExitStack() as stack:
         try:
