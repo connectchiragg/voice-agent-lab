@@ -10,7 +10,7 @@ mic (16 kHz PCM) -> VAD + turn detection -> STT -> LLM -> TTS -> speaker (24 kHz
 |---|---|---|
 | VAD | Silero VAD | local CPU |
 | Turn detection | Smart Turn v3 | local CPU |
-| STT | Whisper large-v3-turbo | Groq free tier |
+| STT (streaming) | NVIDIA Nemotron Speech Streaming EN 0.6B, int8 (sherpa-onnx) | local CPU |
 | LLM | gpt-oss-120b, low reasoning (open weights) | Groq free tier |
 | TTS | Kokoro-82M | local |
 
@@ -25,7 +25,7 @@ M2 / 8 GB with recorded speech over the real WebSocket (3 turns):
 | Stage | Time |
 |---|---|
 | End of turn (Silero pause + Smart Turn) | 192 ms |
-| STT (Groq Whisper) | 224–341 ms |
+| STT (measured then with Groq Whisper; now local, see below) | 224–341 ms |
 | LLM first token (Groq; measured with Qwen) | 161–317 ms |
 | TTS first piece (Kokoro, local) | 515–1320 ms |
 | **User stops speaking to first audio sent** | **1.1–2.2 s** |
@@ -36,14 +36,17 @@ How a call flows (`app/pipeline.py`):
 2. `TurnDetector`: Silero scores every 32 ms. After 200 ms of silence, Smart Turn
    scores the whole utterance; "complete" ends the turn, otherwise it waits for
    more speech or a 1.5 s timeout.
-3. `Call.respond`: Groq Whisper transcribes the turn; the LangGraph agent
+3. While the user speaks, `app/stt.py` streams the turn's audio into the local
+   recognizer (live `partial` text); the final transcript is ready as the turn
+   ends. `Call.respond` hands it to the LangGraph agent, which
    (`app/database.py`) streams the reply from Groq and checkpoints history.
 4. `SpeechChunker` cuts streamed text into pieces that grow over the reply
    (about 6 words, then 12, then whole sentences) at natural boundaries, and
    Kokoro synthesizes each while the previous one plays.
 5. Audio goes back in 200 ms packets; the browser plays them gap-free.
 
-Events sent to the browser: `ready`, `transcript`, `caption` (each spoken
+Events sent to the browser: `ready`, `partial` (live words while the user
+speaks), `transcript`, `caption` (each spoken
 piece's text and audio length, just before its audio), `metrics`, `notice`,
 `reply_end`, `interrupt`, `error`. The browser reveals caption words in time with
 playback, so the screen never runs ahead of the voice; on an interruption the
@@ -70,8 +73,8 @@ own voice would otherwise interrupt it. Headphones are the most reliable setup.
 ### Groq reliability
 
 Free-tier limits for the LLM: 30 requests per minute (only stated in 429
-bodies), 1,000 per day and 8,000 tokens per minute; Whisper allows 2,000 per day.
-Each user turn makes two requests (STT and LLM).
+bodies), 1,000 per day and 8,000 tokens per minute. Speech-to-text is local, so
+each user turn makes one or two LLM requests (two when a tool is used).
 
 - One shared Groq client for the process (connection reuse; first token about
   110-170 ms instead of opening a TLS connection per request).
@@ -80,6 +83,33 @@ Each user turn makes two requests (STT and LLM).
   and retried once. Root cause is not confirmed: not rate limiting (that returns
   an immediate 429) and no event-loop blocking was seen. A watchdog logs any
   event-loop block over 250 ms, and slow first tokens are logged per attempt.
+
+### Speech-to-text choice (benchmarked, 2026-10-13)
+
+Streaming models available in sherpa-onnx were compared on real speech fed in
+100 ms packets, exactly as the browser sends it. Word error rate, fillers removed:
+
+| Model | Svarah (Indian English, 266 clips, 19 L1s) | South Asian, 8 kHz phone | South Asian, 10 dB noise |
+|---|---|---|---|
+| **Nemotron Speech Streaming EN 0.6B (chosen)** | **14.9%** | **19.2%** | **17.1%** |
+| Nemotron 3.5 ASR Streaming 0.6B (multilingual) | 18.2% | - | - |
+| NeMo FastConformer streaming 80 ms (~100 MB) | 22.4% | 31.6% | 27.5% |
+
+Also tried and dropped: FastConformer 480 ms (worse on accents), Kroko Zipformer
+(17-22% on clean synthetic speech), Parakeet unified 0.6B (too slow on this CPU),
+and Groq Whisper large-v3-turbo (8% on clean synthetic speech, but a network
+round trip per turn, a request quota, and no live partial text).
+
+- Svarah is AI4Bharat's Indian-English benchmark; EdAcc supplied conversational
+  Indian and Sri Lankan English. Phone audio = 8 kHz G.711 mu-law round trip.
+- Feeding 0.32 s of lead-in and 0.5 s of trailing silence lowered errors by about
+  a third (the turn detector's pre-roll provides most of the lead-in).
+- Cost: about 550 MB RAM and about 0.4 s of CPU per second of speech on an M2
+  (higher under memory pressure). Audio is only fed while the user is speaking.
+- Common words and commands are reliable ("cancel", times, Mysore, Bengaluru);
+  rare local names (Coorg, Madikeri, Indiranagar) are missed by every model
+  tried, Whisper included. sherpa-onnx has no hotword biasing for NeMo
+  transducers, so a name-correction step is the planned fix.
 
 ### Tool calling
 
@@ -131,18 +161,20 @@ node --test tests/audio-player.test.mjs
 node tests/audio-worklet.test.mjs
 ```
 
-## Local PostgreSQL and pgAdmin
+## Local PostgreSQL
 
-Copy `infra.env.example` to `.env.docker` and choose two passwords on a fresh setup.
+Conversation history uses a native Homebrew Postgres (a Docker VM for one database
+cost about 1.5 GB of RAM on an 8 GB Mac). One-time setup:
 
 ```sh
-docker compose --env-file .env.docker up -d
-docker compose --env-file .env.docker stop
+brew install postgresql@17
+initdb -D /opt/homebrew/var/postgresql@17 --encoding=UTF8 --auth-local=trust --auth-host=scram-sha-256
+brew services start postgresql@17          # also starts at login
+psql -d postgres -c "CREATE ROLE voice_agent LOGIN PASSWORD '<choose one>'"
+psql -d postgres -c "CREATE DATABASE voice_agent OWNER voice_agent"
 ```
 
-- PostgreSQL: `localhost:5432`, database and user `voice_agent`, password from
-  `POSTGRES_PASSWORD` in `.env.docker`.
-- pgAdmin: http://localhost:5050, login `admin@example.com`, password from
-  `PGADMIN_PASSWORD`. The registered server uses host `postgres` inside Docker.
-- Both ports bind to loopback only. Named volumes keep data; avoid `down -v`
-  unless you mean to erase it.
+Put the same password in `.env` as `POSTGRES_PASSWORD`. The app connects to
+`127.0.0.1:5432` and LangGraph creates its checkpoint tables on startup. Without
+Postgres the app still runs and keeps history in memory (logged at startup).
+`brew services stop postgresql@17` stops it.

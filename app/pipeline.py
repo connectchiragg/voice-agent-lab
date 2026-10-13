@@ -33,12 +33,22 @@ class TurnCompletion(Protocol):
     def completion_probability(self, samples: Samples) -> float: ...
 
 
+class SpeechListener(Protocol):
+    """Follows each utterance as it is heard (the streaming transcriber)."""
+    def on_speech_start(self, preroll: Samples) -> None: ...
+    def on_speech(self, samples: Samples) -> None: ...
+    def on_speech_end(self) -> str: ...
+    def on_discard(self) -> None: ...
+
+
 @dataclass(frozen=True)
 class Utterance:
     audio: Samples
     pause_ms: float  # Silence waited after the last speech before ending the turn.
     completion: float | None  # Smart Turn probability, None if the pause timed out.
     confident_ms: float = 0  # Speech above the confident threshold, for barge-in checks.
+    text: str = ""  # Final transcript from the streaming listener.
+    stt_ms: float = 0  # Time to finalise the transcript after the turn ended.
 
 
 class TurnDetector:
@@ -57,9 +67,11 @@ class TurnDetector:
                  speech_threshold: float = 0.5, confident_threshold: float = 0.8,
                  completion_threshold: float = 0.5,
                  start_ms: float = 96, pause_ms: float = 200, max_pause_ms: float = 1500,
-                 preroll_ms: float = 320, max_turn_s: float = 30) -> None:
+                 preroll_ms: float = 320, max_turn_s: float = 30,
+                 listener: SpeechListener | None = None) -> None:
         self.vad = vad
         self.turn = turn
+        self.listener = listener
         self.speech_threshold = speech_threshold
         self.confident_threshold = confident_threshold
         self.completion_threshold = completion_threshold
@@ -82,6 +94,8 @@ class TurnDetector:
 
     def discard(self) -> None:
         """Drop any partial turn (for example, echo of the assistant's own voice)."""
+        if getattr(self, "utterance", None) is not None and self.listener is not None:
+            self.listener.on_discard()
         self.utterance: list[Samples] | None = None
         self.voiced = 0
         self.confident = 0  # Consecutive before speech starts; total during it.
@@ -109,8 +123,12 @@ class TurnDetector:
             if self.voiced >= self.start_chunks:
                 self.utterance = list(self.preroll)
                 self.silent = 0
+                if self.listener is not None:
+                    self.listener.on_speech_start(np.concatenate(self.utterance))
             return None
         self.utterance.append(chunk)
+        if self.listener is not None:
+            self.listener.on_speech(chunk)
         self.confident += confident
         if voiced:
             self.silent = 0
@@ -130,8 +148,13 @@ class TurnDetector:
         assert self.utterance is not None
         audio = np.concatenate(self.utterance)
         pause_ms, confident_ms = self.silent * CHUNK_MS, self.confident_ms
+        text, stt_ms = "", 0.0
+        if self.listener is not None:
+            text = self.listener.on_speech_end()
+            stt_ms = getattr(self.listener, "final_ms", 0.0)
+        self.utterance = None  # Finished, not discarded: the listener already closed it.
         self.discard()
-        return Utterance(audio, pause_ms, completion, confident_ms)
+        return Utterance(audio, pause_ms, completion, confident_ms, text, stt_ms)
 
 
 WORD = re.compile(r"\S+(\s+|$)")
@@ -210,6 +233,10 @@ class SpeechChunker:
         return words[index - 1].end()
 
 
+class Transcriber(SpeechListener, Protocol):
+    def take_partial(self) -> str | None: ...
+
+
 async def forget_interruption(conversation_id: str, user_text: str, heard: str) -> None:
     """Default for engines without history: nothing to record."""
 
@@ -217,8 +244,8 @@ async def forget_interruption(conversation_id: str, user_text: str, heard: str) 
 @dataclass
 class Engines:
     """Everything a call needs, injected so tests can replace any stage."""
-    new_detector: Callable[[], TurnDetector]
-    transcribe: Callable[[Samples], Awaitable[str]]
+    new_transcriber: Callable[[], "Transcriber"]
+    new_detector: Callable[["Transcriber"], TurnDetector]  # Wires the transcriber in.
     reply: Callable[[str, str], AsyncIterator[str]]  # (conversation_id, user text)
     synthesize: Callable[[str], Awaitable[Samples]]
     # (conversation_id, user text, assistant text the user actually heard)
@@ -259,7 +286,7 @@ class TurnMetrics:
 
     def response_ms(self) -> float:
         """From the user's last word to the first assistant audio being sent."""
-        return self.endpoint_ms + (time.perf_counter() - self.started) * 1000
+        return self.endpoint_ms + self.stt_ms + (time.perf_counter() - self.started) * 1000
 
     def to_payload(self, first_audio_ms: float) -> dict[str, object]:
         return {"type": "metrics", "endpoint_ms": round(self.endpoint_ms),
@@ -294,7 +321,8 @@ class Call:
         self.engines = engines
         self.send = send
         self.conversation_id = conversation_id
-        self.detector = engines.new_detector()
+        self.transcriber = engines.new_transcriber()
+        self.detector = engines.new_detector(self.transcriber)
         self.barge_in = barge_in
         self.barge_in_ms = barge_in_ms
         self.played_report_timeout_s = played_report_timeout_s
@@ -333,6 +361,9 @@ class Call:
                     logger.info("Ignored %d short utterance(s) during the reply", len(utterances))
                 self.overlapped = self.detector.speaking
                 return
+        # Live words, shown only once the user holds the floor (never echo under our voice).
+        if (partial := self.transcriber.take_partial()) is not None:
+            await self.send({"type": "partial", "text": partial})
         for utterance in utterances:
             if self.overlapped and utterance.confident_ms < self.barge_in_ms:
                 # Began under the assistant's voice and never became clear speech.
@@ -369,16 +400,11 @@ class Call:
             # The next reply must see the trimmed history of the interrupted one.
             await asyncio.gather(self.history_task, return_exceptions=True)
             self.history_task = None
-        metrics = TurnMetrics(endpoint_ms=utterance.pause_ms)
-        started = time.perf_counter()
-        try:
-            text = (await self.engines.transcribe(utterance.audio)).strip()
-        except Exception as error:
-            logger.warning("Transcription failed: %s", type(error).__name__)
-            await self.send({"type": "notice", "text": "Didn't catch that. Please say it again."})
-            return
-        metrics.stt_ms = (time.perf_counter() - started) * 1000
+        # The transcript was finalised by the streaming listener as the turn ended.
+        metrics = TurnMetrics(endpoint_ms=utterance.pause_ms, stt_ms=utterance.stt_ms)
+        text = utterance.text.strip()
         if not text:
+            await self.send({"type": "partial", "text": ""})  # Clear the live line.
             return
         self.user_text, self.spoken = text, []
         await self.send({"type": "transcript", "text": text})

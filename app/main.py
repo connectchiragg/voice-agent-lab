@@ -15,17 +15,21 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
-from app import database, speech
+from app import database, groq_api
 from app.pipeline import Call, Engines, Samples, TurnDetector
 
 ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT / ".env")
 logger = logging.getLogger("uvicorn.error")
-MODEL_FILES = ("silero_vad.onnx", "smart-turn-v3.2-cpu.onnx", "kokoro-v1.0.onnx", "voices-v1.0.bin")
+MODEL_FILES = ("silero_vad.onnx", "smart-turn-v3.2-cpu.onnx", "kokoro-v1.0.onnx", "voices-v1.0.bin",
+               "sherpa-onnx-nemotron-speech-streaming-en-0.6b-160ms-int8-2026-04-25/encoder.int8.onnx")
 
 
 def load_engines() -> Engines:
-    """Load local models once per process; each call gets its own VAD state."""
+    """Load local models once per process; each call gets its own VAD and STT stream."""
+    import threading
+
+    from app.stt import MODEL_DIR, StreamingTranscriber, load_recognizer
     from app.tts import OUTPUT_SAMPLE_RATE, KokoroVoice
     from app.turn import SmartTurn
     from app.vad import SileroVad, load_session
@@ -39,17 +43,13 @@ def load_engines() -> Engines:
     turn = SmartTurn(load_session(str(models / "smart-turn-v3.2-cpu.onnx")))
     voice = KokoroVoice(str(models / "kokoro-v1.0.onnx"), str(models / "voices-v1.0.bin"),
                         os.getenv("KOKORO_VOICE", "af_heart"))
+    recognizer, recognizer_lock = load_recognizer(str(models / MODEL_DIR)), threading.Lock()
     # Warm up so the first real turn does not pay one-off initialisation costs.
     turn.completion_probability(np.zeros(16000, dtype=np.float32))
     voice.synthesize("Hello.")
-
-    async def transcribe(audio: Samples) -> str:
-        try:
-            return await speech.transcribe(speech.pcm_to_wav(audio), "audio/wav")
-        except speech.SpeechError as error:
-            if error.status_code == 422:  # No words, or unusable audio: not a turn.
-                return ""
-            raise
+    warm = StreamingTranscriber(recognizer, recognizer_lock)
+    warm.on_speech_start(np.zeros(16000, dtype=np.float32))
+    warm.on_speech_end()
 
     async def reply(conversation_id: str, text: str) -> AsyncIterator[str]:
         async for event in database.stream_conversation(conversation_id, text):
@@ -59,8 +59,10 @@ def load_engines() -> Engines:
     async def synthesize(text: str) -> Samples:
         return await asyncio.to_thread(voice.synthesize, text)
 
-    return Engines(new_detector=lambda: TurnDetector(SileroVad(vad_session), turn),
-                   transcribe=transcribe, reply=reply, synthesize=synthesize,
+    return Engines(new_transcriber=lambda: StreamingTranscriber(recognizer, recognizer_lock),
+                   new_detector=lambda listener: TurnDetector(SileroVad(vad_session), turn,
+                                                             listener=listener),
+                   reply=reply, synthesize=synthesize,
                    record_interruption=database.record_interruption,
                    output_sample_rate=OUTPUT_SAMPLE_RATE)
 
@@ -81,7 +83,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.engines = await asyncio.to_thread(load_engines)
     watcher = asyncio.create_task(watch_event_loop())
     try:
-        async with speech.shared_groq_client(), database.lifespan(app):
+        async with groq_api.shared_groq_client(), database.lifespan(app):
             yield
     finally:
         watcher.cancel()

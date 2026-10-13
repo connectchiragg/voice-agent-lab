@@ -23,6 +23,7 @@ def test_call_hears_a_turn_and_replies_with_audio(engines):
         assert socket.receive_json() == {"type": "ready", "sample_rate": 24000, "encoding": "pcm_f32le"}
         for packet in speech_then_pause():
             socket.send_bytes(packet)
+        assert socket.receive_json() == {"type": "partial", "text": "what's"}
         assert socket.receive_json() == {"type": "transcript", "text": "what's up"}
         kinds, audio = [], 0
         while "reply_end" not in kinds:

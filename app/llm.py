@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 
 from groq import APIConnectionError, APIError, APITimeoutError, AsyncGroq, RateLimitError
 
-from app.speech import SpeechError, groq_client, provider_error, rate_limit_wait_s
+from app.groq_api import ProviderError, groq_client, provider_error, rate_limit_wait_s
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -179,6 +179,6 @@ async def stream_model(messages: list[dict[str, Any]], tools: list[dict[str, Any
             finally:
                 await stream.close()
         except TimeoutError:
-            raise SpeechError(504, "The language model did not respond in time.") from None
+            raise ProviderError(504, "The language model did not respond in time.") from None
         except APIError as error:
             raise provider_error(error) from error

@@ -34,9 +34,50 @@ def chunks(level, count):
     return np.full(CHUNK * count, level, dtype=np.float32)
 
 
-def detector(completion=0.9):
+def detector(completion=0.9, listener=None):
     return TurnDetector(LevelVad(), FixedTurn(completion), start_ms=96, pause_ms=192,
-                        max_pause_ms=960, preroll_ms=128)
+                        max_pause_ms=960, preroll_ms=128, listener=listener)
+
+
+class FakeTranscriber:
+    """Streams the first word as a partial, then finalises the next scripted transcript."""
+    def __init__(self, transcripts):
+        self.transcripts, self.partial, self.final_ms, self.events = list(transcripts), None, 7.0, []
+
+    def on_speech_start(self, preroll):
+        self.events.append(("start", len(preroll)))
+        self.partial = self.transcripts[0].split()[0] if self.transcripts[0].split() else None
+
+    def on_speech(self, samples):
+        self.events.append(("audio", len(samples)))
+
+    def on_speech_end(self):
+        self.events.append(("end",))
+        self.partial = None
+        return self.transcripts.pop(0) if len(self.transcripts) > 1 else self.transcripts[0]
+
+    def on_discard(self):
+        self.events.append(("discard",))
+        self.partial = None
+
+    def take_partial(self):
+        partial, self.partial = self.partial, None
+        return partial
+
+
+def test_listener_follows_each_utterance_from_preroll_to_final_text():
+    listener = FakeTranscriber(["hello there"])
+    turns = detector(listener=listener)
+    turns.feed(chunks(QUIET, 10))
+    turns.feed(chunks(LOUD, 20))
+    (utterance,) = turns.feed(chunks(QUIET, 6))
+    assert listener.events[0] == ("start", CHUNK * 4)  # The pre-roll, voiced start included.
+    assert listener.events[-1] == ("end",)
+    assert sum(n for kind, *n in listener.events if kind == "audio" for n in n) == CHUNK * (17 + 6)
+    assert (utterance.text, utterance.stt_ms) == ("hello there", 7.0)
+    turns.feed(chunks(LOUD, 10))
+    turns.discard()
+    assert listener.events[-1] == ("discard",)
 
 
 def test_confident_turn_ends_after_short_pause():
@@ -145,9 +186,6 @@ def test_decode_pcm_rejects_bad_packets():
 def fake_engines(transcript="what's up", reply=("Hi there. ", "All good!"), tts_samples=6000):
     seen = {"replies": []}
 
-    async def transcribe(audio):
-        return transcript
-
     async def generate(conversation_id, text):
         seen["replies"].append((conversation_id, text))
         for delta in reply:
@@ -157,8 +195,9 @@ def fake_engines(transcript="what's up", reply=("Hi there. ", "All good!"), tts_
     async def synthesize(text):
         return np.full(tts_samples, 0.25, dtype=np.float32)
 
-    return Engines(new_detector=detector, transcribe=transcribe, reply=generate,
-                   synthesize=synthesize), seen
+    return Engines(new_transcriber=lambda: FakeTranscriber([transcript]),
+                   new_detector=lambda listener: detector(listener=listener),
+                   reply=generate, synthesize=synthesize), seen
 
 
 def speech_then_pause():
@@ -188,7 +227,8 @@ def test_finished_turn_is_transcribed_answered_and_spoken():
     sent = asyncio.run(run_call(engines, speech_then_pause()))
     events = [item for item in sent if isinstance(item, dict)]
     audio = b"".join(item for item in sent if isinstance(item, bytes))
-    assert events[0] == {"type": "transcript", "text": "what's up"}
+    assert events[0] == {"type": "partial", "text": "what's"}  # Live words while speaking.
+    assert events[1] == {"type": "transcript", "text": "what's up"}
     # Each spoken piece is captioned just before its own audio.
     captions = [e for e in events if e["type"] == "caption"]
     assert [c["text"] for c in captions] == ["Hi there.", "All good!"]
@@ -198,6 +238,7 @@ def test_finished_turn_is_transcribed_answered_and_spoken():
     assert events[-1] == {"type": "reply_end"}
     (metrics,) = [e for e in events if e["type"] == "metrics"]
     assert metrics["endpoint_ms"] == round(6 * 32)
+    assert metrics["stt_ms"] == 7
     # Two spoken pieces, each 6000 samples, sent in 200 ms (4800-sample) packets.
     assert len(audio) == 2 * 6000 * 4
     assert max(len(item) for item in sent if isinstance(item, bytes)) == pipeline.OUTPUT_PACKET_SAMPLES * 4
@@ -207,7 +248,7 @@ def test_finished_turn_is_transcribed_answered_and_spoken():
 def test_silence_or_empty_transcript_does_not_reply():
     engines, seen = fake_engines(transcript="  ")
     sent = asyncio.run(run_call(engines, speech_then_pause()))
-    assert sent == []
+    assert sent == [{"type": "partial", "text": ""}]  # Only clears the live line.
     assert seen["replies"] == []
 
 
@@ -259,9 +300,6 @@ def test_barge_in_cancels_reply_records_heard_text_and_answers_new_turn():
     recorded, calls = [], []
     never = asyncio.Event()
 
-    async def transcribe(audio):
-        return ["what's up", "wait, stop"][len(calls)]
-
     async def reply(conversation_id, text):
         calls.append(text)
         if len(calls) == 1:
@@ -276,8 +314,9 @@ def test_barge_in_cancels_reply_records_heard_text_and_answers_new_turn():
     async def record_interruption(conversation_id, user_text, heard):
         recorded.append((conversation_id, user_text, heard))
 
-    engines = Engines(new_detector=detector, transcribe=transcribe, reply=reply,
-                      synthesize=synthesize, record_interruption=record_interruption)
+    engines = Engines(new_transcriber=lambda: FakeTranscriber(["what's up", "wait, stop"]),
+                      new_detector=lambda listener: detector(listener=listener),
+                      reply=reply, synthesize=synthesize, record_interruption=record_interruption)
 
     async def scenario():
         sent = []

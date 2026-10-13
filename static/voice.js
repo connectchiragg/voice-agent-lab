@@ -4,6 +4,7 @@ const status = document.querySelector("#status");
 const messages = document.querySelector("#messages");
 const metrics = document.querySelector("#metrics");
 let assistantLine = null;
+let userLine = null;  // The live transcript line while the user is speaking.
 let pendingCaption = null;  // Caption whose audio has not been queued yet.
 const captionTimers = new Set();
 
@@ -107,8 +108,23 @@ async function startCall() {
           // Processor output is silence: never play the microphone back.
           current.capture.connect(current.player.context.destination);
           status.textContent = "Connected. Microphone stays live while the assistant speaks.";
+        } else if (message.type === "partial") {
+          if (message.text) {
+            userLine ??= addLine("user partial", "");
+            userLine.textContent = message.text;
+            messages.scrollTop = messages.scrollHeight;
+          } else {
+            userLine?.remove();  // Noise, not words: drop the live line.
+            userLine = null;
+          }
         } else if (message.type === "transcript") {
-          addLine("user", message.text);
+          if (userLine) {
+            userLine.textContent = message.text;
+            userLine.classList.remove("partial");
+          } else {
+            addLine("user", message.text);
+          }
+          userLine = null;
           assistantLine = null;
           pendingCaption = null;
           current.player.markReply();

@@ -13,3 +13,4 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 #messages .assistant::before { content: "Assistant: "; color: #9fe3b5; font-weight: 600; }
 #messages .notice { color: #b5b8cf; font-style: italic; }
 #messages .interrupted::after { content: " (interrupted)"; color: #b5b8cf; font-style: italic; }
+#messages .partial { opacity: 0.65; }

@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from app import llm
-from app.speech import SpeechError
+from app.groq_api import ProviderError
 
 
 def chunk(text):
@@ -56,7 +56,7 @@ def test_stalled_first_token_is_retried_once():
 
 def test_second_stall_fails_with_a_safe_error():
     client = Client([Stream([], stall=True), Stream([], stall=True)])
-    with pytest.raises(SpeechError) as error:
+    with pytest.raises(ProviderError) as error:
         asyncio.run(collect(client, first_token_s=0.05))
     assert error.value.status_code == 504
 
@@ -125,7 +125,7 @@ def test_long_rate_limit_wait_fails_fast():
         async def create(self, **request):
             raise RateLimitError("limit", response=response, body=None)
 
-    with pytest.raises(SpeechError) as error:
+    with pytest.raises(ProviderError) as error:
         asyncio.run(collect(Limited([])))
     assert error.value.status_code == 429
 
