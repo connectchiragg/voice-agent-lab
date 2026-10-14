@@ -1,0 +1,8 @@
+# Only the Dockerfile's COPY sources belong in the build context.
+*
+!app/
+!static/
+!scripts/download-models.sh
+!requirements.lock
+**/__pycache__
+**/*.py[cod]

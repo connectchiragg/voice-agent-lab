@@ -157,6 +157,7 @@ python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
 Open http://127.0.0.1:8000. Microphone capture needs localhost or HTTPS.
+To test over the public internet, see [docs/deploy.md](docs/deploy.md).
 
 ```sh
 python -m pytest
