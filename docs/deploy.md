@@ -105,7 +105,8 @@ has 1 GB and is too small.
 | `GROQ_LLM_MODEL`, `GROQ_LLM_REASONING` | see `.env.example` | LLM choice |
 | `HOST`, `PORT` | `0.0.0.0`, `7860` in the image | Address uvicorn binds |
 | `MODELS_DIR` | `/models` in the image | Model files |
-| `TTS_THREADS` | `2` in the image, onnxruntime default locally | Kokoro threads; containers often see all host cores |
+| `STT_THREADS` | `1` in the image, `2` locally | Nemotron threads; keep at or below physical cores (2 vCPU is often 1 core) |
+| `TTS_THREADS` | `1` in the image, onnxruntime default locally | Kokoro threads; containers often see all host cores |
 | `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_PASSWORD` | `127.0.0.1`, `5432`, unset | Optional history store; in memory when unset |
 
 The image runs as non-root UID 1000. Dependency versions come from

@@ -33,7 +33,8 @@ ENV PATH=/opt/venv/bin:$PATH \
     MODELS_DIR=/models \
     HOST=0.0.0.0 \
     PORT=7860 \
-    TTS_THREADS=2
+    STT_THREADS=1 \
+    TTS_THREADS=1
 USER app
 EXPOSE 7860
 # Model loading and warm-up take a while on 2 vCPU before /healthz answers.

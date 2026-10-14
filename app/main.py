@@ -43,7 +43,8 @@ def load_engines() -> Engines:
     turn = SmartTurn(load_session(str(models / "smart-turn-v3.2-cpu.onnx")))
     voice = KokoroVoice(str(models / "kokoro-v1.0.onnx"), str(models / "voices-v1.0.bin"),
                         os.getenv("KOKORO_VOICE", "af_heart"))
-    recognizer, recognizer_lock = load_recognizer(str(models / MODEL_DIR)), threading.Lock()
+    recognizer = load_recognizer(str(models / MODEL_DIR), int(os.getenv("STT_THREADS", "2")))
+    recognizer_lock = threading.Lock()
     # Warm up so the first real turn does not pay one-off initialisation costs.
     turn.completion_probability(np.zeros(16000, dtype=np.float32))
     voice.synthesize("Hello.")

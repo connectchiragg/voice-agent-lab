@@ -23,6 +23,8 @@ MODEL_DIR = "sherpa-onnx-nemotron-speech-streaming-en-0.6b-160ms-int8-2026-04-25
 
 
 def load_recognizer(model_dir: str, threads: int = 2) -> sherpa_onnx.OnlineRecognizer:
+    """`threads` should not exceed physical cores: on one core with two hyper-threads,
+    2 threads ran the encoder at half the speed of 1 (measured on AWS c7i-flex.large)."""
     path = model_dir.rstrip("/") + "/"
     # NeMo transducers only support greedy search in sherpa-onnx (no hotwords).
     return sherpa_onnx.OnlineRecognizer.from_transducer(
