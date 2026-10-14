@@ -68,3 +68,7 @@ def test_call_ui_assets_are_served():
     assert "AudioWorkletNode" in source and '"transcript"' in source
     assert client.get("/static/microphone-worklet.js").status_code == 200
     assert client.get("/static/audio-player.js").status_code == 200
+
+
+def test_health_reports_whether_models_loaded(engines):
+    assert TestClient(main.app).get("/healthz").json() == {"ok": True, "models_loaded": True}

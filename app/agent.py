@@ -183,7 +183,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     async with AsyncExitStack() as stack:
         try:
             connection_string = make_conninfo(
-                host="127.0.0.1", port=5432, dbname="voice_agent", user="voice_agent",
+                host=os.getenv("POSTGRES_HOST", "127.0.0.1"),
+                port=int(os.getenv("POSTGRES_PORT", "5432")),
+                dbname="voice_agent", user="voice_agent",
                 password=os.environ["POSTGRES_PASSWORD"], connect_timeout=5,
                 options="-c statement_timeout=5000",
             )

@@ -123,6 +123,12 @@ async def home() -> FileResponse:
     return FileResponse(ROOT / "static/index.html")
 
 
+@app.get("/healthz")
+async def health() -> dict[str, bool]:
+    """Liveness for container hosts; answers only after startup has loaded the models."""
+    return {"ok": True, "models_loaded": getattr(app.state, "engines", None) is not None}
+
+
 @app.websocket("/ws/voice")
 async def voice(socket: WebSocket) -> None:
     await socket.accept()

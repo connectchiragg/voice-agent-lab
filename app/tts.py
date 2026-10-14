@@ -1,4 +1,5 @@
 """Kokoro-82M (ONNX, Apache-2.0) speech synthesis, 24 kHz mono float32."""
+import os
 import re
 import threading
 
@@ -25,7 +26,10 @@ def speakable(text: str) -> str:
 class KokoroVoice:
     def __init__(self, model_path: str, voices_path: str, voice: str) -> None:
         # Default threading: unlike the tiny VAD/turn models, Kokoro benefits from it.
-        session = ort.InferenceSession(model_path, providers=["CPUExecutionProvider"])
+        # Containers often see the host's cores, not their CPU quota: TTS_THREADS caps it.
+        options = ort.SessionOptions()
+        options.intra_op_num_threads = int(os.getenv("TTS_THREADS", "0"))  # 0: onnxruntime default
+        session = ort.InferenceSession(model_path, options, providers=["CPUExecutionProvider"])
         self.kokoro = Kokoro.from_session(session, voices_path)
         self.voice = voice
         # kokoro-onnx builds a new espeak backend per call (~600 ms on an M2).
