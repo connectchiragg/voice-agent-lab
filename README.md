@@ -20,15 +20,18 @@ VAP diagnostics) are retired and live only in Git history.
 ## Status
 
 Working end to end: speak, pause, and the assistant answers aloud. Measured on an
-M2 / 8 GB with recorded speech over the real WebSocket (3 turns):
+M2 / 8 GB with recorded speech over the real WebSocket (5 turns, 2026-10-13):
 
 | Stage | Time |
 |---|---|
 | End of turn (Silero pause + Smart Turn) | 192 ms |
-| STT (measured then with Groq Whisper; now local, see below) | 224–341 ms |
-| LLM first token (Groq; measured with Qwen) | 161–317 ms |
-| TTS first piece (Kokoro, local) | 515–1320 ms |
-| **User stops speaking to first audio sent** | **1.1–2.2 s** |
+| STT final transcript (local Nemotron streaming) | 207–241 ms |
+| LLM first token (Groq gpt-oss-120b, low reasoning) | 470–1050 ms |
+| TTS first piece (Kokoro, local) | 660–1280 ms |
+| **User stops speaking to first audio sent** | **2.0–2.2 s** |
+
+On an 8 GB Mac this assumes enough free memory: when the system swaps, the local
+models are paged out and turns take several seconds longer.
 
 How a call flows (`app/pipeline.py`):
 
@@ -39,7 +42,7 @@ How a call flows (`app/pipeline.py`):
 3. While the user speaks, `app/stt.py` streams the turn's audio into the local
    recognizer (live `partial` text); the final transcript is ready as the turn
    ends. `Call.respond` hands it to the LangGraph agent, which
-   (`app/database.py`) streams the reply from Groq and checkpoints history.
+   (`app/agent.py`) streams the reply from Groq and checkpoints history.
 4. `SpeechChunker` cuts streamed text into pieces that grow over the reply
    (about 6 words, then 12, then whole sentences) at natural boundaries, and
    Kokoro synthesizes each while the previous one plays.
@@ -113,7 +116,7 @@ round trip per turn, a request quota, and no live partial text).
 
 ### Tool calling
 
-The agent (`app/database.py`) is a LangGraph loop: `agent -> tools -> agent`,
+The agent (`app/agent.py`) is a LangGraph loop: `agent -> tools -> agent`,
 at most three tool rounds per turn, each step checkpointed. Tools
 (`app/tools.py`) are free and keyless:
 
@@ -139,12 +142,12 @@ Model choice (`GROQ_LLM_MODEL`): the default is gpt-oss-120b with low reasoning,
 faster to the first token but skipped tools on follow-up questions (6/9) and
 made up answers instead.
 
-Next: post-call Temporal and CrewAI workflows.
+Next: Temporal workflows.
 
 ## Run locally
 
 Create `.env` from `.env.example` and set `GROQ_API_KEY`. Never commit keys.
-Download the local models once (~365 MB) with `scripts/download-models.sh`.
+Download the local models once (~1 GB) with `scripts/download-models.sh`.
 
 ```sh
 python3 -m venv .venv

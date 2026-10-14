@@ -7,14 +7,14 @@ from uuid import uuid4
 import pytest
 from langgraph.checkpoint.memory import InMemorySaver
 
-from app import database
+from app import agent
 from app.llm import ToolCallRequest
 
 
 @pytest.fixture
 def graph(monkeypatch):
     saver = InMemorySaver()
-    monkeypatch.setattr(database, "graph", database.build_graph(saver))
+    monkeypatch.setattr(agent, "graph", agent.build_graph(saver))
     return saver
 
 
@@ -30,19 +30,19 @@ def scripted(monkeypatch, *replies):
                 raise event
             yield event
 
-    monkeypatch.setattr(database, "stream_model", stream_model)
+    monkeypatch.setattr(agent, "stream_model", stream_model)
     return seen
 
 
 def run_turn(conversation_id, text):
     async def collect():
-        return [event["text"] async for event in database.stream_conversation(conversation_id, text)]
+        return [event["text"] async for event in agent.stream_conversation(conversation_id, text)]
     return asyncio.run(collect())
 
 
 def history(conversation_id):
     return [(m["role"], m["parts"][0]["text"], m["status"])
-            for m in asyncio.run(database.load_history(conversation_id))]
+            for m in asyncio.run(agent.load_history(conversation_id))]
 
 
 def test_reply_streams_and_is_checkpointed(graph, monkeypatch):
@@ -56,7 +56,7 @@ def test_history_reaches_the_next_turn_and_survives_a_rebuild(graph, monkeypatch
     seen = scripted(monkeypatch, ["reply one"], ["reply two"])
     cid = str(uuid4())
     run_turn(cid, "first")
-    monkeypatch.setattr(database, "graph", database.build_graph(graph))  # State only from checkpoints.
+    monkeypatch.setattr(agent, "graph", agent.build_graph(graph))  # State only from checkpoints.
     run_turn(cid, "second")
     assert [m["content"] for m in seen[1]["messages"][1:]] == ["first", "reply one", "second"]
     assert len(history(cid)) == 4
@@ -68,7 +68,7 @@ def test_tool_call_runs_tool_and_answers_without_filler_when_fast(graph, monkeyp
                     ["It's ", "evening."])
     cid = str(uuid4())
     assert run_turn(cid, "what time is it?") == ["It's ", "evening."]
-    turns = asyncio.run(database.load_history(cid))
+    turns = asyncio.run(agent.load_history(cid))
     assert [m["role"] for m in turns] == ["user", "model", "tool", "model"]
     assert turns[1]["tool_calls"][0]["name"] == "get_time"
     assert turns[1]["parts"][0]["text"] == ""
@@ -83,16 +83,16 @@ def slow_tool(monkeypatch, seconds=0.05):
     async def run_tool(name, arguments):
         await asyncio.sleep(seconds)
         return '{"ok": true}'
-    monkeypatch.setattr(database, "run_tool", run_tool)
-    monkeypatch.setattr(database, "FILLER_AFTER_S", 0.01)
+    monkeypatch.setattr(agent, "run_tool", run_tool)
+    monkeypatch.setattr(agent, "FILLER_AFTER_S", 0.01)
 
 
 def test_slow_tool_gets_a_spoken_filler_that_is_stored(graph, monkeypatch):
     slow_tool(monkeypatch)
     scripted(monkeypatch, [[ToolCallRequest("c", "get_weather", "{}")]], ["Sunny."])
     cid = str(uuid4())
-    assert run_turn(cid, "weather?") == [database.TOOL_FILLER + " ", "Sunny."]
-    assert history(cid)[1] == ("model", database.TOOL_FILLER, "completed")
+    assert run_turn(cid, "weather?") == [agent.TOOL_FILLER + " ", "Sunny."]
+    assert history(cid)[1] == ("model", agent.TOOL_FILLER, "completed")
 
 
 def test_text_before_a_slow_tool_replaces_the_filler(graph, monkeypatch):
@@ -131,10 +131,10 @@ def test_closing_the_stream_cancels_the_model(graph, monkeypatch):
         finally:
             closed.set()
 
-    monkeypatch.setattr(database, "stream_model", stream_model)
+    monkeypatch.setattr(agent, "stream_model", stream_model)
 
     async def scenario():
-        async with aclosing(database.stream_conversation(str(uuid4()), "hello")) as stream:
+        async with aclosing(agent.stream_conversation(str(uuid4()), "hello")) as stream:
             assert (await anext(stream))["text"] == "partial"
         await asyncio.wait_for(closed.wait(), timeout=1)
 
@@ -146,11 +146,11 @@ def test_interrupted_reply_keeps_only_heard_text(graph, monkeypatch):
     cid = str(uuid4())
     run_turn(cid, "hello")
     # The interrupted turn's input was never checkpointed: append both messages.
-    asyncio.run(database.record_interruption(cid, "tell me more", "Well, it..."))
+    asyncio.run(agent.record_interruption(cid, "tell me more", "Well, it..."))
     assert history(cid)[2:] == [("user", "tell me more", "completed"),
                                 ("model", "Well, it...", "interrupted")]
     # Recording again for the same turn replaces the reply rather than appending.
-    asyncio.run(database.record_interruption(cid, "tell me more", "Well, it is..."))
+    asyncio.run(agent.record_interruption(cid, "tell me more", "Well, it is..."))
     assert history(cid)[2:] == [("user", "tell me more", "completed"),
                                 ("model", "Well, it is...", "interrupted")]
 
@@ -160,8 +160,8 @@ def test_interruption_after_a_tool_keeps_the_tool_exchange(graph, monkeypatch):
     scripted(monkeypatch, [[ToolCallRequest("c", "get_weather", "{}")]], ["It is sunny and warm."])
     cid = str(uuid4())
     run_turn(cid, "weather?")
-    heard = database.TOOL_FILLER + " It is sunny..."
-    asyncio.run(database.record_interruption(cid, "weather?", heard))
+    heard = agent.TOOL_FILLER + " It is sunny..."
+    asyncio.run(agent.record_interruption(cid, "weather?", heard))
     assert [(role, status) for role, _, status in history(cid)] == [
         ("user", "completed"), ("model", "completed"), ("tool", "completed"), ("model", "interrupted")]
     assert history(cid)[-1][1] == "It is sunny..."  # The filler is not stored twice.
@@ -183,7 +183,7 @@ def test_ordinary_answers_are_not_treated_as_promises(graph, monkeypatch):
     seen = scripted(monkeypatch, ["Coorg is lovely in winter, and the drive is about five hours."])
     run_turn(str(uuid4()), "trip ideas?")
     assert len(seen) == 1
-    assert not database.promises_lookup("Coorg is lovely in winter, and the drive is about five hours.")
-    assert database.promises_lookup("One moment, I'll check the weather there.")
-    assert database.promises_lookup("Let me look up the forecast for Madikeri.")
-    assert not database.promises_lookup("It's eleven AM in New York. Anything else you'd like to check?")
+    assert not agent.promises_lookup("Coorg is lovely in winter, and the drive is about five hours.")
+    assert agent.promises_lookup("One moment, I'll check the weather there.")
+    assert agent.promises_lookup("Let me look up the forecast for Madikeri.")
+    assert not agent.promises_lookup("It's eleven AM in New York. Anything else you'd like to check?")

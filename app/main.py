@@ -15,7 +15,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
-from app import database, groq_api
+from app import agent, groq_api
 from app.pipeline import Call, Engines, Samples, TurnDetector
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -52,7 +52,7 @@ def load_engines() -> Engines:
     warm.on_speech_end()
 
     async def reply(conversation_id: str, text: str) -> AsyncIterator[str]:
-        async for event in database.stream_conversation(conversation_id, text):
+        async for event in agent.stream_conversation(conversation_id, text):
             if event["type"] == "delta":
                 yield event["text"]
 
@@ -63,7 +63,7 @@ def load_engines() -> Engines:
                    new_detector=lambda listener: TurnDetector(SileroVad(vad_session), turn,
                                                              listener=listener),
                    reply=reply, synthesize=synthesize,
-                   record_interruption=database.record_interruption,
+                   record_interruption=agent.record_interruption,
                    output_sample_rate=OUTPUT_SAMPLE_RATE)
 
 
@@ -83,7 +83,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.engines = await asyncio.to_thread(load_engines)
     watcher = asyncio.create_task(watch_event_loop())
     try:
-        async with groq_api.shared_groq_client(), database.lifespan(app):
+        async with groq_api.shared_groq_client(), agent.lifespan(app):
             yield
     finally:
         watcher.cancel()
