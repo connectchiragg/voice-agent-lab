@@ -10,7 +10,7 @@ Checked on 2026-10-14:
 | Option | RAM / CPU | Fits? | Cost |
 |---|---|---|---|
 | **Oracle Cloud Always Free, Ampere A1** (primary) | 12 GB / 2 OCPU arm64 | Yes | Always free; a card is needed to verify the account |
-| **AWS Free plan, c7i-flex.large** (fallback) | 4 GB / 2 vCPU | Yes | Free-plan credits only: 6 months, then the account is suspended |
+| **AWS Free plan, t4g.small** (in use) | 2 GB / 2 vCPU arm64, burstable | Yes, with 2 GB swap | Free-plan credits only: 6 months, then the account is suspended |
 | Hugging Face Spaces, Docker on CPU Basic | 16 GB / 2 vCPU | Yes | Creating a Docker Space now needs PRO ($9/mo) |
 | Cloudflare Containers | n/a | n/a | Workers Paid plan only |
 | Render, Koyeb, Railway free tiers | 0.5–1 GB | Probably; not tried since speech moved to Deepgram | Free |
@@ -70,22 +70,82 @@ Cloudflare account and point it at `http://127.0.0.1:7860`.
 Oracle may reclaim Always Free instances that stay idle for 7 days, meaning CPU,
 network and memory all under 20%.
 
-## Fallback: AWS Free plan (x86_64)
+## In use: AWS Free plan, t4g.small (arm64)
 
 Only for an account on the **Free plan**, created on or after 2025-07-15. An
-older account is billed for anything beyond 750 h/month of t2/t3.micro (1 GB),
-which was too small for the local models and may now suffice (untested).
+older account is billed for anything beyond 750 h/month of t2/t3.micro (1 GB).
+
+The lab runs on this since 2026-10-16 (moved from a c7i-flex.large, 4 GB x86_64,
+which cost about 7.5 times as much per hour):
+
+| | |
+|---|---|
+| Instance | `i-0a5a070417e9a1146`, Name `voice-agent-lab-arm`, ap-south-1b (Mumbai) |
+| Type | **t4g.small**: 2 vCPU Graviton2 (arm64), 2 GB RAM, Free-plan eligible |
+| CPU credits | **standard** mode, never unlimited: no surplus-credit charges |
+| Disk | 25 GB gp3 root, plus a 2 GB `/swapfile` (`vm.swappiness=10`) |
+| Image | Ubuntu 24.04 arm64 (`ubuntu-noble-24.04-arm64-server-20261004`) |
+| Network | security group `voice-agent-lab`: SSH only, from the owner's IP; no other inbound port, the tunnels are outbound |
+| SSH | `ssh -i ~/.ssh/voice-agent-lab_ed25519 ubuntu@15.252.242.165` (key pair `voice-agent-lab`) |
+
+The public IPv4 is not an Elastic IP: it changes if the instance is stopped and
+started. Read it with
+`aws ec2 describe-instances --region ap-south-1 --instance-ids i-0a5a070417e9a1146 --query 'Reservations[0].Instances[0].PublicIpAddress'`,
+and update the security group if your own IP changes. Nothing else depends on
+it: voice.haciensus.com and valr.haciensus.com go through the named tunnel.
+
+**CPU credits.** A t4g.small's baseline is 20% of each vCPU. It earns 24
+credits an hour (one credit is one vCPU at 100% for a minute) and banks at most
+576. Unlike T2, T3 and T4g get no launch credits in standard mode, so a new
+instance starts at 0 and is held to the baseline until it has banked some. The
+first image build took well over 10 minutes for that reason, and a rebuild of the
+app layers alone takes about 1.5 minutes. The lab idles at a few percent of
+CPU, so it banks about 20 credits an hour. Check the balance before a
+CPU-heavy job such as a dependency rebuild:
+
+```sh
+aws cloudwatch get-metric-statistics --region ap-south-1 --namespace AWS/EC2 \
+  --metric-name CPUCreditBalance --dimensions Name=InstanceId,Value=i-0a5a070417e9a1146 \
+  --start-time $(date -u -v-1H +%FT%TZ) --end-time $(date -u +%FT%TZ) --period 300 --statistics Average
+```
+
+At 0 credits the instance still runs, at 20% of each vCPU.
+
+**Memory.** All eight containers use about 600 MB together when idle. About
+1 GB is left free, plus swap. `voice-research` is capped at 768 MB.
+
+To build another one:
 
 1. Run `aws login`, then check the account's plan in the Billing console.
-2. Launch EC2 with:
-   - Ubuntu 24.04 x86_64;
-   - **c7i-flex.large**, 2 vCPU and 4 GB (it is on the Free plan's eligible list);
-   - a 30 GB gp3 disk;
-   - SSH allowed only from your IP.
-3. Follow steps 4–6 above, using `ubuntu@<ec2-ip>`.
-4. Stop the instance when you are not testing. Free-plan credits ($100, plus
-   up to $100 more for onboarding tasks) are spent per hour on the instance,
-   its disk and its public IPv4 address.
+2. Launch EC2 with Ubuntu 24.04 **arm64**, t4g.small, `CpuCredits=standard`, a
+   25 GB gp3 disk, and SSH only from your IP. Add a 2 GB swapfile.
+3. Follow steps 4–6 above, using `ubuntu@<ec2-ip>`. Every pinned wheel exists for
+   arm64 (the Dockerfile installs binary wheels only, so a missing one fails the build).
+4. Free-plan credits ($100, plus up to $100 more for onboarding tasks) are
+   spent per hour on the instance (t4g.small $0.0112/h in ap-south-1), its
+   disk ($0.0912/GB-month) and its public IPv4 address ($0.005/h).
+
+**Moving the lab to another VM** (done on 2026-10-16 with 2m16s of public
+downtime):
+
+1. Build both images on the new VM first.
+2. On the old VM, stop `voice-agent-lab`, `voice-callbacks`, `voice-research`,
+   `temporal-ui` and `temporal`.
+3. Dump everything:
+   `sudo docker exec voice-postgres pg_dumpall -U voice_agent | gzip`.
+   The dump holds the app database, `temporal` and `temporal_visibility`, so
+   pending workflows, timers and schedules move with it.
+4. On the new VM, create Postgres as in the Postgres section, then restore with
+   `zcat dump.sql.gz | sudo docker exec -i voice-postgres psql -U voice_agent -d postgres`.
+   Two "already exists" errors, for the role and the database, are expected.
+5. Copy `.env`, `.env.research`, `/srv/valr-data` and `~/.cloudflared-named-token`
+   with `tar -p`, which keeps their modes.
+6. Start `temporal` and `temporal-ui` (their `docker run` lines are in
+   `deploy/temporal-setup.sh`), then the app, `voice-callbacks` and `voice-research`.
+7. Start `cloudflared-named` on the new VM, and only then stop it on the old one.
+8. Check: `temporal workflow list` shows the same running workflows, and
+   `temporal task-queue describe --task-queue voice-callbacks` (and
+   `voice-research`) shows pollers.
 
 ## Testing a deployment
 
@@ -157,7 +217,7 @@ would need Postgres to listen on the Docker bridge as well.
 The data lives in the named volume `voice-agent-lab-postgres`. The password is
 generated once and kept only in `~/voice-agent-lab/.env` (`POSTGRES_PASSWORD`);
 Postgres reads it from a temporary file at its first start, when the volume is
-initialised. Postgres 17 used 27 MB of RAM after setup (the app about 120 MB), which the 4 GB VM easily
+initialised. Postgres 17 used 27 MB of RAM after setup (the app about 120 MB), which the 2 GB VM easily
 fits. One-time setup:
 
 ```sh
@@ -192,8 +252,8 @@ Scheduled callbacks (README, Callbacks) need three more containers on the
 
 Measured in Docker on a Mac with the same images and Postgres 17.11; Postgres
 itself grew from about 27 MB to 78 MB with Temporal's connections. The idle
-Temporal server used 3 to 6% of one core there. All of it fits the VM's free
-3 GB with room to spare.
+Temporal server used 3 to 6% of one core there. All of it fits the 2 GB t4g.small (about 600 MB for all eight
+containers when idle).
 
 Temporal keeps its state in the existing `voice-postgres`, as a role `temporal`
 owning two databases, `temporal` and `temporal_visibility`, so the
