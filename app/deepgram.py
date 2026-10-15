@@ -80,6 +80,10 @@ class DeepgramSettings:
     eot_threshold: float = 0.7
     eager_eot_threshold: float | None = 0.4  # None: no EagerEndOfTurn, no speculation.
     eot_timeout_ms: int = 3000
+    # linear16 both ways. Browser: 16 kHz in, 24 kHz out. Phone (Telnyx PCMU):
+    # 8 kHz both ways, so phone audio is never resampled.
+    input_sample_rate: int = INPUT_SAMPLE_RATE
+    output_sample_rate: int = OUTPUT_SAMPLE_RATE
 
     @classmethod
     def from_env(cls) -> "DeepgramSettings":
@@ -97,14 +101,14 @@ class DeepgramSettings:
 
     def flux_url(self) -> str:
         query: dict[str, Any] = {"model": "flux-general-en", "encoding": "linear16",
-                                 "sample_rate": INPUT_SAMPLE_RATE, "eot_threshold": self.eot_threshold,
+                                 "sample_rate": self.input_sample_rate, "eot_threshold": self.eot_threshold,
                                  "eot_timeout_ms": self.eot_timeout_ms}
         if self.eager_eot_threshold is not None:
             query["eager_eot_threshold"] = self.eager_eot_threshold
         return f"wss://{self.host}/v2/listen?{urlencode(query)}"
 
     def aura_url(self) -> str:
-        query = {"model": self.voice, "encoding": "linear16", "sample_rate": OUTPUT_SAMPLE_RATE}
+        query = {"model": self.voice, "encoding": "linear16", "sample_rate": self.output_sample_rate}
         return f"wss://{self.host}/v1/speak?{urlencode(query)}"
 
 
@@ -183,19 +187,20 @@ class FluxListener:
 
     def hold(self, pcm: bytes, arrived: float) -> None:
         self.held.append((pcm, arrived))
-        limit = RECONNECT_BUFFER_S * INPUT_SAMPLE_RATE * 2
+        limit = RECONNECT_BUFFER_S * self.settings.input_sample_rate * 2
         while sum(len(packet) for packet, _ in self.held) > limit:
             self.held.popleft()
 
     def speech_end_arrival(self, word_end_s: float) -> float | None:
         """When the last loud packet from the last word's end on arrived (else the word end's)."""
-        word_end = word_end_s * INPUT_SAMPLE_RATE
-        limit = word_end + SPEECH_END_SEARCH_S * INPUT_SAMPLE_RATE
+        rate = self.settings.input_sample_rate
+        word_end = word_end_s * rate
+        limit = word_end + SPEECH_END_SEARCH_S * rate
         found = None
         for sent, arrived, loud in self.arrivals:
             if sent < word_end:
                 continue
-            if found is None or (loud and sent - INPUT_SAMPLE_RATE // 10 < limit):
+            if found is None or (loud and sent - rate // 10 < limit):
                 found = arrived
             if sent >= limit:
                 break
@@ -245,7 +250,7 @@ class FluxListener:
             return
 
     async def keep_alive(self) -> None:
-        silence = bytes(INPUT_SAMPLE_RATE // 10 * 2)  # 100 ms, like a browser packet.
+        silence = bytes(self.settings.input_sample_rate // 10 * 2)  # 100 ms, like a browser packet.
         while True:
             await asyncio.sleep(KEEPALIVE_CHECK_S)
             if self.socket is not None and time.perf_counter() - self.last_sent > SILENCE_KEEPALIVE_S:
@@ -274,7 +279,7 @@ CLOSED = object()  # Queued when the Aura socket stops delivering messages.
 
 
 class AuraSpeaker:
-    """One Aura-2 socket per call: text in, 24 kHz float32 audio out.
+    """One Aura-2 socket per call: text in, float32 audio out (24 kHz unless configured).
 
     `synthesize` sends one segment as Speak + Flush and yields its audio until
     Deepgram confirms the flush, so segments are spoken one at a time, in
