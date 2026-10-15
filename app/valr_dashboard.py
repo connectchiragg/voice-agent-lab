@@ -68,8 +68,35 @@ async def lifespan() -> AsyncIterator[None]:
         verifier = None
 
 
+# Local dev preview (scripts/preview_ui.py) only: the Access check is skipped when the
+# preview process enabled it (VALR_DEV_PREVIEW=1 and bound to 127.0.0.1) and the request
+# itself comes from and is addressed to 127.0.0.1. The app's own startup never enables it.
+PREVIEW_EMAIL = "preview@localhost"
+LOOPBACK = "127.0.0.1"
+dev_preview = False
+
+
+def enable_dev_preview(bind_host: str) -> None:
+    """Called by scripts/preview_ui.py before it serves; refuses anything but loopback."""
+    global dev_preview
+    if os.getenv("VALR_DEV_PREVIEW") != "1":
+        raise RuntimeError("The dev preview needs VALR_DEV_PREVIEW=1.")
+    if bind_host != LOOPBACK:
+        raise RuntimeError("The dev preview only binds to 127.0.0.1.")
+    dev_preview = True
+
+
+def is_preview_request(request: Request) -> bool:
+    host = (request.headers.get("host") or "").rsplit(":", 1)[0]
+    return (dev_preview and os.getenv("VALR_DEV_PREVIEW") == "1"
+            and request.client is not None and request.client.host == LOOPBACK
+            and host == LOOPBACK)
+
+
 async def viewer(request: Request) -> str:
     """The verified Access email, or 403."""
+    if is_preview_request(request):
+        return PREVIEW_EMAIL
     if verifier is None:
         raise HTTPException(403, "The dashboard is not configured.")
     try:

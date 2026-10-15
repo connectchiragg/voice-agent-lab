@@ -184,3 +184,32 @@ def test_builders():
     assert valr_view.cache_hits([{"status": "done", "detail": "cache: company"},
                                  {"status": "cached", "detail": "slot research reused"}]) == \
         ["company", "whole slot"]
+
+
+def test_dev_preview_is_loopback_only(monkeypatch):
+    from app.main import app
+    monkeypatch.setattr(valr_dashboard, "verifier", None)
+    monkeypatch.setattr(valr_dashboard, "dev_preview", False)
+    monkeypatch.setattr(valr_view, "collect", lambda pool, now=None: _view())
+    monkeypatch.setattr(research, "pool", Pool())
+    monkeypatch.delenv("VALR_DEV_PREVIEW", raising=False)
+    with pytest.raises(RuntimeError):
+        valr_dashboard.enable_dev_preview("127.0.0.1")  # No explicit opt-in.
+    monkeypatch.setenv("VALR_DEV_PREVIEW", "1")
+    for host in ("0.0.0.0", "::", "localhost", "10.0.0.5"):
+        with pytest.raises(RuntimeError):
+            valr_dashboard.enable_dev_preview(host)
+    local = TestClient(app, base_url="http://127.0.0.1:8090", client=("127.0.0.1", 50000))
+    assert local.get("/valr").status_code == 403  # The env var alone (as in a container) opens nothing.
+    valr_dashboard.enable_dev_preview("127.0.0.1")
+    assert local.get("/valr").status_code == 200
+    remote = TestClient(app, base_url="http://127.0.0.1:8090", client=("10.0.0.9", 50000))
+    assert remote.get("/valr").status_code == 403
+    proxied = TestClient(app, base_url="https://valr.haciensus.com", client=("127.0.0.1", 50000))
+    assert proxied.get("/valr").status_code == 403  # A tunnel connects from loopback, for another host.
+    monkeypatch.setenv("VALR_DEV_PREVIEW", "0")
+    assert local.get("/valr").status_code == 403
+
+
+async def _view():
+    return sample_view()
