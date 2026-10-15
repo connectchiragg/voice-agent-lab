@@ -34,7 +34,9 @@ import httpx
 import numpy as np
 from aiortc import (MediaStreamTrack, RTCConfiguration, RTCIceServer, RTCPeerConnection,
                     RTCSessionDescription)
+from aiortc.jitterbuffer import JitterFrame
 from aiortc.mediastreams import MediaStreamError
+from aiortc.rtp import RtpPacket
 from fastapi import APIRouter, FastAPI, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -71,6 +73,26 @@ class Downsampler:
         if not planes:
             return np.empty(0, dtype=np.float32)
         return np.concatenate(planes).astype(np.float32, copy=False)
+
+
+class LowDelayAudioBuffer:
+    """In place of aiortc's audio jitter buffer, which holds 4 packets (80 ms)
+    and stalls on a lost packet until 16 newer ones arrive (320 ms).
+
+    Each Opus packet is a whole frame, and the pipeline needs no smooth
+    playout: pass packets on at once, in order, and drop late ones. aiortc
+    1.15 has no public hook for this; see `Peer.tune_receivers`.
+    """
+
+    def __init__(self) -> None:
+        self.last: int | None = None
+
+    def add(self, packet: RtpPacket) -> tuple[bool, JitterFrame | None]:
+        sequence = packet.sequence_number
+        if self.last is not None and not 0 < (sequence - self.last) % 65536 < 32768:
+            return False, None  # A duplicate, or later than one already passed on.
+        self.last = sequence
+        return False, JitterFrame(data=packet._data, timestamp=packet.timestamp)  # type: ignore[attr-defined]
 
 
 class SpeechTrack(MediaStreamTrack):
@@ -222,6 +244,12 @@ class Peer:
 
     def start(self) -> None:
         self.spawn(self.supervise())
+
+    def tune_receivers(self) -> None:
+        """After the remote description: low-delay buffering for the microphone."""
+        for transceiver in self.pc.getTransceivers():
+            if transceiver.kind == "audio":
+                transceiver.receiver._RTCRtpReceiver__jitter_buffer = LowDelayAudioBuffer()
 
     # Pipeline -> browser.
 
@@ -401,6 +429,7 @@ async def offer(offer: Offer, request: Request) -> dict[str, str]:
     peers.add(peer)
     try:
         await pc.setRemoteDescription(RTCSessionDescription(sdp=offer.sdp, type="offer"))
+        peer.tune_receivers()
         pc.addTrack(peer.speech)
         await pc.setLocalDescription(await pc.createAnswer())
     except Exception as error:

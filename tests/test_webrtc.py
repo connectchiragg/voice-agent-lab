@@ -9,10 +9,11 @@ import numpy as np
 import pytest
 from aiortc import MediaStreamTrack, RTCPeerConnection, RTCSessionDescription
 from aiortc.mediastreams import MediaStreamError
+from aiortc.rtp import RtpPacket
 from fastapi.testclient import TestClient
 
 from app import ice, main, webrtc
-from app.webrtc import FRAME_S, Downsampler, Peer, SpeechTrack
+from app.webrtc import FRAME_S, Downsampler, LowDelayAudioBuffer, Peer, SpeechTrack
 from tests.test_pipeline import fake_engines
 
 RATE = 24000
@@ -62,6 +63,19 @@ def test_downsampler_state_spans_frames():
     many = np.concatenate([framed(frame) for frame in frames])
     count = min(len(one), len(many))
     assert np.abs(one[:count] - many[:count]).max() < 1e-4  # No clicks at frame edges.
+
+
+def rtp(sequence):
+    packet = RtpPacket(sequence_number=sequence, timestamp=sequence * 960)
+    packet._data = bytes([sequence % 256])
+    return packet
+
+
+def test_low_delay_buffer_passes_packets_on_at_once_and_skips_gaps():
+    buffer = LowDelayAudioBuffer()
+    out = [buffer.add(rtp(sequence))[1] for sequence in (65534, 65535, 1, 0, 1, 2)]
+    # 0 was lost (it arrives after 1): no waiting for it, and it is dropped once late.
+    assert [frame and frame.timestamp for frame in out] == [65534 * 960, 65535 * 960, 960, None, None, 1920]
 
 
 def run(coroutine):
