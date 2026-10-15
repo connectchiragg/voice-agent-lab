@@ -1,9 +1,9 @@
 # Deploying for a public test
 
-The server needs about 1.5 GB of RAM resident and 2 vCPU for one call at normal
-latency. Microphone capture needs HTTPS, so the page must be served over https://
-and the socket over wss://. The image bakes in the roughly 1 GB of models, and
-secrets are passed only at run time.
+Speech runs on Deepgram and the LLM on Groq, so the server itself is small: the
+image is about 450 MB and used about 100 MB of RAM during a call on the VM. Microphone capture needs HTTPS, so the
+page must be served over https:// and the socket over wss://. Secrets are passed
+only at run time.
 
 Checked on 2026-10-14:
 
@@ -13,7 +13,7 @@ Checked on 2026-10-14:
 | **AWS Free plan, c7i-flex.large** (fallback) | 4 GB / 2 vCPU | Yes | Free-plan credits only: 6 months, then the account is suspended |
 | Hugging Face Spaces, Docker on CPU Basic | 16 GB / 2 vCPU | Yes | Creating a Docker Space now needs PRO ($9/mo) |
 | Cloudflare Containers | n/a | n/a | Workers Paid plan only |
-| Render, Koyeb, Railway free tiers | 0.5–1 GB | No | Free but too small |
+| Render, Koyeb, Railway free tiers | 0.5–1 GB | Probably; not tried since speech moved to Deepgram | Free |
 | Quick tunnel to a laptop | the laptop's own | Yes | Free; public only while the laptop runs it |
 
 ## Primary: Oracle Cloud Always Free (arm64)
@@ -46,14 +46,18 @@ Steps for the owner:
 
    ```
    GROQ_API_KEY=<your key>
+   DEEPGRAM_API_KEY=<your key>
    GROQ_LLM_MODEL=<same as your local .env>
    GROQ_LLM_REASONING=low
    ```
 
+   To copy a key from your Mac without printing it:
+   `grep '^DEEPGRAM_API_KEY=' .env | ssh ubuntu@<vm-ip> 'cat >> ~/voice-agent-lab/.env'`.
+
    Leave `POSTGRES_PASSWORD` unset, so history stays in memory.
 6. Run `sh ~/voice-agent-lab/deploy/vm-setup.sh`. It does the following:
    - installs Docker;
-   - builds the image (about 10 minutes, including the model download);
+   - builds the image (under a minute);
    - starts the app on 127.0.0.1:7860;
    - starts a Cloudflare quick tunnel and prints `Ready: https://<random>.trycloudflare.com`.
 
@@ -68,8 +72,8 @@ network and memory all under 20%.
 ## Fallback: AWS Free plan (x86_64)
 
 Only for an account on the **Free plan**, created on or after 2025-07-15. An
-older account is billed for anything beyond 750 h/month of t2/t3.micro, which
-has 1 GB and is too small.
+older account is billed for anything beyond 750 h/month of t2/t3.micro (1 GB),
+which was too small for the local models and may now suffice (untested).
 
 1. Run `aws login`, then check the account's plan in the Billing console.
 2. Launch EC2 with:
@@ -95,22 +99,43 @@ has 1 GB and is too small.
 
    Expect a `ready` event, a `transcript`, `caption` and `metrics` events, reply
    audio, and finally `reply_end`.
-3. Health check: `curl https://<host>/healthz` returns `{"ok":true,"models_loaded":true}`.
+3. Health check: `curl https://<host>/healthz` returns `{"ok":true,"speech":true}`
+   (`speech` is false when `DEEPGRAM_API_KEY` is missing).
+4. Latency and accuracy over many turns: `scripts/live_latency.py` (see its
+   docstring); add `--barge-in` to time interruptions.
+
+## Updating and rolling back
+
+Ship the source to a fresh directory, keep `.env`, rebuild only the app
+container, and tag the running image first so it can be restored:
+
+```sh
+git archive <branch> | ssh ubuntu@<vm-ip> 'mkdir ~/voice-agent-lab.new && tar -x -C ~/voice-agent-lab.new'
+ssh ubuntu@<vm-ip>
+cp -p ~/voice-agent-lab/.env ~/voice-agent-lab.new/ && mv ~/voice-agent-lab ~/voice-agent-lab.old && mv ~/voice-agent-lab.new ~/voice-agent-lab
+sudo docker tag voice-agent-lab:latest voice-agent-lab:rollback
+cd ~/voice-agent-lab && sudo docker build -t voice-agent-lab:latest .
+sudo docker rm -f voice-agent-lab
+sudo docker run -d --name voice-agent-lab --restart unless-stopped --env-file .env -p 127.0.0.1:7860:7860 voice-agent-lab:latest
+```
+
+Leave the `cloudflared` container alone: restarting it changes the public URL.
+To roll back, run the same `docker rm -f` and `docker run` with the rollback tag.
 
 ## Configuration
 
 | Variable | Default | Purpose |
 |---|---|---|
 | `GROQ_API_KEY` | (required) | LLM; set it only at run time, never in the image |
+| `DEEPGRAM_API_KEY` | (required) | Speech (Flux and Aura-2); run time only |
+| `DEEPGRAM_HOST` | `api.in.deepgram.com` | Deepgram region; `api.deepgram.com` (US) or `api.eu.deepgram.com` elsewhere |
+| `DEEPGRAM_VOICE` | `aura-2-thalia-en` | Any English Aura-2 voice |
+| `FLUX_EOT_THRESHOLD`, `FLUX_EAGER_EOT_THRESHOLD`, `FLUX_EOT_TIMEOUT_MS` | `0.7`, `0.4`, `3000` | Flux end of turn: confidence for EndOfTurn, for EagerEndOfTurn (empty disables it and speculation), and the silence that forces EndOfTurn |
 | `GROQ_LLM_MODEL`, `GROQ_LLM_REASONING` | see `.env.example` | LLM choice |
 | `LLM_FALLBACK_MODEL` | `openai/gpt-oss-20b` | Hedge for a stalled or rate-limited LLM request; empty disables it |
 | `FIRST_TOKEN_DEADLINE_MS` | `600` | Start the fallback when the primary has sent nothing for this long |
 | `HOST`, `PORT` | `0.0.0.0`, `7860` in the image | Address uvicorn binds |
-| `MODELS_DIR` | `/models` in the image | Model files |
-| `STT_THREADS` | `1` in the image, `2` locally | Nemotron threads; keep at or below physical cores (2 vCPU is often 1 core) |
-| `TTS_THREADS` | `1` in the image, onnxruntime default locally | Kokoro threads; containers often see all host cores |
-| `KOKORO_MODEL` | `kokoro-v1.0.onnx` (fp32) | Kokoro weights in `MODELS_DIR`; build with `--build-arg KOKORO_MODEL=kokoro-v1.0.fp16.onnx` to bake in another export |
-| `SPECULATIVE_LLM` | `1` | Start the LLM from the live transcript while STT finalises; `0` turns it off |
+| `SPECULATIVE_LLM` | `1` | Start the LLM at Flux's EagerEndOfTurn; `0` turns it off |
 | `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_PASSWORD` | `127.0.0.1`, `5432`, unset | Optional history store; in memory when unset |
 
 The image runs as non-root UID 1000. Dependency versions come from
@@ -125,4 +150,4 @@ cloudflared tunnel --no-autoupdate --url http://127.0.0.1:8000
 
 This makes the local app public at a random trycloudflare.com URL for as long as
 the command runs. Anyone with the URL can use the microphone pipeline and spend
-Groq quota. Stop it with Ctrl-C, or with `pkill -f "cloudflared tunnel"`.
+Groq quota and Deepgram credit. Stop it with Ctrl-C, or with `pkill -f "cloudflared tunnel"`.

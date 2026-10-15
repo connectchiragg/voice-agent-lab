@@ -1,111 +1,127 @@
 # Voice Agent Lab
 
-A local, full-duplex voice agent built on a cascaded, open-weight stack:
+A full-duplex voice agent built as a hand-wired cascade:
 
 ```
-mic (16 kHz PCM) -> VAD + turn detection -> STT -> LLM -> TTS -> speaker (24 kHz PCM)
+mic (16 kHz PCM) -> Deepgram Flux (STT + turn detection) -> LLM -> Deepgram Aura-2 (TTS) -> speaker (24 kHz PCM)
 ```
 
 | Stage | Choice | Runs |
 |---|---|---|
-| VAD | Silero VAD | local CPU |
-| Turn detection | Smart Turn v3 | local CPU |
-| STT (streaming) | NVIDIA Nemotron Speech Streaming EN 0.6B, int8 (sherpa-onnx) | local CPU |
-| LLM | gpt-oss-120b, low reasoning (open weights) | Groq free tier |
-| TTS | Kokoro-82M | local |
+| STT and turn detection | Deepgram Flux (`flux-general-en`), streaming WebSocket | Deepgram, India region |
+| LLM | gpt-oss-120b, low reasoning (open weights); gpt-oss-20b hedge | Groq free tier |
+| TTS | Deepgram Aura-2 (`aura-2-thalia-en`), streaming WebSocket | Deepgram, India region |
 
-No frontier or paid APIs. Earlier experiments (Gemini, Cartesia, MiniCPM-o,
-VAP diagnostics) are retired and live only in Git history.
+English only. Speech moved from local open-weight models (Silero VAD, Smart Turn,
+Nemotron streaming STT, Kokoro TTS) to Deepgram on 2026-10-15; that stack and
+earlier experiments (Gemini, Cartesia, MiniCPM-o) live only in Git history.
 
 ## Status
 
-Working end to end: speak, pause, and the assistant answers aloud. Measured on an
-M2 / 8 GB with recorded speech over the real WebSocket (5 turns, 2026-10-13):
+Working end to end, deployed on an AWS VM in Mumbai behind a Cloudflare tunnel.
+Measured through the tunnel on 2026-10-15: 64 turns of macOS `say` speech
+(en-IN Aman and Rishi, en-US Samantha, en-GB Daniel), each streamed at real time
+by `scripts/live_latency.py`. Times are from the true end of speech:
+
+| | Before (local models, same VM) | After (Deepgram) |
+|---|---|---|
+| Final transcript at the client | about 1.5 s | p50 0.70 s, p90 1.11 s |
+| **First reply audio at the client** | **p50 2.76 s, p90 4.01 s** | **p50 1.33 s, p90 1.96 s** |
+| Word error rate, 24-clip `say` spot check | 1.1% | 0.5% (1 of 219 words) |
+
+Where the time goes (server side, by packet arrival, p50 / p90):
 
 | Stage | Time |
 |---|---|
-| End of turn (Silero pause + Smart Turn) | 192 ms |
-| STT final transcript (local Nemotron streaming) | 207–241 ms |
-| LLM first token (Groq gpt-oss-120b, low reasoning) | 470–1050 ms |
-| TTS first piece (Kokoro, local) | 660–1280 ms |
-| **User stops speaking to first audio sent** | **2.0–2.2 s** |
+| End of speech -> Flux EndOfTurn | 676 / 1,162 ms |
+| EagerEndOfTurn ahead of EndOfTurn (committed turns) | 280 / 545 ms |
+| LLM first token after EndOfTurn (speculative start included) | 428 / 1,297 ms |
+| Aura-2 first audio after the first sentence is sent | 72 / 76 ms |
+| End of speech -> first audio sent | 1,354 / 1,954 ms |
 
-On an 8 GB Mac this assumes enough free memory: when the system swaps, the local
-models are paged out and turns take several seconds longer.
+The en-IN voices alone: first audio p50 1.35 s, p90 2.04 s. The only word error
+was "Mysore" heard as "Su" (Aman). The LLM is now the largest and most variable
+stage: on this run Groq's gpt-oss-120b was slow often enough that the hedge
+answered 17 of 64 turns.
 
-How a call flows (`app/pipeline.py`):
+How a call flows (`app/pipeline.py`, `app/deepgram.py`):
 
-1. The browser streams 100 ms packets of 16 kHz PCM over `/ws/voice`.
-2. `TurnDetector`: Silero scores every 32 ms. After 200 ms of silence, Smart Turn
-   scores the whole utterance; "complete" ends the turn, otherwise it waits for
-   more speech or a 1.5 s timeout.
-3. While the user speaks, `app/stt.py` streams the turn's audio into the local
-   recognizer (live `partial` text); the final transcript is ready as the turn
-   ends. `Call.respond` hands it to the LangGraph agent, which
-   (`app/agent.py`) streams the reply from Groq and checkpoints history.
-   With `SPECULATIVE_LLM=1` (default), see below, the LLM starts earlier.
-4. `SpeechChunker` cuts streamed text into pieces that grow over the reply
-   (about 3 words, then 5, 7, 10, 14, then whole sentences) at natural boundaries, and
-   Kokoro synthesizes each while the previous one plays.
-5. Audio goes back in 200 ms packets; the browser plays them gap-free.
+1. The browser streams 100 ms packets of 16 kHz float32 PCM over `/ws/voice`.
+   The server opens one Flux and one Aura socket when the call starts and
+   forwards the microphone to Flux continuously, as linear16.
+2. Flux sends turn events: `Update` (live words, shown as `partial`),
+   `StartOfTurn`, `EagerEndOfTurn`, `TurnResumed` and `EndOfTurn`.
+3. At `EndOfTurn`, `Call.respond` hands the transcript to the LangGraph agent
+   (`app/agent.py`), which streams the reply from Groq and checkpoints history.
+   With `SPECULATIVE_LLM=1` (default) the LLM starts at `EagerEndOfTurn`, below.
+4. `ReplyText` cuts the streamed reply into whole sentences. The first sentence
+   goes to Aura as soon as it is complete; each later segment is every sentence
+   written by then. Aura streams audio back as it generates it, about 4x faster
+   than real time.
+5. Audio goes to the browser as it arrives. Each segment's caption follows its
+   audio, with its exact length; the browser reveals the words from where that
+   audio started.
 
 Events sent to the browser: `ready`, `partial` (live words while the user
-speaks), `transcript`, `caption` (each spoken
-piece's text and audio length, just before its audio), `metrics`, `notice`,
-`reply_end`, `interrupt`, `error`. The browser reveals caption words in time with
-playback, so the screen never runs ahead of the voice; on an interruption the
-remaining words are dropped, matching the history saved on the server. Postgres is used when running,
-otherwise history is in memory (logged at startup).
+speaks), `transcript`, `caption` (each spoken segment's text and audio length,
+after its audio), `metrics`, `notice`, `reply_end`, `interrupt`, `error`.
+The screen never runs ahead of the voice; on an interruption the remaining words
+are dropped, matching the history saved on the server. Postgres is used when
+running, otherwise history is in memory (logged at startup).
 
 ### Speculative LLM start
 
-STT finalization takes about 0.5 s on one AWS core, after the turn has already
-ended. So when Smart Turn ends a turn, `Call` starts one LLM reply from the live
-transcript in parallel. Its output is buffered and never spoken. When the final
-transcript arrives:
+Flux sends `EagerEndOfTurn` when it is moderately sure the user has finished
+(`FLUX_EAGER_EOT_THRESHOLD`, 0.4), before `EndOfTurn` (`FLUX_EOT_THRESHOLD`,
+0.7). `Call` starts one LLM reply from the eager transcript. Its output is
+buffered and never spoken until:
 
-- same words (case, punctuation and spacing ignored): **commit**. The buffer is
-  replayed and the reply continues live;
-- different words, or the user spoke again first: **cancel**. The Groq stream
-  is closed and a normal call answers the final text.
+- `TurnResumed` (the user kept talking): **cancel**. The Groq stream is closed;
+  the next `EagerEndOfTurn` may start another. At most one is in flight.
+- `EndOfTurn` with the same words (case, punctuation and spacing ignored):
+  **commit**. The buffer is replayed and the reply continues live. Flux
+  guarantees the words match unless the turn resumed.
+- `EndOfTurn` with other words: cancel, and a normal call answers it.
 
 A cancelled speculation leaves no history (it runs on an uncheckpointed graph
 and is saved only once committed), and tools marked `side_effects` wait for
-the commit. At most one runs per turn. It is skipped after a Groq 429 in the
-last minute, or above 70% of the per-minute request or input-token limit.
+the commit. It is skipped after a Groq 429 in the last minute, or above 70% of
+the per-minute request or input-token limit.
 
-Measured on the AWS VM (2026-10-15, 20 scripted turns over the tunnel):
-
-- 16 of 20 turns committed. Every cancel was the live text missing the end of
-  the last word ("octop" for "octopuses"). The VM benchmark agrees: 87% of 30
-  turns matched (`scripts/bench_latency.py`, `live_match_pct`).
-- On committed turns without tools, the first audio came about 410 ms sooner
-  (median of paired turns).
-- Each cancel costs one extra Groq request: 1.45 requests per turn in that run.
+Measured over the 64 turns: 60 committed, 1 cancelled, 3 skipped (the Groq
+rate-limit guard, or no `EagerEndOfTurn` before `EndOfTurn`). Of 67 speculative
+requests, 7 were discarded after `TurnResumed`: about 0.11 extra Groq requests
+per turn, against 0.45 with the local stack's live-transcript speculation.
+Committed turns had their eager start 280 ms (p50) before `EndOfTurn`.
 
 ### Barge-in
 
-Talking over the assistant stops it, the way OpenAI Realtime, LiveKit and
-Pipecat handle interruptions:
+Talking over the assistant stops it:
 
-1. While a reply is in progress, 250 ms of confident speech (Silero >= 0.8)
-   counts as an interruption. Shorter sounds (a cough, "mm-hmm") are ignored.
-2. The server cancels the LLM and TTS and sends `interrupt`. The browser flushes
-   queued audio and answers `{"type": "interrupted", "played_s": ...}`.
-3. History keeps only what was heard: whole sentences that played, plus the
-   playing sentence cut by word proportion, stored with status `interrupted`.
+1. Flux's `StartOfTurn` while a reply is in progress counts as an interruption.
+   Deepgram recommends it over a separate VAD: every `StartOfTurn` already holds
+   a recognised word.
+2. The server cancels the LLM, sends Aura a `Clear` and drops any audio still
+   on its way, then sends `interrupt`. The browser flushes queued audio and
+   answers `{"type": "interrupted", "played_s": ...}`.
+3. History keeps only what was heard: whole segments that played, plus the
+   playing segment cut by word proportion, stored with status `interrupted`.
 4. The interrupting speech continues as the user's next turn.
 
-Measured: audio stops about 300 ms after the user starts talking. Barge-in is
-disabled when the browser reports no echo cancellation, because the assistant's
-own voice would otherwise interrupt it. Headphones are the most reliable setup.
+Measured: the client receives `interrupt` 532 ms (p50; p90 622) after it starts
+talking over a reply, network both ways included (10 of 10 turns). The local
+stack stopped audio about 300 ms in, because it needed only 250 ms of voice,
+not a recognised word; a cough or a short "mm-hmm" now interrupts only if Flux
+transcribes it. Barge-in is disabled when the browser reports no echo
+cancellation, and a turn that starts while the assistant speaks is then
+ignored. Headphones are the most reliable setup.
 
 ### Groq reliability
 
 Free-tier limits for the LLM: 30 requests per minute (only stated in 429
-bodies), 1,000 per day and 8,000 tokens per minute. Speech-to-text is local, so
-each user turn makes one or two LLM requests (two when a tool is used), plus one
-for a cancelled speculative start.
+bodies), 1,000 per day and 8,000 tokens per minute. Each user turn makes one or
+two LLM requests (two when a tool is used), plus one for each speculative start
+that is cancelled.
 
 - One shared Groq client for the process (connection reuse; first token about
   110-170 ms instead of opening a TLS connection per request).
@@ -128,32 +144,35 @@ for a cancelled speculative start.
   hedge rate; the turn metrics carry `llm_model`. A watchdog logs any event-loop
   block over 250 ms.
 
-### Speech-to-text choice (benchmarked, 2026-10-13)
+### Speech: Deepgram
 
-Streaming models available in sherpa-onnx were compared on real speech fed in
-100 ms packets, exactly as the browser sends it. Word error rate, fillers removed:
+Flux (`/v2/listen`) and Aura-2 (`/v1/speak`) each keep one WebSocket per call.
+Limits come from Deepgram's documentation, and our settings from them:
 
-| Model | Svarah (Indian English, 266 clips, 19 L1s) | South Asian, 8 kHz phone | South Asian, 10 dB noise |
-|---|---|---|---|
-| **Nemotron Speech Streaming EN 0.6B (chosen)** | **14.9%** | **19.2%** | **17.1%** |
-| Nemotron 3.5 ASR Streaming 0.6B (multilingual) | 18.2% | - | - |
-| NeMo FastConformer streaming 80 ms (~100 MB) | 22.4% | 31.6% | 27.5% |
+- A streaming socket closes after about 10 s without audio, and Flux has no
+  KeepAlive message. The browser streams continuously; if it stops, the server
+  sends silence after 5 s.
+- No maximum session length is documented for either socket. Flux reconnects on
+  any close (up to four tries), resending at most the last second of audio
+  (Deepgram accepts audio at up to 1.25x real time); the turn in progress is
+  lost. Aura reopens on the next sentence. An idle Aura socket stayed open for
+  5.5 minutes with WebSocket pings (`websockets` sends one every 20 s).
+- Aura accepts at most 20 `Flush` messages per minute. Replies are flushed per
+  segment of whole sentences, about two per reply; above the limit the server
+  waits for the window instead of being refused.
+- `api.in.deepgram.com` (India region) is the default `DEEPGRAM_HOST`. From the
+  VM, Aura's first byte took 71 ms there against 290 ms on `api.deepgram.com`,
+  and Flux's `EndOfTurn` arrived about 200 ms sooner.
+- Flux word timings are coarse (up to 0.5 s off the audio on test clips), so
+  the server's end of speech is the last loud packet within 1 s after the last
+  word's end.
 
-Also tried and dropped: FastConformer 480 ms (worse on accents), Kroko Zipformer
-(17-22% on clean synthetic speech), Parakeet unified 0.6B (too slow on this CPU),
-and Groq Whisper large-v3-turbo (8% on clean synthetic speech, but a network
-round trip per turn, a request quota, and no live partial text).
-
-- Svarah is AI4Bharat's Indian-English benchmark; EdAcc supplied conversational
-  Indian and Sri Lankan English. Phone audio = 8 kHz G.711 mu-law round trip.
-- Feeding 0.32 s of lead-in and 0.5 s of trailing silence lowered errors by about
-  a third (the turn detector's pre-roll provides most of the lead-in).
-- Cost: about 550 MB RAM and about 0.4 s of CPU per second of speech on an M2
-  (higher under memory pressure). Audio is only fed while the user is speaking.
-- Common words and commands are reliable ("cancel", times, Mysore, Bengaluru);
-  rare local names (Coorg, Madikeri, Indiranagar) are missed by every model
-  tried, Whisper included. sherpa-onnx has no hotword biasing for NeMo
-  transducers, so a name-correction step is the planned fix.
+Cost (pay as you go, 2026-10-15): Flux $0.0065 per streamed minute, Aura-2
+$0.030 per 1,000 characters. Measured: replies averaged 155 characters (8.8 s of
+speech, 17.5 characters per second). A 10-minute call streams 10 minutes to
+Flux ($0.065) and, if the assistant speaks 40-70% of it, 4,200-7,400 characters
+to Aura ($0.13-0.22): about **$0.19-0.29 per 10-minute call**. The scripted runs
+had the assistant speaking about 70% of the time. Groq stays on the free tier.
 
 ### Tool calling
 
@@ -187,8 +206,8 @@ Next: Temporal workflows.
 
 ## Run locally
 
-Create `.env` from `.env.example` and set `GROQ_API_KEY`. Never commit keys.
-Download the local models once (~1 GB) with `scripts/download-models.sh`.
+Create `.env` from `.env.example` and set `GROQ_API_KEY` and `DEEPGRAM_API_KEY`.
+Never commit keys.
 
 ```sh
 python3 -m venv .venv
