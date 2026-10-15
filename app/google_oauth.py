@@ -3,7 +3,7 @@
 One-time consent, behind Cloudflare Access on the VALR host:
 
 1. The owner opens `/oauth/google/start` (valr.haciensus.com). The app checks the
-   Access JWT (and, with VALR_OWNER_EMAILS set, that it is the owner) and redirects to
+   Access JWT (and, with VALR_ADMIN_EMAILS set, that it is one of them) and redirects to
    Google's consent screen for `gmail.readonly` and `calendar.readonly` only, offline access, with a signed,
    expiring `state`.
 2. Google redirects to `/oauth/google/callback` (GOOGLE_OAUTH_REDIRECT_URI). The code

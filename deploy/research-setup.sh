@@ -16,6 +16,7 @@ $DOCKER build --target worker -t "$IMAGE" .
 $DOCKER rm -f voice-research >/dev/null 2>&1 || true
 # The research worker's RAM is capped so a runaway job cannot starve the live calls.
 $DOCKER run -d --name voice-research --restart unless-stopped --network voice-agent-lab \
-  --env-file .env --env-file .env.research --memory 768m --no-healthcheck "$IMAGE"
+  --env-file .env --env-file .env.research --memory 768m --no-healthcheck \
+  $( [ -d /srv/valr-data ] && echo "-v /srv/valr-data:/data:ro" ) "$IMAGE"
 sleep 5
 $DOCKER logs voice-research 2>&1 | tail -3

@@ -22,7 +22,7 @@ from fastapi import APIRouter, HTTPException, Request
 import httpx
 from fastapi.responses import HTMLResponse, RedirectResponse
 
-from app import access, google_oauth, research, research_jobs
+from app import access, google_oauth, interview_store, research, research_jobs
 
 logger = logging.getLogger("uvicorn.error")
 router = APIRouter()
@@ -70,12 +70,12 @@ async def viewer(request: Request) -> str:
 
 
 def owner_emails() -> set[str]:
-    return {email.strip().lower() for email in os.getenv("VALR_OWNER_EMAILS", "").split(",")
+    return {email.strip().lower() for email in os.getenv("VALR_ADMIN_EMAILS", "").split(",")
             if email.strip()}
 
 
 async def owner(request: Request) -> str:
-    """The verified Access email, and (with VALR_OWNER_EMAILS set) the owner's; else 403."""
+    """The verified Access email, and (with VALR_ADMIN_EMAILS set) one of them; else 403."""
     email = await viewer(request)
     allowed = owner_emails()
     if allowed and email.lower() not in allowed:
@@ -164,7 +164,7 @@ def page(view: dict[str, Any], email: str) -> str:
 <meta name="robots" content="noindex"><style>{STYLE}</style></head><body><main>
 <h1>VALR: Voice Agent Lab Research</h1>
 <div class="muted">Read-only. {now:%Y-%m-%d %H:%M} UTC · signed in as {e(email)} · callers are shown as anonymous hashes</div>
-{tiles}<h2 style="font-size:17px">Recent jobs</h2>{body}</main></body></html>"""
+{tiles}{blocks_section(view.get("blocks") or [])}<h2 style="font-size:17px">Recent jobs</h2>{body}</main></body></html>"""
 
 
 NO_CACHE = {"Cache-Control": "no-store", "X-Frame-Options": "DENY", "Referrer-Policy": "no-referrer"}
@@ -185,6 +185,28 @@ def gmail_tile(state: dict[str, Any]) -> str:
     return (f'<div class="tile"><span class="muted">Gmail (R1)</span><b>{e(label)}</b>'
             f'<span class="muted">{detail} {connect if label != "connected" or state.get("expires_soon") else ""}'
             '</span></div>')
+
+
+async def upcoming_blocks() -> list[dict[str, Any]]:
+    from datetime import timedelta
+    now = datetime.now(timezone.utc)
+    try:
+        async with research.pool.connection() as connection:  # type: ignore[union-attr]
+            await interview_store.setup(connection)
+            return await interview_store.blocks_between(connection, now - timedelta(hours=12),
+                                                        now + timedelta(days=8))
+    except Exception as error:  # noqa: BLE001
+        logger.warning("VALR blocks unavailable: %s", type(error).__name__)
+        return []
+
+
+def blocks_section(blocks: list[dict[str, Any]]) -> str:
+    if not blocks:
+        return ""
+    rows = "".join(f"<li>{block['start_utc']:%a %d %b %H:%M} UTC: {e(block['label'])} "
+                   f"<span class=\"muted\">({len(block['slot_keys'])} interview(s), {e(block['state'])})</span></li>"
+                   for block in blocks)
+    return f'<h2 style="font-size:17px">Interview briefings</h2><ul>{rows}</ul>'
 
 
 async def gmail_state() -> dict[str, Any]:
@@ -249,6 +271,7 @@ async def dashboard(request: Request) -> HTMLResponse:
     async with research.pool.connection() as connection:
         view = await research_jobs.overview(connection, research_jobs.Limits.from_env())
     view["gmail"] = await gmail_state()
+    view["blocks"] = await upcoming_blocks()
     return HTMLResponse(page(view, email), headers={"Cache-Control": "no-store",
                                                     "X-Frame-Options": "DENY",
                                                     "Referrer-Policy": "no-referrer"})
