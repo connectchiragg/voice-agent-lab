@@ -73,9 +73,9 @@ async def open_socket(url: str, headers: dict[str, str]) -> Socket:
 @dataclass(frozen=True)
 class DeepgramSettings:
     api_key: str
-    # api.in.deepgram.com is Deepgram's India region: from Mumbai its Aura first
-    # byte is ~4x sooner than api.deepgram.com (see README).
-    host: str = "api.deepgram.com"
+    # Deepgram's India region. From the Mumbai VM (2026-10-15): Aura first byte
+    # 71 ms vs 290 ms and Flux EndOfTurn ~200 ms sooner than api.deepgram.com.
+    host: str = "api.in.deepgram.com"
     voice: str = "aura-2-thalia-en"
     eot_threshold: float = 0.7
     eager_eot_threshold: float | None = 0.4  # None: no EagerEndOfTurn, no speculation.
