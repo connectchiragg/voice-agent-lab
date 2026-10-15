@@ -1,0 +1,28 @@
+ASHA RAO
+ Pune, India  ·  asha.rao@example.com  ·  +91 98765 43210
+ LinkedIn: linkedin.com/in/asharao  ·  GitHub: github.com/asharao
+WORK EXPERIENCE
+ Acme Voice
+ Pune, India
+Founding Engineer, Voice AI
+ Mar 2023 - Present
+•  Scaled Voice AI from pilot to 40+ live clients and 200K+ monthly calls.
+ •  Built an agentic workflow platform; led knowledge transfer across the
+ team.
+Beta Data
+ Mumbai, India
+Backend Engineer
+ Jan 2021 - Feb 2023
+•  Architected a multi-tenant analytics platform for 50 GB+ datasets, cutting
+ refresh time by 80%.
+OPEN SOURCE & COMMUNITY
+ •  Created and open-sourced Widget, a Rust CLI for observability.
+SKILLS
+ AI & Agentic Systems: Voice AI, RAG, LangGraph
+Languages: Python, Go,
+ SQL
+EDUCATION
+ NIT Trichy
+ Tiruchirappalli, India
+B.Tech
+ July 2016 - July 2020

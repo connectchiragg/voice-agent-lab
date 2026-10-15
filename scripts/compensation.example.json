@@ -1,0 +1,6 @@
+{
+  "current": {"fixed_lpa": 0, "variable_lpa": 0, "esop_units_per_year": 0, "company_type": "private"},
+  "target_lpa": {"min": 0, "max": 0},
+  "startup_floor_lpa": {"min": 0, "max": 0},
+  "note": "Copy to data/compensation.json (gitignored) and fill in. Floor applies only to cash-constrained startups."
+}

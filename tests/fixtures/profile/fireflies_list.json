@@ -1,0 +1,8 @@
+{"data": {"transcripts": [
+  {"id": "ff1", "title": "Recruiter screen with Beta Corp", "date": 1757930400000, "duration": 30.5,
+   "speakers": [{"name": "Chirag"}, {"name": "Rahul Recruiter"}],
+   "meeting_attendees": [{"displayName": "Rahul Recruiter", "name": null}, {"displayName": null, "name": "rahul@beta.example"}],
+   "summary": {"overview": "Recruiter screen covering background and notice period.", "short_summary": "Screen", "keywords": ["screen"]}},
+  {"id": "ff2", "title": "Daily standup", "date": 1757934000000, "duration": 15,
+   "speakers": [{"name": "Chirag"}], "meeting_attendees": [], "summary": {"overview": null, "short_summary": null, "keywords": []}}
+]}}
