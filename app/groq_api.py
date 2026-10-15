@@ -3,6 +3,8 @@
 import asyncio
 import logging
 import os
+import time
+from collections import deque
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -55,6 +57,47 @@ async def groq_client() -> AsyncIterator[AsyncGroq]:
     else:
         async with create_client() as client:
             yield client
+
+
+# Free-tier limits for the LLM, tracked locally so optional extra calls (speculative
+# replies) can back off before Groq refuses a call the user is waiting for. Other
+# processes sharing the key are not counted.
+REQUESTS_PER_MINUTE = 30
+INPUT_TOKENS_PER_MINUTE = 7000
+NEAR_LIMIT = 0.7  # Above this share of either limit, skip optional calls.
+recent_requests: deque[tuple[float, int]] = deque()  # (monotonic time, estimated input tokens)
+input_tokens_estimate = 500  # Updated from reported usage; cancelled streams never report it.
+last_rate_limited: float | None = None
+
+
+def note_request() -> int:
+    """Count one LLM request; returns requests in the last minute."""
+    now = time.monotonic()
+    recent_requests.append((now, input_tokens_estimate))
+    while recent_requests and recent_requests[0][0] < now - 60:
+        recent_requests.popleft()
+    return len(recent_requests)
+
+
+def note_usage(input_tokens: int) -> None:
+    global input_tokens_estimate
+    input_tokens_estimate = input_tokens
+
+
+def note_rate_limited() -> None:
+    global last_rate_limited
+    last_rate_limited = time.monotonic()
+
+
+def near_rate_limit() -> bool:
+    """True after a 429 in the last minute, or near either per-minute limit."""
+    now = time.monotonic()
+    if last_rate_limited is not None and now - last_rate_limited < 60:
+        return True
+    minute = [tokens for at, tokens in recent_requests if at >= now - 60]
+    # Count the optional call itself: it would spend a request and its input tokens.
+    return (len(minute) + 1 > NEAR_LIMIT * REQUESTS_PER_MINUTE
+            or sum(minute) + input_tokens_estimate > NEAR_LIMIT * INPUT_TOKENS_PER_MINUTE)
 
 
 def rate_limit_wait_s(error: RateLimitError) -> float | None:

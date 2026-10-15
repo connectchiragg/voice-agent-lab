@@ -60,3 +60,34 @@ def test_provider_timeout_is_retried_once_then_safe() -> None:
     assert error.value.status_code == 504
     assert "private" not in str(error.value)
     assert attempts == 2
+
+
+@pytest.fixture
+def fresh_limits(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(groq_api, "recent_requests", groq_api.deque())
+    monkeypatch.setattr(groq_api, "last_rate_limited", None)
+    monkeypatch.setattr(groq_api, "input_tokens_estimate", 500)
+
+
+def test_rate_limit_guard_after_a_429(fresh_limits: None) -> None:
+    def provider(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(429, json={"error": "slow down"})
+
+    assert not groq_api.near_rate_limit()
+    with pytest.raises(groq_api.ProviderError):
+        complete(fake_client(provider))
+    assert groq_api.near_rate_limit()  # For the next 60 s, optional calls are skipped.
+
+
+def test_rate_limit_guard_near_request_or_token_limits(fresh_limits: None) -> None:
+    for _ in range(int(groq_api.NEAR_LIMIT * groq_api.REQUESTS_PER_MINUTE) - 1):
+        groq_api.recent_requests.append((groq_api.time.monotonic(), 10))
+    assert not groq_api.near_rate_limit()
+    groq_api.note_request()
+    assert groq_api.near_rate_limit()  # Requests per minute.
+    groq_api.recent_requests.clear()
+    groq_api.note_usage(2000)
+    groq_api.note_request()
+    assert not groq_api.near_rate_limit()
+    groq_api.note_request()
+    assert groq_api.near_rate_limit()  # 3 x 2000 input tokens would pass 70% of 7000.

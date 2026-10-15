@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 
 from groq import APIConnectionError, APIError, APITimeoutError, AsyncGroq, RateLimitError
 
+from app import groq_api
 from app.groq_api import ProviderError, groq_client, provider_error, rate_limit_wait_s
 
 logger = logging.getLogger("uvicorn.error")
@@ -96,6 +97,7 @@ async def model_events(stream: AsyncIterator[Any]) -> AsyncIterator[ModelEvent]:
             # queue_time is time spent waiting inside Groq before generation began.
             logger.info("Groq LLM usage: %d input tokens, %d output, queue %.0f ms",
                         usage.prompt_tokens, usage.completion_tokens, (usage.queue_time or 0) * 1000)
+            groq_api.note_usage(usage.prompt_tokens)
         if not chunk.choices:
             continue
         delta = chunk.choices[0].delta
@@ -118,6 +120,7 @@ async def open_reply(client: AsyncGroq, messages: list[dict[str, Any]],
     options: dict[str, Any] = {"tools": tools} if tools else {}
     if tools and tool_choice:
         options["tool_choice"] = tool_choice
+    logger.info("Groq LLM request (%d in the last minute)", groq_api.note_request())
     stream = await client.with_options(timeout=10).chat.completions.create(
         model=os.getenv("GROQ_LLM_MODEL", "openai/gpt-oss-120b"),
         messages=messages,  # type: ignore[arg-type]
@@ -161,6 +164,7 @@ async def stream_model(messages: list[dict[str, Any]], tools: list[dict[str, Any
                         raise
                     continue
                 except RateLimitError as error:
+                    groq_api.note_rate_limited()
                     wait = rate_limit_wait_s(error)
                     if attempt == 2 or wait is None:
                         raise
