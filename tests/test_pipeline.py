@@ -715,3 +715,79 @@ def test_okay_is_a_normal_answer_when_the_assistant_is_silent():
         return sent
     events = events_of(asyncio.run(scenario()))
     assert seen["replies"] == ["Okay."] and {"type": "transcript", "text": "Okay."} in events
+
+
+def test_a_yes_over_our_speech_answers_a_pending_proposal_once_the_reply_ends():
+    engines, seen = make_engines(reply=("I'll research them now. ", "Okay? "))
+    engines.awaiting_answer = lambda conversation_id: True  # A proposal waits for a yes.
+
+    async def scenario():
+        sent = []
+        call, flux = await speaking_call(engines, sent)
+        first = call.reply_task
+        await flux.emit("StartOfTurn", "")
+        await flux.emit("Update", "Okay. Okay.")
+        await asyncio.sleep(0.1)
+        await flux.emit("EndOfTurn", "Okay. Okay.")
+        assert not first.done()  # Not a barge-in: the proposal is still being said.
+        assert seen["replies"] == ["what's up"]
+        call.speaker.hold.set()
+        call.set_playing(False)
+        await first
+        await wait_until(lambda: call.reply_task is not first)
+        await call.reply_task
+        await call.close()
+        return sent
+    events = events_of(asyncio.run(scenario()))
+    assert {"type": "interrupt"} not in events
+    assert seen["replies"] == ["what's up", "Okay. Okay."]  # Answered after the reply.
+
+
+def test_a_backchannel_without_a_pending_proposal_is_still_ignored():
+    engines, seen = make_engines(reply=("I can hear you. ", "Go on. "))
+    engines.awaiting_answer = lambda conversation_id: False
+
+    async def scenario():
+        sent = []
+        call, flux = await speaking_call(engines, sent)
+        await flux.emit("StartOfTurn", "")
+        await flux.emit("Update", "Okay.")
+        await asyncio.sleep(0.1)
+        await flux.emit("EndOfTurn", "Okay.")
+        call.speaker.hold.set()
+        call.set_playing(False)
+        await finish(call)
+        return sent
+    asyncio.run(scenario())
+    assert seen["replies"] == ["what's up"]
+
+
+def test_an_llm_failure_before_any_words_says_one_sec_and_retries():
+    engines, _ = make_engines()
+    attempts = []
+
+    async def flaky(conversation_id, text):
+        attempts.append(text)
+        if len(attempts) == 1:
+            raise RuntimeError("rate limited")
+            yield ""  # pragma: no cover - makes this an async generator
+        yield "Because each interview gets four researchers. "
+
+    engines.reply = flaky
+    events = events_of(run_turn(engines, "How did you come up with five?"))
+    captions = [e["text"] for e in events if e["type"] == "caption"]
+    assert attempts == ["How did you come up with five?"] * 2
+    assert captions[0].startswith("One sec.") and "four researchers" in " ".join(captions)
+    assert not any(e["type"] == "notice" for e in events)
+
+
+def test_a_failed_retry_asks_again_instead_of_going_silent():
+    engines, _ = make_engines()
+
+    async def broken(conversation_id, text):
+        raise RuntimeError("down")
+        yield ""  # pragma: no cover
+
+    engines.reply = broken
+    events = events_of(run_turn(engines))
+    assert "Could you say it again?" in " ".join(e["text"] for e in events if e["type"] == "caption")

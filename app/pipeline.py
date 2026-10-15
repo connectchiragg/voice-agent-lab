@@ -42,6 +42,10 @@ SENTENCE_END = re.compile(r"[.!?][\"'”’)\]]*\s+|\n+")
 CLAUSE_END = re.compile(r"[,;:—–]\s+")
 
 
+RETRY_FILLER = "One sec."
+RETRY_SORRY = "Sorry, I didn't catch that. Could you say it again?"
+
+
 class ReplyText:
     """Streamed LLM text, handed to TTS in segments of whole sentences.
 
@@ -56,12 +60,14 @@ class ReplyText:
 
     def __init__(self, max_words: int = 40) -> None:
         self.text = ""
+        self.total = 0  # Characters pushed so far (taken or not).
         self.done = False
         self.max_words = max_words
         self.changed = asyncio.Event()
 
     def push(self, delta: str) -> None:
         self.text += delta
+        self.total += len(delta)
         self.changed.set()
 
     def finish(self) -> None:
@@ -197,6 +203,10 @@ class Engines:
                               Awaitable[None]] = forget_greeting
     # Ignore backchannel words while the assistant speaks; None: any turn barges in.
     backchannel: Backchannel | None = None
+    # (conversation_id) -> whether a proposal awaits the caller's yes (a callback, research
+    # or briefing). Then a backchannel said over our speech ("okay", "yes") is not dropped:
+    # it is answered as the caller's next turn once the reply ends.
+    awaiting_answer: Callable[[str], bool] = lambda conversation_id: False
 
 
 def heard_text(spoken: list[tuple[str, float]], played_s: float) -> str:
@@ -393,6 +403,9 @@ class Call:
         self.holding = False
         self.held_text = ""
         self.hold_timer: asyncio.Task[None] | None = None
+        # A backchannel that answers a pending proposal, said over our speech: answered as
+        # the next turn once the current reply (or greeting) has ended.
+        self.deferred: TurnEvent | None = None
 
     async def start(self) -> None:
         """Open the Deepgram sockets, and load the caller's memory meanwhile.
@@ -424,6 +437,7 @@ class Call:
         self.history_task = asyncio.create_task(
             self.engines.record_greeting(self.conversation_id, text, "completed"))
         await self.send({"type": "reply_end"})
+        self.answer_deferred()
 
     async def record_heard_greeting(self, spoken: list[tuple[str, float]]) -> None:
         assert self.played is not None
@@ -537,9 +551,14 @@ class Call:
             backchannel = self.engines.backchannel
             if not event.transcript.strip() or (backchannel and backchannel.only(event.transcript)):
                 self.stop_holding()
-                logger.info("Ignored a backchannel while the assistant was speaking")
                 if speculation is not None:
                     speculation.cancel("the turn was a backchannel")
+                if event.transcript.strip() and self.engines.awaiting_answer(self.conversation_id):
+                    logger.info("A backchannel over our speech answers a pending proposal; "
+                                "it is answered once the reply ends")
+                    self.deferred = event
+                    return
+                logger.info("Ignored a backchannel while the assistant was speaking")
                 return
             await self.barge_in_now("the user's words while the assistant was speaking")
         if self.overlapped:
@@ -548,6 +567,7 @@ class Call:
             if speculation is not None:
                 speculation.cancel("the turn was not answered")
             return
+        self.deferred = None  # A newer turn supersedes a held backchannel.
         if self.reply_task is not None and not self.reply_task.done():
             await self.interrupt()  # Defensive: never two replies at once.
         self.reply_task = asyncio.create_task(self.respond(event, speculation, speculations))
@@ -557,6 +577,7 @@ class Call:
 
         Cancelling the reply closes its TTS stream, which sends Aura a Clear.
         """
+        self.deferred = None  # Barged in: whatever was held over the old reply is moot.
         if self.reply_task is not None and not self.reply_task.done():
             self.reply_task.cancel()
             await asyncio.gather(self.reply_task, return_exceptions=True)
@@ -619,9 +640,20 @@ class Call:
                 await self.think(deltas or self.engines.reply(self.conversation_id, text),
                                  reply_text, metrics, speculation if deltas else None)
             except Exception as error:
-                # Text already written is still spoken; nothing new is generated.
                 logger.warning("Reply generation failed: %s", type(error).__name__)
-                await self.send({"type": "notice", "text": "Sorry, I lost my train of thought."})
+                if reply_text.total:
+                    # Text already written is still spoken; nothing new is generated.
+                    await self.send({"type": "notice", "text": "Sorry, I lost my train of thought."})
+                else:
+                    # Nothing said yet: a short filler, then the same turn once more (the
+                    # agent continues it rather than storing the words twice).
+                    reply_text.push(RETRY_FILLER + " ")
+                    try:
+                        await self.think(self.engines.reply(self.conversation_id, text),
+                                         reply_text, metrics)
+                    except Exception as again:
+                        logger.warning("Reply retry failed: %s", type(again).__name__)
+                        reply_text.push(RETRY_SORRY)
             reply_text.finish()
             await speaker
         finally:
@@ -630,6 +662,15 @@ class Call:
                 await asyncio.gather(speaker, return_exceptions=True)
         self.user_text = None
         await self.send({"type": "reply_end"})
+        self.answer_deferred()
+
+    def answer_deferred(self) -> None:
+        """Once a reply has ended: answer a held yes to a pending proposal (see turn_ended)."""
+        event, self.deferred = self.deferred, None
+        if event is None:
+            return
+        logger.info("Answering the backchannel held during the reply")
+        self.reply_task = asyncio.create_task(self.respond(event))
 
     def reuse(self, speculation: Speculation | None, text: str,
               metrics: TurnMetrics) -> AsyncIterator[ReplyEvent] | None:

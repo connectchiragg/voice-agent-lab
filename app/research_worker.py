@@ -286,7 +286,7 @@ async def main() -> None:
                                CalendarSyncWorkflow],
                     workflow_runner=workflow_runner(), activities=ACTIVITIES + interviews.all(),
                     activity_executor=ThreadPoolExecutor(6), max_concurrent_activities=6)
-    logger.info("VALR research worker on %s, namespace %s, task queue %s; limits %s; interview "
+    logger.info("VALR research worker on %s, namespace %s, task queue %s; topic research limits %s; interview "
                 "limits %s", address, namespace, TASK_QUEUE, asdict(research_jobs.Limits.from_env()),
                 asdict(research_jobs.Limits.interview_from_env()))
     if os.getenv("VALR_BRIEFINGS", "1") == "1" and (os.getenv("VALR_CALENDAR_ICS_URL")

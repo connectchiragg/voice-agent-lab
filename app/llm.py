@@ -23,6 +23,7 @@ SYSTEM_PROMPT = (
     "usually in one or two short sentences. Never use Markdown, lists, emoji, symbols or URLs: "
     "everything you write is spoken aloud, so write units and numbers as words, for example "
     "twenty-eight degrees. Ask a brief follow-up question when it helps. "
+    "Always answer the user's latest message; never repeat your previous reply instead. "
     "Use your tools for weather, and for the time in other places, instead of guessing: "
     "call the tool in this same response, and never say you will check something without "
     "calling the tool. Never work out another place's time from time differences yourself, "

@@ -458,6 +458,9 @@ def greeting(conversation_id: str) -> str:
     """
     call = calls.get(conversation_id)
     if call is None:
+        from app import interviews  # Imports this module; loaded late to avoid a cycle.
+        if interviews.is_owner_call(conversation_id):
+            return interviews.owner_greeting(conversation_id)
         return memory.greeting(conversation_id)
     if call.research_job.startswith("block:"):
         from app import interviews  # Imports this module; loaded late to avoid a cycle.

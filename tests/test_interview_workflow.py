@@ -266,3 +266,32 @@ def test_on_demand_waits_for_the_call_to_end_then_calls_back():
         status = await drive(env, handle, fakes)
         assert status.state == "briefed" and len(fakes.dials) == 1
     run(test, answer_on=1)
+
+
+def test_on_demand_calls_by_the_promise_even_if_research_is_not_ready():
+    async def test(env, fakes):
+        now = await env.get_current_time()
+        request = BlockInput("briefing-od", now.isoformat(), ["ev1", "ev2"], OWNER,
+                             OWNER.removeprefix("tel:"), "today's interviews", on_demand=True,
+                             call_by_utc=(now + timedelta(minutes=5)).isoformat(), ready_keys=["ev1"])
+        handle = await env.client.start_workflow(BlockCallWorkflow.run, request, id="briefing-od",
+                                                 task_queue=TASK_QUEUE)
+        await handle.signal(BlockCallWorkflow.call_ended_signal)
+        status = await drive(env, handle, fakes)
+        assert status.state == "briefed"
+        dialled_at = fakes.dials[0][0]
+        assert now + timedelta(minutes=3, seconds=50) <= dialled_at <= now + timedelta(minutes=4, seconds=5)
+    run(test, answer_on=1, ready=False)
+
+
+def test_research_within_limits_the_researchers_for_the_promise():
+    from app.interview_workflow import ResearchNow
+
+    async def test(env, fakes):
+        now = await env.get_current_time()
+        handle = await start_slot(env, now + timedelta(hours=5))
+        await handle.signal(InterviewSlotWorkflow.research_within, ResearchNow(165))
+        await until(lambda: fakes.synths, env, step=timedelta(seconds=10))
+        assert {p.seconds for p in fakes.parts} == {165}
+        assert fakes.plans[0][0] < now + timedelta(minutes=2)  # At once, not at T-60.
+    run(test)
