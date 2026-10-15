@@ -20,6 +20,7 @@ import os
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import psycopg
@@ -170,31 +171,142 @@ async def test_job(topic: str) -> None:
         print(" -", note["fact"], note["source_ids"])
 
 
+SWEEP_SCHEDULE = "valr-calendar-sweep"
+SYNC_WORKFLOW = "valr-calendar-sync"
+
+
+async def ensure_sweep(client: Client) -> None:
+    """The 6-hourly safety sweep of the calendar (also renews the push channel)."""
+    from temporalio.client import (Schedule, ScheduleActionStartWorkflow, ScheduleAlreadyRunningError,
+                                   ScheduleIntervalSpec, ScheduleOverlapPolicy, SchedulePolicy,
+                                   ScheduleSpec)
+    from app.interview_workflow import CalendarSyncWorkflow, SyncInput
+    hours = float(os.getenv("VALR_CALENDAR_SWEEP_HOURS", "6"))
+    schedule = Schedule(
+        action=ScheduleActionStartWorkflow(CalendarSyncWorkflow.run, SyncInput("sweep"),
+                                           id="valr-calendar-sweep-run", task_queue=TASK_QUEUE),
+        spec=ScheduleSpec(intervals=[ScheduleIntervalSpec(every=timedelta(hours=hours))]),
+        policy=SchedulePolicy(overlap=ScheduleOverlapPolicy.SKIP))
+    try:
+        await client.create_schedule(SWEEP_SCHEDULE, schedule, trigger_immediately=True)
+        logger.info("VALR calendar sweep scheduled every %g h", hours)
+    except ScheduleAlreadyRunningError:
+        pass
+
+
+async def start_sync(client: Client, reason: str, full: bool = False):
+    """Sync now (signal-with-start: a sync already running makes one more pass)."""
+    from temporalio.common import WorkflowIDConflictPolicy
+    from app.interview_workflow import CalendarSyncWorkflow, SyncInput
+    return await client.start_workflow(
+        CalendarSyncWorkflow.run, SyncInput(reason, full), id=SYNC_WORKFLOW, task_queue=TASK_QUEUE,
+        start_signal="poke", id_conflict_policy=WorkflowIDConflictPolicy.USE_EXISTING)
+
+
+async def temporal_client() -> Client:
+    return await Client.connect(os.getenv("TEMPORAL_ADDRESS", "localhost:7233"),
+                                namespace=os.getenv("TEMPORAL_NAMESPACE", "default"))
+
+
+async def show_blocks(start_workflows: bool) -> None:
+    """`sync`: run a sync and list the upcoming blocks and their workflows.
+    `blocks`: a dry run: parse the calendar and list blocks, starting nothing.
+    Titles and times only: no attendee emails, names or descriptions."""
+    from zoneinfo import ZoneInfo
+    from app import calendar_sync, interview_worker
+    from app.interview_types import group_blocks
+    from app.interview_workflow import BlockCallWorkflow, InterviewSlotWorkflow
+    from app.interview_types import slot_workflow_id
+    zone = ZoneInfo(os.getenv("ASSISTANT_TIMEZONE", "Asia/Kolkata"))
+    now = datetime.now(timezone.utc)
+    client = await temporal_client() if start_workflows else None
+    if client is not None:
+        summary = await (await start_sync(client, "manual")).result()
+        print(f"sync: source {summary.source}; changes {summary.changes}; slots started "
+              f"{summary.slots_started}; blocks started {summary.blocks_started}, cancelled "
+              f"{summary.blocks_cancelled}; channel {summary.channel or '-'}"
+              f"{'; error ' + summary.error if summary.error else ''}")
+        async with await connect() as connection:
+            events = await calendar_sync.upcoming(connection, now - timedelta(hours=1),
+                                                  now + interview_worker.HORIZON)
+    else:
+        import httpx
+        async with httpx.AsyncClient(timeout=20, follow_redirects=True) as http:
+            response = await http.get(os.environ["VALR_CALENDAR_ICS_URL"])
+            response.raise_for_status()
+        events = [e for e in calendar_sync.from_ics_text(response.text, interview_worker.owner_emails())
+                  if calendar_sync.in_window(e, now)]
+        print(f"dry run (ICS): {len(events)} events in the window; attendee roles "
+              f"{await interview_worker.guard_report(events)}")
+    by_key = {event.key: event for event in events}
+    for block in group_blocks(events):
+        start = datetime.fromisoformat(block.start_utc)
+        if start <= now:
+            continue
+        print(f"{block.block_id}  {start.astimezone(zone):%a %d %b %I:%M %p}  "
+              f"research {(start - timedelta(minutes=60)).astimezone(zone):%I:%M %p}, calls "
+              f"{', '.join(f'{(start - timedelta(minutes=m)).astimezone(zone):%I:%M}' for m in (15, 10, 5))}")
+        for key in block.slot_keys:
+            event = by_key[key]
+            line = f"    {datetime.fromisoformat(event.start_utc).astimezone(zone):%I:%M %p}  {event.title[:70]}"
+            if client is not None:
+                try:
+                    slot = await client.get_workflow_handle(slot_workflow_id(key)).query(
+                        InterviewSlotWorkflow.status_query)
+                    line += f"  [slot: {slot.state}]"
+                except Exception:  # noqa: BLE001
+                    line += "  [slot: none]"
+            print(line)
+        if client is not None:
+            try:
+                status = await client.get_workflow_handle(block.block_id).query(
+                    BlockCallWorkflow.status_query)
+                print(f"    call workflow: {status.state}")
+            except Exception:  # noqa: BLE001
+                print("    call workflow: none")
+
+
 async def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     for noisy in ("httpx", "crewai", "LiteLLM", "opentelemetry"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
     if not os.getenv("ANTHROPIC_API_KEY"):
         sys.exit("ANTHROPIC_API_KEY is not set: VALR research cannot run.")
+    from app.interview_worker import InterviewActivities
+    from app.interview_workflow import BlockCallWorkflow, CalendarSyncWorkflow, InterviewSlotWorkflow
     address = os.getenv("TEMPORAL_ADDRESS", "localhost:7233")
     namespace = os.getenv("TEMPORAL_NAMESPACE", "default")
     async with await connect() as connection:
         await research_jobs.setup(connection)
     client = await Client.connect(address, namespace=namespace)
-    # Three researchers of one job at a time, plus synthesis and saving.
-    worker = Worker(client, task_queue=TASK_QUEUE, workflows=[ResearchCallbackWorkflow],
-                    workflow_runner=workflow_runner(), activities=ACTIVITIES,
-                    activity_executor=ThreadPoolExecutor(4), max_concurrent_activities=4)
-    logger.info("VALR research worker on %s, namespace %s, task queue %s; limits %s",
-                address, namespace, TASK_QUEUE, asdict(research_jobs.Limits.from_env()))
+    interviews = InterviewActivities(client)
+    # Researchers of one job at a time, plus synthesis, saving and the calendar bookkeeping.
+    worker = Worker(client, task_queue=TASK_QUEUE,
+                    workflows=[ResearchCallbackWorkflow, InterviewSlotWorkflow, BlockCallWorkflow,
+                               CalendarSyncWorkflow],
+                    workflow_runner=workflow_runner(), activities=ACTIVITIES + interviews.all(),
+                    activity_executor=ThreadPoolExecutor(6), max_concurrent_activities=6)
+    logger.info("VALR research worker on %s, namespace %s, task queue %s; limits %s; interview "
+                "limits %s", address, namespace, TASK_QUEUE, asdict(research_jobs.Limits.from_env()),
+                asdict(research_jobs.Limits.interview_from_env()))
+    if os.getenv("VALR_BRIEFINGS", "1") == "1" and (os.getenv("VALR_CALENDAR_ICS_URL")
+                                                     or os.getenv("GOOGLE_OAUTH_CLIENT_ID")):
+        await ensure_sweep(client)
+    else:
+        logger.info("VALR interview briefings are off (VALR_BRIEFINGS=0 or no calendar source)")
     await worker.run()
 
+
+USAGE = 'usage: python -m app.research_worker [test "<topic>" | sync | blocks]'
 
 if __name__ == "__main__":
     if sys.argv[1:2] == ["test"] and len(sys.argv) == 3:
         logging.basicConfig(level=logging.WARNING)
         asyncio.run(test_job(sys.argv[2]))
+    elif sys.argv[1:] in (["sync"], ["blocks"]):
+        logging.basicConfig(level=logging.WARNING)
+        asyncio.run(show_blocks(sys.argv[1] == "sync"))
     elif len(sys.argv) > 1:
-        sys.exit('usage: python -m app.research_worker [test "<topic>"]')
+        sys.exit(USAGE)
     else:
         asyncio.run(main())

@@ -15,8 +15,8 @@ from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from app import (access, agent, callbacks, groq_api, memory, recordings, research, telnyx,
-                 valr_dashboard, webrtc)
+from app import (access, agent, callbacks, groq_api, interviews, memory, recordings, research,
+                 telnyx, valr_dashboard, valr_hooks, webrtc)
 from app.deepgram import AuraSpeaker, DeepgramSettings, FluxListener
 from app.pipeline import DEFAULT_BACKCHANNEL, Backchannel, Call, Engines, ReplyEvent, ReplyModel
 from app.transport import SpeechUnavailable, apply_player_event, open_call
@@ -62,7 +62,8 @@ def load_engines(sample_rate: int | None = None) -> Engines | None:
                    begin_call=memory.begin_call,
                    end_call=lambda conversation_id: (memory.end_call(conversation_id,
                                                                      agent.load_history),
-                                                     research.call_ended(conversation_id)),
+                                                     research.call_ended(conversation_id),
+                                                     interviews.call_ended(conversation_id)),
                    greeting=callbacks.greeting, record_greeting=agent.record_greeting,
                    backchannel=backchannel_from_env())
 
@@ -116,6 +117,7 @@ app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
 app.include_router(webrtc.router)
 app.include_router(telnyx.router)
 app.include_router(valr_dashboard.router)
+app.include_router(valr_hooks.router)
 
 
 class CallSettings(BaseModel):

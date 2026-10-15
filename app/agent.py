@@ -20,9 +20,9 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from psycopg.conninfo import make_conninfo
 
-from app import callbacks, memory
+from app import callbacks, interviews, memory
 from app.llm import ModelUsed, ToolCallRequest, stream_model, to_chat_messages
-from app.tools import SCHEMAS, has_side_effects, run_tool
+from app.tools import has_side_effects, run_tool, schemas_for
 
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 logger = logging.getLogger("uvicorn.error")
@@ -97,11 +97,13 @@ def tool_rounds(messages: list[Message]) -> int:
 
 
 async def generate(messages: list[Message], allow_tools: bool, tool_choice: str | None = None,
-                   caller_memory: str = "",
+                   caller_memory: str = "", caller_key: str | None = None,
+                   max_tokens: int | None = None,
                    ) -> AsyncIterator[str | list[ToolCallRequest] | ModelUsed]:
+    options = {"max_tokens": max_tokens} if max_tokens else {}
     async with aclosing(stream_model(to_chat_messages(messages, caller_memory),
-                                     SCHEMAS if allow_tools else None,
-                                     tool_choice=tool_choice)) as stream:
+                                     schemas_for(caller_key) if allow_tools else None,
+                                     tool_choice=tool_choice, **options)) as stream:
         async for event in stream:
             yield event
 
@@ -119,12 +121,15 @@ async def agent(state: Conversation, config: RunnableConfig) -> Conversation:
     allow_tools = tool_rounds(messages) < MAX_TOOL_ROUNDS  # Then the model must answer.
     # Looked up per step, so a forget_me earlier in the turn already removes it.
     thread_id = config["configurable"]["thread_id"]
-    caller_memory = "\n\n".join(note for note in (callbacks.prompt_note(thread_id),
+    caller_memory = "\n\n".join(note for note in (interviews.prompt_note(thread_id),
+                                                   callbacks.prompt_note(thread_id),
                                                    memory.prompt_block(thread_id)) if note)
+    caller_key = memory.caller_of(thread_id)
     text, calls = "", []
     try:
         for tool_choice in (None, "required"):
-            async for event in generate(messages, allow_tools, tool_choice, caller_memory):
+            async for event in generate(messages, allow_tools, tool_choice, caller_memory,
+                                        caller_key, interviews.reply_max_tokens(thread_id)):
                 if isinstance(event, ModelUsed):
                     writer({"type": "model", "model": event.name})
                 elif isinstance(event, str):

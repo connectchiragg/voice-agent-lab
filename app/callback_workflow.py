@@ -160,6 +160,16 @@ class CallResult:
 class DialSlotRequest:
     day: str  # UTC date, YYYY-MM-DD.
     attempt_id: str  # Repeats (activity retries) are counted once.
+    # Which daily budget: "callback" (callbacks and research callbacks, MAX_DIALS_PER_DAY)
+    # or "briefing" (interview briefings, their own cap so callbacks cannot starve them).
+    budget: str = "callback"
+    limit: int = MAX_DIALS_PER_DAY
+
+
+@dataclass
+class ReserveRequest:
+    attempt_id: str
+    limit: int
 
 
 def validate_due(due: datetime, now: datetime, zone: str, quiet_hours: str = "") -> None:
@@ -322,6 +332,16 @@ class DialBudgetWorkflow:
         if len(self.granted) >= MAX_DIALS_PER_DAY:
             return False
         self.granted.append(attempt_id)
+        return True
+
+    @workflow.update
+    def reserve_within(self, request: ReserveRequest) -> bool:
+        """For budgets with their own cap (interview briefings)."""
+        if request.attempt_id in self.granted:
+            return True
+        if len(self.granted) >= request.limit:
+            return False
+        self.granted.append(request.attempt_id)
         return True
 
     @workflow.query

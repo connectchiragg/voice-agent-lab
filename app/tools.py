@@ -16,7 +16,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import httpx
 from temporalio.service import RPCError
 
-from app import callbacks, memory, research
+from app import callbacks, interviews, memory, research
 
 logger = logging.getLogger("uvicorn.error")
 TOOL_TIMEOUT_S = 5.0
@@ -56,6 +56,9 @@ class Tool:
     takes_turn: bool = False
     # True for tools about this call: `run` also gets `caller_key` and `conversation_id`.
     takes_call: bool = False
+    # True for the owner's interview tools: offered to the model and run only for the
+    # owner's own caller keys (app/interviews.py).
+    owner_only: bool = False
 
     def schema(self) -> dict[str, Any]:
         return {"type": "function", "function": {
@@ -201,8 +204,37 @@ TOOLS = {tool.name: tool for tool in (
                            "the caller said yes"}},
           "required": ["topic"]},
          research.start_research, side_effects=True, takes_call=True, takes_turn=True),
+    Tool("get_calendar",
+         "The owner's calendar for a day: times, titles, companies and people. For questions like "
+         "what's on my calendar tomorrow.",
+         {"type": "object", "properties": {"day": {
+             "type": "string", "description": "today, tomorrow, a weekday, or YYYY-MM-DD"}},
+          "required": ["day"]},
+         interviews.get_calendar, takes_call=True, owner_only=True),
+    Tool("research_interviews",
+         "Research the owner's interviews on a day (optionally only one company) after this call "
+         "and call him back with a briefing; or refresh research already done. Two steps: call it "
+         "without confirmed and say its 'say' text; only if his next reply is yes, call it again "
+         "with confirmed=true and say its 'say' text.",
+         {"type": "object", "properties": {
+             "day": {"type": "string", "description": "today, tomorrow, a weekday, or YYYY-MM-DD"},
+             "company": {"type": "string", "description": "Only this company's interview, if he "
+                         "names one"},
+             "refresh": {"type": "boolean", "description": "true if he asks to refresh or redo "
+                         "research that was already done"},
+             "confirmed": {"type": "boolean", "description": "true only on the second call, after "
+                           "he said yes"}},
+          "required": ["day"]},
+         interviews.research_interviews, side_effects=True, takes_call=True, takes_turn=True,
+         owner_only=True),
 )}
-SCHEMAS = [tool.schema() for tool in TOOLS.values()]
+SCHEMAS = [tool.schema() for tool in TOOLS.values() if not tool.owner_only]
+OWNER_SCHEMAS = [tool.schema() for tool in TOOLS.values()]
+
+
+def schemas_for(caller_key: str | None) -> list[dict[str, Any]]:
+    """The owner gets the interview tools too; everyone else never sees them."""
+    return OWNER_SCHEMAS if interviews.is_owner(caller_key) else SCHEMAS
 
 
 def has_side_effects(name: str) -> bool:
@@ -218,6 +250,8 @@ async def run_tool(name: str, arguments: str, caller_key: str | None = None,
     started = time.perf_counter()
     try:
         tool = TOOLS[name]
+        if tool.owner_only and not interviews.is_owner(caller_key):
+            raise KeyError(name)  # Not offered to this caller: as if it did not exist.
         args = json.loads(arguments or "{}")
         if not isinstance(args, dict):
             raise ValueError("arguments must be a JSON object")

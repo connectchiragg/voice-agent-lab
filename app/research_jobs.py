@@ -66,6 +66,8 @@ CREATE TABLE IF NOT EXISTS research_spend (
 );
 CREATE INDEX IF NOT EXISTS research_spend_by_time ON research_spend (at);
 CREATE INDEX IF NOT EXISTS research_spend_by_job ON research_spend (job_id);
+ALTER TABLE research_jobs ADD COLUMN IF NOT EXISTS kind text NOT NULL DEFAULT 'topic';
+ALTER TABLE research_jobs ADD COLUMN IF NOT EXISTS event_key text;
 """
 LOCK_KEY = 7_202_610_16  # pg_advisory_xact_lock key serializing bookings.
 
@@ -135,6 +137,15 @@ class Limits:
                    float(os.getenv("VALR_MONTH_USD", cls.month_usd)),
                    float(os.getenv("VALR_JOB_USD", cls.job_usd)))
 
+    @classmethod
+    def interview_from_env(cls) -> "Limits":
+        """Interview mode (the owner's briefings): 30 jobs a day, $40 a month by default.
+        The month cap counts all research spend, so it also bounds the generic jobs."""
+        return cls(int(os.getenv("VALR_INTERVIEW_JOBS_PER_DAY", 30)),
+                   int(os.getenv("VALR_INTERVIEW_JOBS_PER_DAY", 30)),
+                   float(os.getenv("VALR_INTERVIEW_MONTH_USD", 40)),
+                   float(os.getenv("VALR_INTERVIEW_JOB_USD", 0.40)))
+
 
 # Refusals, for the agent to explain (keys are logged; texts go to the model).
 REFUSALS = {
@@ -152,6 +163,8 @@ class Booking:
     caller_key: str
     topic: str
     promised_minutes: int
+    kind: str = "topic"  # topic, or interview (a slot's research run).
+    event_key: str = ""
 
 
 async def setup(connection: Any) -> None:
@@ -176,18 +189,23 @@ async def day_spend(connection: Any) -> float:
         "WHERE at >= date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'") or 0)
 
 
-TODAY = "created_at >= date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'"
+# Cache hits are logged as jobs with status 'cached' but count toward no limit.
+TODAY = ("created_at >= date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' "
+         "AND status <> 'cached'")
 
 
-async def refusal(connection: Any, caller_key: str, limits: Limits) -> str | None:
-    """Why a new job may not be booked now ("month", "caller_day", "day"), or None."""
+async def refusal(connection: Any, caller_key: str, limits: Limits,
+                  kind: str = "topic") -> str | None:
+    """Why a new job may not be booked now ("month", "caller_day", "day"), or None.
+    Day counts are per kind (topic research vs interview briefings); the month's spend is shared."""
     if await month_spend(connection) + limits.job_usd > limits.month_usd:
         return "month"
     mine = await scalar(connection, f"SELECT count(*) FROM research_jobs WHERE caller_hash = %s "
-                                    f"AND {TODAY}", (caller_hash(caller_key),))
+                                    f"AND kind = %s AND {TODAY}", (caller_hash(caller_key), kind))
     if mine >= limits.jobs_per_caller_day:
         return "caller_day"
-    if await scalar(connection, f"SELECT count(*) FROM research_jobs WHERE {TODAY}") >= limits.jobs_per_day:
+    if await scalar(connection, f"SELECT count(*) FROM research_jobs WHERE kind = %s AND {TODAY}",
+                    (kind,)) >= limits.jobs_per_day:
         return "day"
     return None
 
@@ -199,15 +217,25 @@ async def reserve(connection: Any, booking: Booking, limits: Limits) -> str | No
     """
     async with connection.transaction():
         await connection.execute("SELECT pg_advisory_xact_lock(%s)", (LOCK_KEY,))
-        reason = await refusal(connection, booking.caller_key, limits)
+        reason = await refusal(connection, booking.caller_key, limits, booking.kind)
         if reason is not None:
             return reason
         await connection.execute(
-            "INSERT INTO research_jobs (job_id, caller_hash, topic, status, promised_minutes) "
-            "VALUES (%s, %s, %s, 'booked', %s)",
+            "INSERT INTO research_jobs (job_id, caller_hash, topic, status, promised_minutes, kind, "
+            "event_key) VALUES (%s, %s, %s, 'booked', %s, %s, %s)",
             (booking.job_id, caller_hash(booking.caller_key), booking.topic,
-             booking.promised_minutes))
+             booking.promised_minutes, booking.kind, booking.event_key or None))
     return None
+
+
+async def record_cache_hit(connection: Any, job_id: str, caller_key: str, topic: str,
+                           event_key: str, detail: str) -> None:
+    """A slot review that needed no research: logged for the dashboard, free, no limit."""
+    await connection.execute(
+        "INSERT INTO research_jobs (job_id, caller_hash, topic, status, promised_minutes, kind, "
+        "event_key, finished_at, duration_s, detail) "
+        "VALUES (%s, %s, %s, 'cached', 0, 'interview', %s, now(), 0, %s)",
+        (job_id, caller_hash(caller_key), topic, event_key, detail[:500]))
 
 
 async def recent_durations(connection: Any) -> list[float]:
@@ -282,10 +310,10 @@ async def overview(connection: Any, limits: Limits, recent: int = 25) -> dict[st
     """Today's and this month's spend and job counts, and the latest jobs (for the dashboard)."""
     cursor = await connection.execute(
         "SELECT job_id, caller_hash, topic, status, promised_minutes, created_at, duration_s, "
-        "spend_usd, spoken, notes, sources, cap_hits, detail FROM research_jobs "
+        "spend_usd, spoken, notes, sources, cap_hits, detail, kind FROM research_jobs "
         "ORDER BY created_at DESC LIMIT %s", (recent,))
     names = ("job_id", "caller", "topic", "status", "promised_minutes", "created_at",
-             "duration_s", "spend_usd", "spoken", "notes", "sources", "cap_hits", "detail")
+             "duration_s", "spend_usd", "spoken", "notes", "sources", "cap_hits", "detail", "kind")
     jobs = [dict(zip(names, row)) for row in await cursor.fetchall()]
     for job in jobs:
         job["spend_usd"] = float(job["spend_usd"] or 0)
@@ -293,6 +321,9 @@ async def overview(connection: Any, limits: Limits, recent: int = 25) -> dict[st
         "today_usd": await day_spend(connection),
         "month_usd": await month_spend(connection),
         "today_jobs": await scalar(connection, f"SELECT count(*) FROM research_jobs WHERE {TODAY}"),
+        "today_cached": await scalar(connection,
+            "SELECT count(*) FROM research_jobs WHERE status = 'cached' AND created_at >= "
+            "date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'"),
         "month_jobs": await scalar(connection,
             "SELECT count(*) FROM research_jobs WHERE created_at >= "
             "date_trunc('month', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'"),

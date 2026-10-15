@@ -459,6 +459,9 @@ def greeting(conversation_id: str) -> str:
     call = calls.get(conversation_id)
     if call is None:
         return memory.greeting(conversation_id)
+    if call.research_job.startswith("block:"):
+        from app import interviews  # Imports this module; loaded late to avoid a cycle.
+        return interviews.greeting(conversation_id, call.reason)
     if call.research_job:
         from app import research  # Imports this module; loaded late to avoid a cycle.
         return research.greeting(conversation_id, call.reason)
@@ -472,6 +475,8 @@ def prompt_note(conversation_id: str) -> str:
     call = calls.get(conversation_id)
     if call is None:
         return ""
+    if call.research_job.startswith("block:"):
+        return ""  # The briefing is in interviews.prompt_note (owner only).
     if call.research_job:
         from app import research
         return research.prompt_note(conversation_id, call.reason.removeprefix("what I found about "))

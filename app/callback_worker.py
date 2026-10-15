@@ -29,7 +29,8 @@ from temporalio.exceptions import ApplicationError
 from temporalio.worker import Worker
 
 from app.callback_workflow import (RING_TIMEOUT_S, TASK_QUEUE, CallbackWorkflow, DialBudgetWorkflow,
-                                   DialSlotRequest, PlaceCallInput, workflow_runner)
+                                   DialSlotRequest, PlaceCallInput, ReserveRequest,
+                                   workflow_runner)
 
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 logger = logging.getLogger("callback_worker")
@@ -106,12 +107,17 @@ class Activities:
     @activity.defn(name="reserve_dial_slot")
     async def reserve_dial_slot(self, request: DialSlotRequest) -> bool:
         start = WithStartWorkflowOperation(
-            DialBudgetWorkflow.run, request.day, id=f"callback-dials-{request.day}",
+            DialBudgetWorkflow.run, request.day, id=f"{request.budget}-dials-{request.day}",
             task_queue=TASK_QUEUE, id_conflict_policy=WorkflowIDConflictPolicy.USE_EXISTING)
-        granted = await self.client.execute_update_with_start_workflow(
-            DialBudgetWorkflow.reserve, request.attempt_id, start_workflow_operation=start)
+        if request.budget == "callback":
+            granted = await self.client.execute_update_with_start_workflow(
+                DialBudgetWorkflow.reserve, request.attempt_id, start_workflow_operation=start)
+        else:
+            granted = await self.client.execute_update_with_start_workflow(
+                DialBudgetWorkflow.reserve_within, ReserveRequest(request.attempt_id, request.limit),
+                start_workflow_operation=start)
         if not granted:
-            logger.warning("Callback not dialled: the daily limit is reached")
+            logger.warning("Not dialled: the daily %s limit is reached", request.budget)
         return granted
 
     @activity.defn(name="place_call")
