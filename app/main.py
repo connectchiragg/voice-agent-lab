@@ -10,12 +10,13 @@ from typing import Literal
 from uuid import uuid4
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from app import access, agent, callbacks, groq_api, memory, recordings, telnyx, webrtc
+from app import (access, agent, callbacks, groq_api, memory, recordings, research, telnyx,
+                 valr_dashboard, webrtc)
 from app.deepgram import AuraSpeaker, DeepgramSettings, FluxListener
 from app.pipeline import DEFAULT_BACKCHANNEL, Backchannel, Call, Engines, ReplyEvent, ReplyModel
 from app.transport import SpeechUnavailable, apply_player_event, open_call
@@ -59,8 +60,9 @@ def load_engines(sample_rate: int | None = None) -> Engines | None:
                    speculate=reply if speculate else None,
                    may_speculate=lambda: not groq_api.near_rate_limit(),
                    begin_call=memory.begin_call,
-                   end_call=lambda conversation_id: memory.end_call(conversation_id,
-                                                                    agent.load_history),
+                   end_call=lambda conversation_id: (memory.end_call(conversation_id,
+                                                                     agent.load_history),
+                                                     research.call_ended(conversation_id)),
                    greeting=callbacks.greeting, record_greeting=agent.record_greeting,
                    backchannel=backchannel_from_env())
 
@@ -98,6 +100,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         async with (groq_api.shared_groq_client(), access.lifespan(), agent.lifespan(app),
                     memory.lifespan(agent.postgres_conninfo, agent.delete_thread),
                     recordings.lifespan(agent.postgres_conninfo),
+                    research.lifespan(agent.postgres_conninfo),
+                    valr_dashboard.lifespan(),
                     webrtc.lifespan(app),
                     telnyx.lifespan(app)):
             yield
@@ -111,6 +115,7 @@ app = FastAPI(title="Voice Agent Lab", docs_url=None, redoc_url=None, openapi_ur
 app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
 app.include_router(webrtc.router)
 app.include_router(telnyx.router)
+app.include_router(valr_dashboard.router)
 
 
 class CallSettings(BaseModel):
@@ -121,8 +126,10 @@ class CallSettings(BaseModel):
     echo_cancelled: bool
 
 
-@app.get("/")
-async def home() -> FileResponse:
+@app.get("/", response_model=None)
+async def home(request: Request) -> FileResponse | RedirectResponse:
+    if valr_dashboard.is_dashboard_host(request.headers.get("host")):
+        return RedirectResponse("/valr", status_code=307)  # valr.haciensus.com: the dashboard.
     return FileResponse(ROOT / "static/index.html")
 
 

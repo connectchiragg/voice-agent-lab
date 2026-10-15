@@ -1,0 +1,8 @@
+# The VALR research worker (Dockerfile target `worker`, Python 3.13: crewai requires <3.14).
+# Compile: uv pip compile requirements-worker.in --python-version 3.13 --universal -o requirements-worker.lock
+crewai[anthropic]==1.15.28
+temporalio==1.34.0
+psycopg[binary]==3.3.6
+psycopg-pool==3.3.3
+httpx==0.28.1
+python-dotenv==1.2.3

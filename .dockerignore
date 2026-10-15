@@ -3,5 +3,6 @@
 !app/
 !static/
 !requirements.lock
+!requirements-worker.lock
 **/__pycache__
 **/*.py[cod]

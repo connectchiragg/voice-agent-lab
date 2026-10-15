@@ -119,6 +119,7 @@ class CallbackRequest:
     # CALLBACK_QUIET_HOURS when it was booked ("21-9"; "" off), passed in so workflow
     # code never reads the environment; it also governs reschedules and retries.
     quiet_hours: str = ""
+    research_job: str = ""  # A VALR job whose findings this callback delivers.
 
 
 @dataclass
@@ -146,6 +147,7 @@ class PlaceCallInput:
     caller_key: str
     phone_e164: str
     reason: str
+    research_job: str = ""
 
 
 @dataclass
@@ -241,7 +243,7 @@ class CallbackWorkflow:
             attempt.call_control_id = await workflow.execute_activity(
                 "place_call",
                 PlaceCallInput(workflow.info().workflow_id, attempt.number, request.caller_key,
-                               request.phone_e164, self.status.reason),
+                               request.phone_e164, self.status.reason, request.research_job),
                 result_type=str, start_to_close_timeout=timedelta(seconds=30),
                 # Telnyx de-duplicates on command_id, so a retried dial does not ring twice.
                 retry_policy=RetryPolicy(maximum_attempts=3,

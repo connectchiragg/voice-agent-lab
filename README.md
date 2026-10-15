@@ -428,6 +428,133 @@ Not yet verified: a real outbound call (the voice-agent-lab app needs an
 Outbound Voice Profile first), and Telnyx's actual `hangup_cause` for an
 unanswered call to the verified number.
 
+### Research callbacks (VALR)
+
+VALR (Voice Agent Lab Research) lets a phone caller say "Research Coorg for a
+weekend trip and call me back". Cadence answers "Let me look into that and call
+you back in about 3 minutes. Is that okay?", and on the caller's yes it books the
+job. When the caller hangs up, three researchers look into it at the same time,
+a fourth model merges what they found, and Cadence calls back to say it in about
+a minute of speech, then answers follow-up questions from the notes.
+
+```
+call ── start_research(topic) ── yes ──> ResearchCallbackWorkflow (Temporal, queue voice-research)
+                                           waits for the call to end
+                                           ├─ web researcher       Claude web search + page reading ┐ in parallel,
+                                           ├─ reviews and news     Claude web search                ├ Claude Haiku 5.5,
+                                           ├─ facts                Wikivoyage, Wikipedia,           ┘ CrewAI agents
+                                           │                       OpenStreetMap, Open-Meteo (free)
+                                           ├─ synthesizer          Claude Sonnet 5.5: spoken answer + cited notes,
+                                           │                       then a Haiku check of each spoken sentence
+                                           └─ CallbackWorkflow (the callbacks above): dials at once
+callback call: "Hi, it's Cadence, calling back with what I found about Coorg." -> the answer -> follow-ups
+```
+
+How a job flows:
+
+1. **Booking (on the call).** `start_research` first only proposes: it checks
+   that the caller is a phone caller, that the topic is not about a private
+   person, that no callback or research is pending for them, that a dial slot is
+   left today, and the cost limits below. It returns the promise N for the
+   agent to say. Only a clear yes on the caller's very next turn books it (the
+   same code-enforced yes as callbacks): a `research_jobs` row is written under
+   the limits in one transaction, and the workflow starts and waits.
+2. **The promise N** is computed in code, not guessed by the model: the 90th
+   percentile of the last 20 finished jobs' research time, plus 60 s to dial
+   and ring, plus 30 s margin, rounded up to whole minutes and kept between 2
+   and 5. Until 5 jobs have finished it uses the spike's p90 (57 s), so N is 3.
+3. **Research starts when the call ends** (the app signals the workflow; if
+   that signal is lost, it starts on its own after 11 minutes). The whole job
+   must finish within N minutes minus the 60 s for dialling: 120 s for N = 3.
+   The researchers get 80 s; synthesis gets the rest.
+4. **Partial results are fine.** Two of three researchers are enough; a
+   researcher that ran out of time or budget hands over what its tools
+   returned. If anything is missing the answer starts "Here's what I found so
+   far". If nothing usable came back, Cadence still calls and briefly apologizes.
+5. **The callback** is the existing `CallbackWorkflow`, started as a child as
+   soon as the answer is saved: the same daily dial limit (research shares the
+   5 dials a day), retries and one pending callback per caller. On that call the
+   spoken answer and notes go into the system prompt as quoted data; the agent
+   relays the answer naturally and answers follow-ups only from the notes.
+
+What the answer may say: 90 to 150 words written for speech (no lists, URLs or
+symbols; numbers as words); every note has a source URL that one of the
+researchers' tools actually returned (checked in code); every rating names
+what is rated; safety only if sourced, recent and practical, and no crime
+stories or allegations (the notes may keep them, marked sensitive). A Haiku
+check then drops spoken sentences the cited text does not support (in the spike
+it would have caught "each tunnel on the route charges 100 kroner", true only of
+tunnels between islands).
+
+**Cost controls**, all enforced in code (environment overrides in brackets):
+
+| Limit | Default |
+|---|---|
+| Per job, all requests (`VALR_JOB_USD`) | $0.25: researchers stop softly at 70% of their slice, hard at 100%; synthesis uses what is left |
+| Jobs per caller per UTC day (`VALR_JOBS_PER_CALLER_DAY`) | 3 |
+| Jobs per UTC day, everyone (`VALR_JOBS_PER_DAY`) | 15 (and the 5 callback dials a day) |
+| Per month (`VALR_MONTH_USD`) | $20: new jobs are declined politely once the month's spend plus one job would pass it |
+| Web searches per researcher (`VALR_SEARCHES_PER_RESEARCHER`) | 3, each one Claude `web_search` with `max_uses` 1 |
+| Pages read per researcher (`VALR_PAGES_PER_RESEARCHER`) | 3, each cut to 4,000 characters (`VALR_PAGE_CHARS`) before the model sees it |
+| Results per search or lookup (`VALR_RESULTS_PER_CALL`) | 5 |
+| Free-API lookups (facts researcher) | 6 |
+| Findings per researcher | 8 claims, 120-word summary (truncated in code) |
+| Notes | 12 (about 600 tokens) |
+| max_tokens per call | researcher 1,500, search 1,200, synthesis 3,000 |
+| `max_iter` per agent | 5 |
+
+Spend is recorded per request from the usage the API returns (tokens, cache
+reads and writes, web searches at $10 per 1,000) in `research_spend`, so the
+month's total is real, not estimated per job. `docker exec voice-research
+python -m app.research_jobs` prints today's and this month's spend and the
+latest jobs; the dashboard at valr.haciensus.com (`/valr` on the app, behind
+Cloudflare Access) shows the same plus each job's answer, notes and sources.
+Cap hits are logged as `VALR cap hit <name>` and stored per job.
+
+Measured (phase 1 spike, 3 topics, 9 jobs on these models): 41 to 59 s per job
+(p90 about 57 s), 24 to 29 model calls, about 138,000 input and 17,000 output
+tokens, 4 to 6 web searches, **$0.08 to $0.10 per job**: about half of that is
+the searches. Sonnet researchers cost 3.5 times as much with no clear gain.
+Whole-call costs for a research request: the first call as usual, plus a
+callback call of a minute or two (Deepgram Flux and Aura-2 about $0.05, see
+Speech; Telnyx outbound minutes at its voice rates; Groq on the free tier).
+
+Why these pieces:
+
+- **Temporal runs the fan-out, CrewAI runs each researcher.** Each researcher
+  is its own activity: a crash reruns only that one, partial results are
+  natural, and the Temporal UI shows each one's time and errors. CrewAI gives
+  each researcher its role, tools, `max_iter`, `output_pydantic` schema and a
+  guardrail that rejects claims without a source. (A single crew with three
+  async tasks took the same time and money in the spike, but leaves no place for
+  the code checks between research and synthesis.)
+- **Claude's own web search**, wrapped as a CrewAI tool: each use is a Messages
+  call with `web_search` and `max_uses` 1 that returns cited facts. CrewAI's
+  Anthropic provider cannot pass server tools, and the wrapper lets code count
+  and cap every search. No search API signups.
+- **A separate container and image.** crewai requires Python below 3.14 and
+  pins pydantic below 2.13 and anthropic 0.73; it also brings chromadb and
+  lancedb (the worker image is 1.1 GB, the app's 525 MB). So the `worker` target
+  of the same Dockerfile is Python 3.13 with its own lock
+  (`requirements-worker.lock`), and runs as `voice-research`. The app image is
+  unchanged and has no Anthropic client: the live call path never calls Claude,
+  and only `voice-research` gets `ANTHROPIC_API_KEY`. Downgrading pydantic to
+  2.12.5 in the app was tested and is safe (the full suite passes), but with a
+  separate image it is not needed.
+- **Tracing stays local**: Temporal's history and the worker's logs. CrewAI's
+  telemetry and tracing are off (`CREWAI_DISABLE_TELEMETRY`, `OTEL_SDK_DISABLED`).
+
+Local run: `temporal server start-dev`, then with the worker's venv (Python
+3.13, `pip install -r requirements-worker.lock`) and `ANTHROPIC_API_KEY`,
+`POSTGRES_PASSWORD`, `TEMPORAL_ADDRESS` set: `python -m app.research_worker`, and
+`python -m app.research_worker test "Coorg for a weekend"` runs one job end to
+end for a fictitious caller without dialling. Tests: `python -m pytest`
+(the agent tests need the worker venv: `.venv-worker/bin/python -m pytest
+tests/test_research_agents.py`; the Postgres tests need `VALR_TEST_POSTGRES`).
+The spike that chose all this is `scripts/research_spike.py`.
+
+Not yet verified: a real research callback call end to end on the phone.
+
 ## Run locally
 
 Create `.env` from `.env.example` and set `GROQ_API_KEY` and `DEEPGRAM_API_KEY`.

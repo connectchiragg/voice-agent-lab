@@ -77,7 +77,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from fastapi import APIRouter, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from app import callbacks, g711, memory, recordings
+from app import callbacks, g711, memory, recordings, research
 from app.callbacks import CallbackCall
 from app.pipeline import Call, Engines, Samples
 from app.transport import SpeechUnavailable, open_call
@@ -794,6 +794,8 @@ async def media_stream(socket: WebSocket, token: str = "") -> None:
         conversation_id = str(uuid4())
         if pending.callback is not None:
             callbacks.calls[conversation_id] = pending.callback  # For the greeting.
+            if pending.callback.research_job:  # VALR: its findings, by job id (bounded wait).
+                await research.load_for_call(conversation_id, pending.callback.research_job)
         session.call = await open_call(engines, session.send, conversation_id, barge_in=True,
                                        caller_id=pending.caller_key)
         logger.info("Phone call connected (%s caller)",

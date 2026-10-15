@@ -255,6 +255,70 @@ voice-agent-lab Call Control app (portal: Programmable Voice > the app >
 Outbound > Outbound Voice Profile > `Default` > Save). Until then every dial is
 refused (HTTP 4xx, not retried) and the callback ends as failed.
 
+## Research callbacks (VALR)
+
+VALR (README, Research callbacks) adds one container, from the same Dockerfile's
+`worker` target:
+
+| Container | Image | Port | RAM |
+|---|---|---|---|
+| `voice-research` | `voice-agent-lab-worker` (`--target worker`: Python 3.13, crewai, anthropic), `python -m app.research_worker` | none | about 210 MB idle (import of crewai), capped at 768 MB (`--memory`) |
+
+The worker image is about 1.1 GB (crewai pulls in chromadb, lancedb, pyarrow and
+onnxruntime); the app image is unchanged. Check the disk first (`df -h /`); old
+`rollback-*` tags share most layers, but keep only the latest two if space is
+tight.
+
+Setup, after Temporal (above):
+
+1. Put the Anthropic key in its own file, read only by `voice-research`, without
+   printing it:
+
+   ```sh
+   ssh ubuntu@<vm-ip> 'grep -q "^ANTHROPIC_API_KEY=" ~/voice-agent-lab/.env.research 2>/dev/null || echo missing'
+   grep '^ANTHROPIC_API_KEY=' .env | ssh ubuntu@<vm-ip> 'umask 077; cat >> ~/voice-agent-lab/.env.research'
+   ```
+
+   The app container never gets it, so the live call path has no Claude client.
+2. `cd ~/voice-agent-lab && sh deploy/research-setup.sh` builds the worker image
+   and starts `voice-research` with `--env-file .env --env-file .env.research`.
+3. Rebuild and restart the app and `voice-callbacks` too (Updating, below): the
+   app has the `start_research` tool and the dashboard, and the callback worker
+   passes the job id to the callback call.
+4. Check it end to end without dialling anyone (a fictitious caller; it counts
+   toward the limits and spends about $0.10):
+
+   ```sh
+   sudo docker exec voice-research python -m app.research_worker test "Coorg, India for a weekend trip"
+   ```
+
+   It prints the state, the time, the spend and the spoken answer.
+
+Spend and jobs: `sudo docker exec voice-research python -m app.research_jobs`.
+Worker logs: `sudo docker logs -f voice-research` (`VALR` lines: each
+researcher's result and cost, `VALR cap hit ...`, and the job's total). Each
+job is also a `ResearchCallbackWorkflow` in the Temporal UI, its researchers
+and synthesis as activities. When updating the worker, keep `.env.research`
+with `.env` (`cp -p ~/voice-agent-lab/.env* ~/voice-agent-lab.new/`).
+
+**Dashboard** (read-only): the app serves it at `/valr`, and redirects `/` there
+when the Host is `valr.haciensus.com` (`VALR_HOST`). Route the hostname in the
+named tunnel to the app's origin, `http://localhost:7860`, and put a Cloudflare
+Access application on it; set `VALR_ACCESS_AUD` in `.env` to that application's
+AUD tag and restart the app. Every request must carry a valid
+`Cf-Access-Jwt-Assertion` for it (verified like the voice page's, app/access.py),
+otherwise the answer is 403; with no AUD set the dashboard is closed. It shows
+anonymised caller hashes, never numbers.
+
+**Cost** of one research request, on 2026-10-16 prices:
+
+| Service | What VALR uses | Cost |
+|---|---|---|
+| Anthropic | 3 Haiku 5.5 researchers, 4 to 6 web searches, Sonnet 5.5 synthesis, Haiku claim check | about $0.08 to $0.11 per job measured; capped at $0.25 per job and $20 a month |
+| Deepgram | the callback call: Flux per streamed minute ($0.0065) and Aura-2 per character ($0.030 per 1,000) | about $0.05 for a 2-minute callback |
+| Telnyx | one outbound call per job (plus retries if unanswered) | Telnyx's per-minute voice rate; recordings $0.002 a minute when on |
+| Groq | the callback conversation's replies | free tier (counts toward its daily limits) |
+
 ## Updating and rolling back
 
 Ship the source to a fresh directory, keep `.env`, rebuild only the app
@@ -305,6 +369,10 @@ To roll back, run the same `docker rm -f` and `docker run` with the rollback tag
 | `TEMPORAL_ADDRESS`, `TEMPORAL_NAMESPACE` | unset, `default` | Callbacks: the Temporal server (`temporal:7233` on the VM, no TLS) and namespace (`voice-agent-lab`). Unset: callbacks are off |
 | `TEMPORAL_DB_PASSWORD` | set by `deploy/temporal-setup.sh` | Postgres password of the `temporal` role; used only by the setup script |
 | `TELNYX_CONNECTION_ID`, `TELNYX_FROM_NUMBER` | `3071391970178893742`, `+12288888007` | Callback dials: the Call Control app and the caller ID |
+| `ANTHROPIC_API_KEY` | unset | VALR research, in `.env.research`, read only by `voice-research` |
+| `VALR_JOB_USD`, `VALR_JOBS_PER_CALLER_DAY`, `VALR_JOBS_PER_DAY`, `VALR_MONTH_USD` | `0.25`, `3`, `15`, `20` | VALR cost limits (README, Research callbacks); the app checks them at booking, the worker within each job |
+| `VALR_SEARCHES_PER_RESEARCHER`, `VALR_PAGES_PER_RESEARCHER`, `VALR_PAGE_CHARS`, `VALR_RESULTS_PER_CALL`, `VALR_MAX_ITER`, `VALR_RESEARCHER_MODEL`, `VALR_SYNTH_MODEL` | `3`, `3`, `4000`, `5`, `5`, `claude-haiku-5-5`, `claude-sonnet-5-5` | Per-researcher caps and models (any `Caps` field in app/research_agents.py as `VALR_<NAME>`) |
+| `VALR_HOST`, `VALR_ACCESS_AUD` | `valr.haciensus.com`, unset | The dashboard's hostname, and the AUD tag of its Cloudflare Access application (else `CF_ACCESS_AUD`; neither: the dashboard is closed) |
 | `CF_TURN_KEY_ID`, `CF_TURN_KEY_API_TOKEN` | unset | Cloudflare Realtime TURN key for WebRTC media; run time only. Unset: public STUN only (see below) |
 | `WEBRTC_MAX_CALL_S`, `WEBRTC_MAX_CALLS` | `900`, `4` | WebRTC call time limit (TURN credentials expire 60 s later) and concurrent WebRTC calls |
 

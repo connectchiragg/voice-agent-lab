@@ -3,6 +3,7 @@
 # Secrets are never baked in: pass DEEPGRAM_API_KEY, GROQ_API_KEY etc. at run time
 # (see docs/deploy.md).
 ARG PYTHON_IMAGE=python:3.14-slim-trixie
+ARG WORKER_PYTHON_IMAGE=python:3.13-slim-trixie
 
 # Python dependencies, binary wheels only (no compilers in the image).
 FROM ${PYTHON_IMAGE} AS deps
@@ -11,6 +12,31 @@ COPY requirements.lock /tmp/requirements.lock
 RUN python -m venv /opt/venv \
  && /opt/venv/bin/pip install --only-binary=:all: -r /tmp/requirements.lock
 
+# The VALR research worker (`--target worker`): Python 3.13, because crewai requires
+# <3.14, with its own lock (crewai, anthropic, temporalio, psycopg). Only this image has
+# an LLM SDK for research; the app image below is unchanged by it.
+FROM ${WORKER_PYTHON_IMAGE} AS worker-deps
+ENV PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1
+COPY requirements-worker.lock /tmp/requirements-worker.lock
+RUN python -m venv /opt/venv \
+ && /opt/venv/bin/pip install --only-binary=:all: -r /tmp/requirements-worker.lock
+
+FROM ${WORKER_PYTHON_IMAGE} AS worker
+RUN useradd --create-home --uid 1000 app
+COPY --from=worker-deps /opt/venv /opt/venv
+WORKDIR /app
+COPY app ./app
+ENV PATH=/opt/venv/bin:$PATH \
+    PYTHONUNBUFFERED=1 \
+    CREWAI_DISABLE_TELEMETRY=true \
+    CREWAI_DISABLE_TRACKING=true \
+    CREWAI_TRACING_ENABLED=false \
+    OTEL_SDK_DISABLED=true \
+    CREWAI_STORAGE_DIR=/tmp/crewai
+USER app
+CMD ["python", "-m", "app.research_worker"]
+
+# The app (the default target: keep it last).
 FROM ${PYTHON_IMAGE}
 # UID 1000 also matches what container hosts such as Hugging Face Spaces expect.
 RUN useradd --create-home --uid 1000 app

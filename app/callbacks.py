@@ -405,6 +405,7 @@ class CallbackCall:
     workflow_id: str
     attempt: int
     reason: str
+    research_job: str = ""  # VALR: the job whose findings this call delivers.
 
 
 def callback_of(client_state: object) -> CallbackCall | None:
@@ -414,7 +415,8 @@ def callback_of(client_state: object) -> CallbackCall | None:
     try:
         state = json.loads(base64.b64decode(client_state, validate=True))
         return CallbackCall(str(state["callback"]), int(state["attempt"]),
-                            str(state.get("reason", ""))[:MAX_REASON_CHARS])
+                            str(state.get("reason", ""))[:MAX_REASON_CHARS],
+                            str(state.get("research", ""))[:64])
     except (ValueError, binascii.Error, KeyError, TypeError):
         return None
 
@@ -456,6 +458,9 @@ def greeting(conversation_id: str) -> str:
     call = calls.get(conversation_id)
     if call is None:
         return memory.greeting(conversation_id)
+    if call.research_job:
+        from app import research  # Imports this module; loaded late to avoid a cycle.
+        return research.greeting(conversation_id, call.reason)
     name = memory.display_name(conversation_id)
     return (f"Hi {name}, Cadence calling back about {call.reason}, as you asked." if name
             else f"Hi, Cadence calling back about {call.reason}, as you asked.")
@@ -466,5 +471,8 @@ def prompt_note(conversation_id: str) -> str:
     call = calls.get(conversation_id)
     if call is None:
         return ""
+    if call.research_job:
+        from app import research
+        return research.prompt_note(conversation_id, call.reason.removeprefix("what I found about "))
     return (f"This call is the callback the caller asked for, about {call.reason}. Help with "
             "that now. Do not book another callback unless the caller clearly asks for one.")

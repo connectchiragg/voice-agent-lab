@@ -16,7 +16,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import httpx
 from temporalio.service import RPCError
 
-from app import callbacks, memory
+from app import callbacks, memory, research
 
 logger = logging.getLogger("uvicorn.error")
 TOOL_TIMEOUT_S = 5.0
@@ -188,6 +188,19 @@ TOOLS = {tool.name: tool for tool in (
     Tool("get_callback", "This caller's booked callback, or how the last one went.",
          {"type": "object", "properties": {}},
          callbacks.get_callback, takes_call=True),
+    Tool("start_research",
+         "Research a place, trip, business or general topic after this call and call the caller "
+         "back with what was found, only when they ask you to look into something and call them "
+         "back. Never for private individuals. Phone callers only. Two steps: call it without "
+         "confirmed, and say the 'say' text it returns (it gives the minutes); only if their next "
+         "reply is yes, call it again with confirmed=true and say its 'say' text.",
+         {"type": "object", "properties": {
+             "topic": {"type": "string", "description": "What to research, a few words, e.g. "
+                       "'Coorg, India for a weekend trip'"},
+             "confirmed": {"type": "boolean", "description": "true only on the second call, after "
+                           "the caller said yes"}},
+          "required": ["topic"]},
+         research.start_research, side_effects=True, takes_call=True, takes_turn=True),
 )}
 SCHEMAS = [tool.schema() for tool in TOOLS.values()]
 

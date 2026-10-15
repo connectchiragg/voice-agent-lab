@@ -70,10 +70,13 @@ class DialSettings:
                    os.getenv("TELNYX_FROM_NUMBER", cls.from_number))
 
 
-def client_state(workflow_id: str, attempt: int, reason: str) -> str:
+def client_state(workflow_id: str, attempt: int, reason: str, research_job: str = "") -> str:
     """Telnyx echoes this (base64) in every webhook for the call, so the app knows
-    which callback a call belongs to and what to say first."""
-    state = {"callback": workflow_id, "attempt": attempt, "reason": reason}
+    which callback a call belongs to and what to say first (and, for a VALR
+    research callback, which job's findings to load: only its id travels)."""
+    state: dict[str, object] = {"callback": workflow_id, "attempt": attempt, "reason": reason}
+    if research_job:
+        state["research"] = research_job
     return base64.b64encode(json.dumps(state, separators=(",", ":")).encode()).decode()
 
 
@@ -82,7 +85,8 @@ def dial_body(settings: DialSettings, request: PlaceCallInput) -> dict[str, obje
         "connection_id": settings.connection_id,
         "to": request.phone_e164,
         "from": settings.from_number,
-        "client_state": client_state(request.workflow_id, request.attempt, request.reason),
+        "client_state": client_state(request.workflow_id, request.attempt, request.reason,
+                                     request.research_job),
         "timeout_secs": RING_TIMEOUT_S,
         # Telnyx ignores a repeat with the same id: a retried activity does not ring twice.
         "command_id": f"{request.workflow_id}-{request.attempt}",
