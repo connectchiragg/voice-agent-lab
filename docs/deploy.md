@@ -108,6 +108,19 @@ which was too small for the local models and may now suffice (untested).
    (`--barge-in` to time interruptions; without `--url` it measures the
    transport alone against a local stub pipeline).
 
+## Phone calls (Telnyx)
+
+Inbound calls to the Telnyx number reach `/telnyx/webhook` (Call Control app
+`voice-agent-lab`, webhook API v2), and their audio reaches `/ws/telnyx`. Both
+paths bypass Cloudflare Access: the webhook is ed25519-signed and the stream
+needs a one-time per-call token. Set the three `TELNYX_*` variables in `.env`.
+
+- An unsigned `curl -X POST https://<host>/telnyx/webhook` returns 401.
+- On a trial account only verified numbers can call in (Verified Numbers in the
+  portal), and calls are cut at 10 minutes: we say goodbye at 9.
+- Watch a call: `sudo docker logs -f voice-agent-lab 2>&1 | grep -iE 'phone|telnyx|turn latency|barge'`.
+- Local, without Telnyx: `scripts/telnyx_fake_call.py` (see its docstring).
+
 ## Updating and rolling back
 
 Ship the source to a fresh directory, keep `.env`, rebuild only the app
