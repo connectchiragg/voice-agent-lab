@@ -54,7 +54,8 @@ Steps for the owner:
    To copy a key from your Mac without printing it:
    `grep '^DEEPGRAM_API_KEY=' .env | ssh ubuntu@<vm-ip> 'cat >> ~/voice-agent-lab/.env'`.
 
-   Leave `POSTGRES_PASSWORD` unset, so history stays in memory.
+   Leave `POSTGRES_PASSWORD` unset to keep history in memory, or set up
+   Postgres as below.
 6. Run `sh ~/voice-agent-lab/deploy/vm-setup.sh`. It does the following:
    - installs Docker;
    - builds the image (under a minute);
@@ -129,6 +130,41 @@ needs a one-time per-call token. Set the three `TELNYX_*` variables in `.env`.
 - Watch a call: `sudo docker logs -f voice-agent-lab 2>&1 | grep -iE 'phone|telnyx|turn latency|barge'`.
 - Local, without Telnyx: `scripts/telnyx_fake_call.py` (see its docstring).
 
+## Postgres (conversation history and caller memory)
+
+Postgres 17 runs in its own container beside the app, on a user-defined Docker
+network, `voice-agent-lab`. The app reaches it by container name
+(`POSTGRES_HOST=voice-postgres`); its port is also published on the VM's
+loopback only (`127.0.0.1:5432`), for `psql` on the VM. We use the network
+rather than `--add-host host.docker.internal:host-gateway`: a port published on
+127.0.0.1 is not reachable through the host gateway address, so that route
+would need Postgres to listen on the Docker bridge as well.
+
+The data lives in the named volume `voice-agent-lab-postgres`. The password is
+generated once and kept only in `~/voice-agent-lab/.env` (`POSTGRES_PASSWORD`);
+Postgres reads it from a temporary file at its first start, when the volume is
+initialised. Postgres 17 used 27 MB of RAM after setup (the app about 120 MB), which the 4 GB VM easily
+fits. One-time setup:
+
+```sh
+cd ~/voice-agent-lab && umask 077
+grep -q '^POSTGRES_PASSWORD=' .env || echo "POSTGRES_PASSWORD=$(openssl rand -hex 32)" >> .env
+grep -q '^POSTGRES_HOST=' .env || echo 'POSTGRES_HOST=voice-postgres' >> .env
+sudo docker network create voice-agent-lab
+sudo docker volume create voice-agent-lab-postgres
+init=$(mktemp) && { grep '^POSTGRES_PASSWORD=' .env; echo POSTGRES_USER=voice_agent; echo POSTGRES_DB=voice_agent; } > "$init"
+sudo docker run -d --name voice-postgres --restart unless-stopped --network voice-agent-lab \
+  -p 127.0.0.1:5432:5432 -v voice-agent-lab-postgres:/var/lib/postgresql/data \
+  --env-file "$init" postgres:17.11-alpine
+rm -f "$init"
+```
+
+The app creates its tables at startup (LangGraph's checkpoints, `callers`,
+`call_summaries`). Check them with
+`sudo docker exec voice-postgres psql -U voice_agent -d voice_agent -c '\dt'`.
+If Postgres is down when the app starts, the app logs "Postgres unavailable"
+and keeps history and memory in RAM until its next restart.
+
 ## Updating and rolling back
 
 Ship the source to a fresh directory, keep `.env`, rebuild only the app
@@ -141,8 +177,13 @@ cp -p ~/voice-agent-lab/.env ~/voice-agent-lab.new/ && mv ~/voice-agent-lab ~/vo
 sudo docker tag voice-agent-lab:latest voice-agent-lab:rollback
 cd ~/voice-agent-lab && sudo docker build -t voice-agent-lab:latest .
 sudo docker rm -f voice-agent-lab
-sudo docker run -d --name voice-agent-lab --restart unless-stopped --env-file .env -p 127.0.0.1:7860:7860 voice-agent-lab:latest
+sudo docker run -d --name voice-agent-lab --restart unless-stopped --env-file .env --network voice-agent-lab -p 127.0.0.1:7860:7860 voice-agent-lab:latest
 ```
+
+Before replacing the container, make sure no call is live:
+`ss -tn state established '( sport = :7860 )'` shows no connection from the
+tunnels, and the last `Phone call connected` in the logs has a later
+`Phone call ended`.
 
 Leave the `cloudflared` container alone: restarting it changes the public URL.
 To roll back, run the same `docker rm -f` and `docker run` with the rollback tag.
@@ -164,7 +205,9 @@ To roll back, run the same `docker rm -f` and `docker run` with the rollback tag
 | `TELNYX_API_KEY`, `TELNYX_PUBLIC_KEY`, `TELNYX_STREAM_URL` | unset | Phone calls on the Telnyx number: Call Control key, webhook-signing public key (base64), and `wss://<host>/ws/telnyx`. Unset: `/telnyx/webhook` answers 503 |
 | `TELNYX_CODEC` | `L16` | Phone audio both ways: `L16` (16 kHz) or `PCMU` (8 kHz) |
 | `TELNYX_MAX_CALL_S`, `TELNYX_MAX_CALLS` | `540`, `2` | Per phone call: goodbye and hang up after this long (trial accounts are cut at 600 s); concurrent phone calls, beyond which callers get busy |
-| `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_PASSWORD` | `127.0.0.1`, `5432`, unset | Optional history store; in memory when unset |
+| `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_PASSWORD` | `127.0.0.1`, `5432`, unset | History and caller memory (database and role `voice_agent`); on the VM `voice-postgres`. In memory when unset or unreachable |
+| `CF_ACCESS_AUD`, `CF_ACCESS_TEAM_DOMAIN` | unset, `https://small-brook-8402.cloudflareaccess.com` | Browser caller identity: the Access app's AUD tag; unset, every browser caller is anonymous |
+| `CALLER_MEMORY`, `CALLER_MEMORY_LOAD_TIMEOUT_MS`, `CALLER_MEMORY_SUMMARY_WAIT_S` | `1`, `150`, `600` | Caller memory on/off, its load limit at call start, and how long a summary may wait for quiet |
 | `CF_TURN_KEY_ID`, `CF_TURN_KEY_API_TOKEN` | unset | Cloudflare Realtime TURN key for WebRTC media; run time only. Unset: public STUN only (see below) |
 | `WEBRTC_MAX_CALL_S`, `WEBRTC_MAX_CALLS` | `900`, `4` | WebRTC call time limit (TURN credentials expire 60 s later) and concurrent WebRTC calls |
 
