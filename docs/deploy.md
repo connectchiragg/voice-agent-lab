@@ -103,6 +103,8 @@ has 1 GB and is too small.
 |---|---|---|
 | `GROQ_API_KEY` | (required) | LLM; set it only at run time, never in the image |
 | `GROQ_LLM_MODEL`, `GROQ_LLM_REASONING` | see `.env.example` | LLM choice |
+| `LLM_FALLBACK_MODEL` | `openai/gpt-oss-20b` | Hedge for a stalled or rate-limited LLM request; empty disables it |
+| `FIRST_TOKEN_DEADLINE_MS` | `600` | Start the fallback when the primary has sent nothing for this long |
 | `HOST`, `PORT` | `0.0.0.0`, `7860` in the image | Address uvicorn binds |
 | `MODELS_DIR` | `/models` in the image | Model files |
 | `STT_THREADS` | `1` in the image, `2` locally | Nemotron threads; keep at or below physical cores (2 vCPU is often 1 core) |

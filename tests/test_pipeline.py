@@ -5,7 +5,8 @@ import numpy as np
 import pytest
 
 from app import pipeline
-from app.pipeline import Call, Engines, SpeechChunker, TurnDetector, decode_pcm, heard_text
+from app.pipeline import (Call, Engines, ReplyModel, SpeechChunker, TurnDetector, decode_pcm,
+                          heard_text)
 from app.vad import CHUNK
 
 LOUD, QUIET = 0.3, 0.0
@@ -580,3 +581,20 @@ def test_barge_in_during_a_committed_speculative_reply():
     assert replies == ["wait, stop"]
     assert [e["speculative"] for e in events if e["type"] == "metrics"] == ["committed", "cancelled"]
     assert events[-1] == {"type": "reply_end"}
+
+
+def test_model_marker_reaches_metrics_and_is_never_spoken():
+    engines, _ = fake_engines(reply=(ReplyModel("small"), "Hi there. ", ReplyModel("big"), "All good!"))
+    events = events_of(asyncio.run(run_call(engines, speech_then_pause())))
+    assert [e["text"] for e in events if e["type"] == "caption"] == ["Hi there.", "All good!"]
+    (metrics,) = [e for e in events if e["type"] == "metrics"]
+    assert metrics["llm_model"] == "small"  # The model behind the first token.
+
+
+def test_committed_speculation_reports_its_model():
+    engines, _, hold = speculative_engines(live=["What's up?"],
+                                           speculative=(ReplyModel("small"), "Hi there. ", "All good!"))
+    hold.set()
+    events = events_of(asyncio.run(run_call(engines, speech_then_pause())))
+    (metrics,) = [e for e in events if e["type"] == "metrics"]
+    assert metrics["speculative"] == "committed" and metrics["llm_model"] == "small"

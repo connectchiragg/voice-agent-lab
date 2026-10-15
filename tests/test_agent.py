@@ -8,7 +8,7 @@ import pytest
 from langgraph.checkpoint.memory import InMemorySaver
 
 from app import agent
-from app.llm import ToolCallRequest
+from app.llm import ModelUsed, ToolCallRequest
 
 
 @pytest.fixture
@@ -317,3 +317,14 @@ def test_cancelling_a_turn_during_a_slow_tool_stops_the_tool(graph, monkeypatch)
 
     asyncio.run(scenario())
     assert finished == []
+
+
+def test_answering_model_is_reported_but_not_stored(graph, monkeypatch):
+    scripted(monkeypatch, [ModelUsed("small"), "Hi"])
+    cid = str(uuid4())
+
+    async def collect():
+        return [event async for event in agent.stream_conversation(cid, "hello")]
+
+    assert asyncio.run(collect()) == [{"type": "model", "model": "small"}, {"type": "delta", "text": "Hi"}]
+    assert history(cid) == [("user", "hello", "completed"), ("model", "Hi", "completed")]

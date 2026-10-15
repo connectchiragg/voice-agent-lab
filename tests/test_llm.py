@@ -1,11 +1,15 @@
-"""First-token deadline and single retry for the Groq LLM stream."""
+"""Hedged Groq LLM stream: a fallback model after a short first-token deadline, never a retry."""
 import asyncio
+import time
 from types import SimpleNamespace
 
+import httpx
 import pytest
+from groq import RateLimitError
 
-from app import llm
+from app import groq_api, llm
 from app.groq_api import ProviderError
+from app.llm import ModelUsed
 
 
 def chunk(text):
@@ -13,15 +17,14 @@ def chunk(text):
 
 
 class Stream:
-    def __init__(self, texts, stall=False):
-        self.texts, self.stall, self.closed = texts, stall, False
+    def __init__(self, texts, delay=0.0):
+        self.texts, self.delay, self.closed = texts, delay, False
 
     def __aiter__(self):
         return self.items()
 
     async def items(self):
-        if self.stall:
-            await asyncio.sleep(3600)
+        await asyncio.sleep(self.delay)
         for text in self.texts:
             yield chunk(text)
 
@@ -30,17 +33,37 @@ class Stream:
 
 
 class Client:
-    def __init__(self, streams):
-        self.streams, self.created = list(streams), []
+    """Fake Groq client: each model name has its own queue of streams (or errors)."""
+
+    def __init__(self, **streams):
+        self.streams, self.created, self.models = streams, [], []
         self.chat = SimpleNamespace(completions=SimpleNamespace(create=self.create))
 
     def with_options(self, **options):
         return self
 
     async def create(self, **request):
-        stream = self.streams.pop(0)
+        self.models.append(request["model"])
+        stream = self.streams[request["model"]].pop(0)
+        if isinstance(stream, Exception):
+            raise stream
         self.created.append(stream)
         return stream
+
+
+def rate_limited():
+    response = httpx.Response(429, headers={"retry-after": "0"},
+                              request=httpx.Request("POST", "https://api.groq.com"))
+    return RateLimitError("limit", response=response, body=None)
+
+
+@pytest.fixture(autouse=True)
+def models(monkeypatch):
+    monkeypatch.setenv("GROQ_LLM_MODEL", "big")
+    monkeypatch.setenv("LLM_FALLBACK_MODEL", "small")
+    monkeypatch.setenv("FIRST_TOKEN_DEADLINE_MS", "50")
+    monkeypatch.setattr(llm, "hedge_stats", llm.HedgeStats())
+    monkeypatch.setattr(groq_api, "last_rate_limited", None)
 
 
 async def collect(client, **options):
@@ -48,17 +71,96 @@ async def collect(client, **options):
     return [delta async for delta in llm.stream_model(messages, client=client, **options)]
 
 
-def test_stalled_first_token_is_retried_once():
-    client = Client([Stream(["never"], stall=True), Stream(["Hello", " there"])])
-    assert asyncio.run(collect(client, first_token_s=0.05)) == ["Hello", " there"]
+def test_prompt_primary_is_not_hedged():
+    client = Client(big=[Stream(["Hello", " there"])])
+    assert asyncio.run(collect(client)) == [ModelUsed("big"), "Hello", " there"]
+    assert client.models == ["big"]
+    assert llm.hedge_stats == llm.HedgeStats(requests=1, hedged=0, fallback_won=0)
+
+
+def test_stalled_primary_is_hedged_and_the_first_to_start_wins():
+    client = Client(big=[Stream(["late"], delay=3600)], small=[Stream(["Hello"])])
+    assert asyncio.run(collect(client)) == [ModelUsed("small"), "Hello"]
+    assert client.models == ["big", "small"]  # One fallback request, no retry of "big".
+    assert [stream.closed for stream in client.created] == [True, True]  # Loser closed at once.
+    assert llm.hedge_stats == llm.HedgeStats(requests=1, hedged=1, fallback_won=1)
+
+
+def test_slow_primary_still_wins_if_it_starts_before_the_fallback():
+    client = Client(big=[Stream(["Hi"], delay=0.1)], small=[Stream(["no"], delay=3600)])
+    assert asyncio.run(collect(client)) == [ModelUsed("big"), "Hi"]
+    assert client.models == ["big", "small"]
+    assert client.created[1].closed  # The fallback was abandoned.
+    assert llm.hedge_stats.hedged == 1 and llm.hedge_stats.fallback_won == 0
+
+
+def test_tool_call_fragment_counts_as_the_first_token():
+    class ToolStream(Stream):
+        async def items(self):
+            yield tool_chunk(0, "id-1", "get_time", '{"pla')
+            await asyncio.sleep(0.2)  # Past the deadline, but the model has started.
+            yield tool_chunk(0, None, None, 'ce": "London"}')
+
+    client = Client(big=[ToolStream([])])
+    events = asyncio.run(collect(client))
+    assert events == [ModelUsed("big"), [llm.ToolCallRequest("id-1", "get_time", '{"place": "London"}')]]
+    assert client.models == ["big"]
+
+
+def test_rate_limited_primary_falls_back_without_waiting(monkeypatch):
+    monkeypatch.setenv("FIRST_TOKEN_DEADLINE_MS", "10000")
+    client = Client(big=[rate_limited()], small=[Stream(["Hi"])])
+    started = time.perf_counter()
+    assert asyncio.run(collect(client)) == [ModelUsed("small"), "Hi"]
+    assert time.perf_counter() - started < 1
+    assert groq_api.near_rate_limit()  # Optional speculative calls back off.
+
+
+def test_without_a_fallback_a_rate_limit_fails_fast(monkeypatch):
+    monkeypatch.setenv("LLM_FALLBACK_MODEL", "")
+    client = Client(big=[rate_limited()])
+    with pytest.raises(ProviderError) as error:
+        asyncio.run(collect(client))
+    assert error.value.status_code == 429
+    assert client.models == ["big"]
+
+
+def test_without_a_fallback_a_stall_gives_up_with_a_safe_error(monkeypatch):
+    monkeypatch.setenv("LLM_FALLBACK_MODEL", "")
+    monkeypatch.setattr(llm, "GIVE_UP_S", 0.1)
+    client = Client(big=[Stream([], delay=3600)])
+    with pytest.raises(ProviderError) as error:
+        asyncio.run(collect(client))
+    assert error.value.status_code == 504
+    assert client.models == ["big"] and client.created[0].closed
+
+
+def test_both_stalled_give_up_and_close_both(monkeypatch):
+    monkeypatch.setattr(llm, "GIVE_UP_S", 0.2)
+    client = Client(big=[Stream([], delay=3600)], small=[Stream([], delay=3600)])
+    with pytest.raises(ProviderError) as error:
+        asyncio.run(collect(client))
+    assert error.value.status_code == 504
     assert [stream.closed for stream in client.created] == [True, True]
 
 
-def test_second_stall_fails_with_a_safe_error():
-    client = Client([Stream([], stall=True), Stream([], stall=True)])
-    with pytest.raises(ProviderError) as error:
-        asyncio.run(collect(client, first_token_s=0.05))
-    assert error.value.status_code == 504
+def test_failed_fallback_leaves_the_primary_racing():
+    client = Client(big=[Stream(["Hi"], delay=0.15)], small=[rate_limited()])
+    assert asyncio.run(collect(client)) == [ModelUsed("big"), "Hi"]
+    assert groq_api.last_rate_limited is None  # Only the primary's bucket guards speculation.
+
+
+def test_cancelling_the_caller_closes_both_streams():
+    client = Client(big=[Stream([], delay=3600)], small=[Stream([], delay=3600)])
+
+    async def scenario():
+        task = asyncio.create_task(collect(client))
+        await asyncio.sleep(0.1)  # Past the deadline: both requests are open.
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(scenario())
+    assert [stream.closed for stream in client.created] == [True, True]
 
 
 def test_history_marks_cut_offs_and_drops_unanswered_tool_calls():
@@ -91,43 +193,8 @@ def test_streamed_tool_call_fragments_are_assembled():
             yield tool_chunk(0, "id-1", "get_weather", '{"loca')
             yield tool_chunk(0, None, None, 'tion": "Mysuru"}')
 
-    events = asyncio.run(collect(Client([ToolStream([])])))
-    assert events == [[llm.ToolCallRequest("id-1", "get_weather", '{"location": "Mysuru"}')]]
-
-
-def test_short_rate_limit_wait_is_retried(monkeypatch):
-    import httpx
-    from groq import RateLimitError
-
-    response = httpx.Response(429, headers={"retry-after": "0"},
-                              request=httpx.Request("POST", "https://api.groq.com"))
-    limited = RateLimitError("limit", response=response, body=None)
-
-    class LimitedOnce(Client):
-        async def create(self, **request):
-            if not self.created:
-                self.created.append(None)
-                raise limited
-            return await super().create(**request)
-
-    client = LimitedOnce([Stream(["Hi"])])
-    assert asyncio.run(collect(client)) == ["Hi"]
-
-
-def test_long_rate_limit_wait_fails_fast():
-    import httpx
-    from groq import RateLimitError
-
-    response = httpx.Response(429, headers={"retry-after": "30"},
-                              request=httpx.Request("POST", "https://api.groq.com"))
-
-    class Limited(Client):
-        async def create(self, **request):
-            raise RateLimitError("limit", response=response, body=None)
-
-    with pytest.raises(ProviderError) as error:
-        asyncio.run(collect(Limited([])))
-    assert error.value.status_code == 429
+    events = asyncio.run(collect(Client(big=[ToolStream([])])))
+    assert events == [ModelUsed("big"), [llm.ToolCallRequest("id-1", "get_weather", '{"location": "Mysuru"}')]]
 
 
 def turn(role, text, **extra):

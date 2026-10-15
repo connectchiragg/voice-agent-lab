@@ -109,11 +109,19 @@ for a cancelled speculative start.
 
 - One shared Groq client for the process (connection reuse; first token about
   110-170 ms instead of opening a TLS connection per request).
-- A 429 asking for a wait of 3 s or less is waited out and retried once.
-- Groq occasionally sends no first token. After 3.5 s the request is abandoned
-  and retried once. Root cause is not confirmed: not rate limiting (that returns
-  an immediate 429) and no event-loop blocking was seen. A watchdog logs any
-  event-loop block over 250 ms, and slow first tokens are logged per attempt.
+- Groq occasionally stalls before the first token (seen up to 4 s). Each request
+  is hedged instead of retried: if gpt-oss-120b has sent no text or tool-call
+  delta after `FIRST_TOKEN_DEADLINE_MS` (600 ms), one request with the same
+  prompt and tools goes to `LLM_FALLBACK_MODEL` (gpt-oss-20b, a separate
+  rate-limit bucket). Whichever starts first is used; the other stream is closed
+  at once. A 429, timeout or 5xx from the primary starts the fallback
+  immediately, without waiting. If neither has started after 5 s, the turn fails.
+- Why 600 ms: on the AWS VM (30 requests, this prompt) gpt-oss-120b's first token
+  was p50 466 ms, p75 479, p90 680, max 2.6 s; gpt-oss-20b p50 404, p90 505,
+  max 722. So about one request in eight is hedged.
+- Every request logs the winning model, its first-token time and the running
+  hedge rate; the turn metrics carry `llm_model`. A watchdog logs any event-loop
+  block over 250 ms.
 
 ### Speech-to-text choice (benchmarked, 2026-10-13)
 

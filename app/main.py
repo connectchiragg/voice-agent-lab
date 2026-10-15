@@ -16,7 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
 from app import agent, groq_api
-from app.pipeline import Call, Engines, Samples, TurnDetector
+from app.pipeline import Call, Engines, ReplyEvent, ReplyModel, Samples, TurnDetector
 
 ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT / ".env")
@@ -57,10 +57,12 @@ def load_engines() -> Engines:
     warm.on_speech_end()
 
     async def reply(conversation_id: str, text: str,
-                    committed: asyncio.Event | None = None) -> AsyncIterator[str]:
+                    committed: asyncio.Event | None = None) -> AsyncIterator[ReplyEvent]:
         async for event in agent.stream_conversation(conversation_id, text, committed):
             if event["type"] == "delta":
                 yield event["text"]
+            elif event["type"] == "model":
+                yield ReplyModel(event["model"])
 
     async def synthesize(text: str) -> Samples:
         return await asyncio.to_thread(voice.synthesize, text)

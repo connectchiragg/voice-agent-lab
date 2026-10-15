@@ -1,6 +1,5 @@
-"""Shared Groq client, short rate-limit waits, and safe provider errors (used by the LLM)."""
+"""Shared Groq client, local rate-limit tracking, and safe provider errors (used by the LLM)."""
 
-import asyncio
 import logging
 import os
 import time
@@ -10,7 +9,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from dotenv import load_dotenv
-from groq import APIError, APIStatusError, APITimeoutError, AsyncGroq, RateLimitError
+from groq import APIError, APIStatusError, APITimeoutError, AsyncGroq
 
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 logger = logging.getLogger("uvicorn.error")
@@ -31,7 +30,6 @@ def create_client() -> AsyncGroq:
 
 
 shared_client: AsyncGroq | None = None
-MAX_RATE_LIMIT_WAIT_S = 3.0
 
 
 @asynccontextmanager
@@ -98,15 +96,6 @@ def near_rate_limit() -> bool:
     # Count the optional call itself: it would spend a request and its input tokens.
     return (len(minute) + 1 > NEAR_LIMIT * REQUESTS_PER_MINUTE
             or sum(minute) + input_tokens_estimate > NEAR_LIMIT * INPUT_TOKENS_PER_MINUTE)
-
-
-def rate_limit_wait_s(error: RateLimitError) -> float | None:
-    """Seconds Groq asks us to wait, if short enough to wait out on a live call."""
-    try:
-        wait = float(error.response.headers.get("retry-after", ""))
-    except ValueError:
-        return None
-    return wait if 0 <= wait <= MAX_RATE_LIMIT_WAIT_S else None
 
 
 def provider_error(error: APIError) -> ProviderError:

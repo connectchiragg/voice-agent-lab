@@ -20,7 +20,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from psycopg.conninfo import make_conninfo
 
-from app.llm import ToolCallRequest, stream_model, to_chat_messages
+from app.llm import ModelUsed, ToolCallRequest, stream_model, to_chat_messages
 from app.tools import SCHEMAS, has_side_effects, run_tool
 
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
@@ -68,8 +68,9 @@ class Conversation(TypedDict):
 
 
 class ChatEvent(TypedDict):
-    type: Literal["delta"]
-    text: str
+    type: Literal["delta", "model"]
+    text: NotRequired[str]  # "delta": reply text.
+    model: NotRequired[str]  # "model": the LLM whose output follows, for metrics.
 
 
 ConversationGraph = CompiledStateGraph[Conversation, None, Conversation, Conversation]
@@ -95,7 +96,7 @@ def tool_rounds(messages: list[Message]) -> int:
 
 
 async def generate(messages: list[Message], allow_tools: bool, tool_choice: str | None = None,
-                   ) -> AsyncIterator[str | list[ToolCallRequest]]:
+                   ) -> AsyncIterator[str | list[ToolCallRequest] | ModelUsed]:
     async with aclosing(stream_model(to_chat_messages(messages), SCHEMAS if allow_tools else None,
                                      tool_choice=tool_choice)) as stream:
         async for event in stream:
@@ -117,7 +118,9 @@ async def agent(state: Conversation, config: RunnableConfig) -> Conversation:
     try:
         for tool_choice in (None, "required"):
             async for event in generate(messages, allow_tools, tool_choice):
-                if isinstance(event, str):
+                if isinstance(event, ModelUsed):
+                    writer({"type": "model", "model": event.name})
+                elif isinstance(event, str):
                     text += event
                     writer({"type": "delta", "text": event})
                 else:

@@ -264,6 +264,15 @@ class SpeechChunker:
         return word.group(0).strip().lower() in DANGLING
 
 
+@dataclass(frozen=True)
+class ReplyModel:
+    """In a reply stream: the LLM that generated the text after it (for metrics only)."""
+    name: str
+
+
+ReplyEvent = str | ReplyModel
+
+
 class Transcriber(SpeechListener, Protocol):
     def take_partial(self) -> str | None: ...
 
@@ -281,7 +290,7 @@ class Engines:
     """Everything a call needs, injected so tests can replace any stage."""
     new_transcriber: Callable[[], "Transcriber"]
     new_detector: Callable[["Transcriber"], TurnDetector]  # Wires the transcriber in.
-    reply: Callable[[str, str], AsyncIterator[str]]  # (conversation_id, user text)
+    reply: Callable[[str, str], AsyncIterator[ReplyEvent]]  # (conversation_id, user text)
     synthesize: Callable[[str], Awaitable[Samples]]
     # (conversation_id, user text, assistant text the user actually heard)
     record_interruption: Callable[[str, str, str], Awaitable[None]] = forget_interruption
@@ -289,7 +298,7 @@ class Engines:
     # Optional early reply from the partial transcript: (conversation_id, text,
     # committed). It must store nothing and run no side-effecting tool until
     # `committed` is set. None disables speculation.
-    speculate: Callable[[str, str, asyncio.Event], AsyncIterator[str]] | None = None
+    speculate: Callable[[str, str, asyncio.Event], AsyncIterator[ReplyEvent]] | None = None
     may_speculate: Callable[[], bool] = always  # False near the provider's rate limit.
 
 
@@ -325,7 +334,7 @@ def same_words(first: str, second: str) -> bool:
 class Speculation:
     """A reply started from the live transcript while STT finalises the turn.
 
-    Its deltas (text, filler, anything after tool calls) are buffered, never
+    Its events (text, filler, anything after tool calls) are buffered, never
     spoken, until `commit`; `replay` then yields the buffer and continues live.
     Cancelling closes the LLM stream, so no more tokens are generated.
     """
@@ -335,7 +344,7 @@ class Speculation:
         self.text = text
         self.started = time.perf_counter()
         self.first_token_at: float | None = None
-        self.deltas: list[str] = []
+        self.deltas: list[ReplyEvent] = []
         self.error: Exception | None = None
         self.done = False
         self.cancelled = False
@@ -344,10 +353,10 @@ class Speculation:
         self.task = asyncio.create_task(
             self.run(engines.speculate(conversation_id, text, self.committed)))
 
-    async def run(self, stream: AsyncIterator[str]) -> None:
+    async def run(self, stream: AsyncIterator[ReplyEvent]) -> None:
         try:
             async for delta in stream:
-                if self.first_token_at is None:
+                if self.first_token_at is None and isinstance(delta, str):
                     self.first_token_at = time.perf_counter()
                 self.deltas.append(delta)
                 self.changed.set()
@@ -369,11 +378,11 @@ class Speculation:
             logger.info("Speculative reply cancelled: %s", reason)
         self.task.cancel()
 
-    def commit(self) -> AsyncIterator[str]:
+    def commit(self) -> AsyncIterator[ReplyEvent]:
         self.committed.set()
         return self.replay()
 
-    async def replay(self) -> AsyncIterator[str]:
+    async def replay(self) -> AsyncIterator[ReplyEvent]:
         index = 0
         while True:
             while index < len(self.deltas):
@@ -403,6 +412,7 @@ class TurnMetrics:
     tts_first_audio_ms: float = 0  # Synthesis time of the first spoken piece.
     heard_to_decided_ms: float = 0  # Last speech packet received -> turn ended.
     speculative: str = "skipped"  # Or "committed" / "cancelled".
+    llm_model: str = ""  # The model that produced the reply's first token.
     started: float = field(default_factory=time.perf_counter)  # Final transcript ready.
 
     def first_token(self, at: float) -> None:
@@ -418,7 +428,8 @@ class TurnMetrics:
                 "stt_ms": round(self.stt_ms), "llm_first_token_ms": round(self.llm_first_token_ms or 0),
                 "tts_first_audio_ms": round(self.tts_first_audio_ms),
                 "heard_to_decided_ms": round(self.heard_to_decided_ms),
-                "speculative": self.speculative, "response_ms": round(first_audio_ms)}
+                "speculative": self.speculative, "llm_model": self.llm_model,
+                "response_ms": round(first_audio_ms)}
 
 
 Send = Callable[[dict[str, object] | bytes], Awaitable[None]]
@@ -611,7 +622,7 @@ class Call:
         await self.send({"type": "reply_end"})
 
     def reuse(self, speculation: Speculation | None, text: str,
-              metrics: TurnMetrics) -> AsyncIterator[str] | None:
+              metrics: TurnMetrics) -> AsyncIterator[ReplyEvent] | None:
         """Commit the speculative reply if it answered these words, else cancel it."""
         if speculation is None:
             return None
@@ -625,7 +636,7 @@ class Call:
                     len(speculation.deltas))
         return speculation.commit()
 
-    async def think(self, deltas: AsyncIterator[str], pieces: "asyncio.Queue[str | None]",
+    async def think(self, deltas: AsyncIterator[ReplyEvent], pieces: "asyncio.Queue[str | None]",
                     metrics: TurnMetrics, speculation: Speculation | None = None) -> None:
         """Hand speakable pieces of the streamed LLM reply to TTS.
 
@@ -634,6 +645,9 @@ class Call:
         """
         chunker = SpeechChunker()
         async for delta in deltas:
+            if isinstance(delta, ReplyModel):
+                metrics.llm_model = metrics.llm_model or delta.name
+                continue
             # A committed speculation's first token may predate the final transcript.
             first_at = speculation.first_token_at if speculation is not None else None
             metrics.first_token(first_at or time.perf_counter())

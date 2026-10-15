@@ -144,7 +144,7 @@ async function startCall() {
         } else if (message.type === "metrics") {
           // LLM first token counts from the final transcript: negative when a
           // speculative reply (started from the live text) was committed.
-          metrics.textContent = `Response ${message.response_ms} ms = end of turn ${message.endpoint_ms} + STT ${message.stt_ms} + LLM first token ${message.llm_first_token_ms} + TTS ${message.tts_first_audio_ms} (+ overhead); speech to turn end ${message.heard_to_decided_ms} ms; speculative ${message.speculative}`;
+          metrics.textContent = `Response ${message.response_ms} ms = end of turn ${message.endpoint_ms} + STT ${message.stt_ms} + LLM first token ${message.llm_first_token_ms} (${message.llm_model}) + TTS ${message.tts_first_audio_ms} (+ overhead); speech to turn end ${message.heard_to_decided_ms} ms; speculative ${message.speculative}`;
         } else if (message.type === "error") {
           endCall(current);
           status.textContent = message.error;
