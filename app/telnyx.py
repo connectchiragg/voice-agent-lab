@@ -20,6 +20,12 @@ Per inbound call to the Telnyx number:
    interrupt becomes `clear`, which drops the audio Telnyx has queued.
 5. At `max_call_s` the reply is cut, a goodbye is spoken, and we hang up.
 
+Callbacks (app/callbacks.py): the callback worker dials out with a client_state
+naming the callback. On that call's `call.answered` we report "answered" to its
+workflow and start the media stream (`streaming_start`, same settings and
+one-time token as an answer); from there it is an inbound call that opens with
+the callback greeting. A `call.hangup` before that reports no answer or busy.
+
 Limits from Telnyx's documentation (checked 2026-10-15), and what we derive:
 
 - Trial accounts cap every call at 10 minutes; paid accounts have no documented
@@ -71,7 +77,8 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from fastapi import APIRouter, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from app import g711, memory, recordings
+from app import callbacks, g711, memory, recordings
+from app.callbacks import CallbackCall
 from app.pipeline import Call, Engines, Samples
 from app.transport import SpeechUnavailable, open_call
 
@@ -246,16 +253,25 @@ class CallControl:
         logger.warning("Telnyx %s refused: HTTP %d", action, response.status_code)
         return False
 
-    async def answer(self, call_control_id: str, stream_url: str, command_id: str) -> bool:
-        return await self.command(call_control_id, "answer", {
+    def stream(self, stream_url: str) -> dict[str, Any]:
+        return {
             "stream_url": stream_url,
             "stream_track": "inbound_track",  # The caller only; our own audio is not echoed back.
             "stream_codec": self.codec.name,
             "stream_bidirectional_mode": "rtp",
             "stream_bidirectional_codec": self.codec.name,
             "stream_bidirectional_sampling_rate": self.codec.sample_rate,
-            "command_id": command_id,  # Telnyx ignores a repeat (webhook retry).
-        })
+        }
+
+    async def answer(self, call_control_id: str, stream_url: str, command_id: str) -> bool:
+        # command_id: Telnyx ignores a repeat (webhook retry).
+        return await self.command(call_control_id, "answer",
+                                  {**self.stream(stream_url), "command_id": command_id})
+
+    async def start_stream(self, call_control_id: str, stream_url: str, command_id: str) -> bool:
+        """For an outbound call once answered: the same stream an answer would start."""
+        return await self.command(call_control_id, "streaming_start",
+                                  {**self.stream(stream_url), "command_id": command_id})
 
     async def reject(self, call_control_id: str, command_id: str) -> bool:
         return await self.command(call_control_id, "reject",
@@ -532,6 +548,7 @@ class PendingCall:
     call_control_id: str
     deadline: float  # monotonic
     caller_key: str | None = None  # memory.caller_key_from_phone of `from`; never logged.
+    callback: CallbackCall | None = None  # Set for a callback's outbound call.
 
 
 @dataclass
@@ -566,13 +583,29 @@ class Switchboard:
             logger.info("Phone call rejected: %d calls in progress", self.calls)
             await self.control.reject(call_control_id, event_id)
             return
+        await self.connect(PendingCall(call_control_id, time.monotonic() + CONNECT_TIMEOUT_S,
+                                       caller_key),
+                           lambda url: self.control.answer(call_control_id, url, event_id))
+
+    async def callback_answered(self, call_control_id: str, event_id: str,
+                                caller_key: str | None, callback: CallbackCall) -> None:
+        """A callback's outbound call was answered: stream it like an inbound call."""
+        if self.calls >= self.settings.max_calls:
+            logger.warning("Callback answered with %d calls in progress; hanging up", self.calls)
+            await self.control.hangup(call_control_id)
+            return
+        await self.connect(PendingCall(call_control_id, time.monotonic() + CONNECT_TIMEOUT_S,
+                                       caller_key, callback),
+                           lambda url: self.control.start_stream(call_control_id, url, event_id))
+
+    async def connect(self, call: PendingCall, start: Callable[[str], Awaitable[bool]]) -> None:
+        """Start the call's media stream with a one-time token; hang up if it never connects."""
         token = secrets.token_urlsafe(24)
-        self.pending[token] = PendingCall(call_control_id, time.monotonic() + CONNECT_TIMEOUT_S,
-                                          caller_key)
-        if not await self.control.answer(call_control_id, f"{self.settings.stream_url}?token={token}",
-                                         event_id):
+        self.pending[token] = call
+        if not await start(f"{self.settings.stream_url}?token={token}"):
             self.pending.pop(token, None)
             return
+        call_control_id = call.call_control_id
         logger.info("Phone call answered; waiting for its media stream")
         await asyncio.sleep(CONNECT_TIMEOUT_S)
         if self.pending.pop(token, None) is not None:
@@ -632,6 +665,7 @@ async def webhook(request: Request) -> dict[str, bool]:
     if not board.first_time(event_id):
         return {"ok": True}  # A retry of something already handled.
     call_control_id = str(payload.get("call_control_id", ""))
+    callback = callbacks.callback_of(payload.get("client_state"))  # Our own outbound calls.
     if kind == "call.initiated" and payload.get("direction") == "incoming" and call_control_id:
         # The caller's number becomes their memory key here and is never logged.
         caller_key = memory.caller_key_from_phone(payload.get("from"))
@@ -639,8 +673,16 @@ async def webhook(request: Request) -> dict[str, bool]:
     elif kind == "streaming.failed" and call_control_id:
         logger.warning("Telnyx media stream failed: %s", payload.get("failure_reason"))
         board.spawn(hang_up(board, call_control_id))
+    elif kind == "call.answered" and callback is not None and call_control_id:
+        # The callee is the caller who asked for the callback.
+        caller_key = memory.caller_key_from_phone(payload.get("to"))
+        board.spawn(callbacks.report(callback, call_control_id, "answered"))
+        board.spawn(board.callback_answered(call_control_id, event_id, caller_key, callback))
     elif kind == "call.hangup":
         logger.info("Phone call ended: %s", payload.get("hangup_cause"))
+        if callback is not None and call_control_id:  # Ignored by the workflow once answered.
+            result = callbacks.hangup_result(payload.get("hangup_cause"))
+            board.spawn(callbacks.report(callback, call_control_id, result))
     elif kind == "call.recording.saved" and call_control_id:
         board.spawn(recording_saved(board, call_control_id, payload))
     elif kind == "call.recording.error":
@@ -742,7 +784,10 @@ async def media_stream(socket: WebSocket, token: str = "") -> None:
             return
         # Echo: the carrier cancels line echo, and only the caller's track is
         # streamed to us, so barge-in stays on (unlike a browser without AEC).
-        session.call = await open_call(engines, session.send, str(uuid4()), barge_in=True,
+        conversation_id = str(uuid4())
+        if pending.callback is not None:
+            callbacks.calls[conversation_id] = pending.callback  # For the greeting.
+        session.call = await open_call(engines, session.send, conversation_id, barge_in=True,
                                        caller_id=pending.caller_key)
         logger.info("Phone call connected (%s caller)",
                     "identified" if pending.caller_key else "anonymous")
@@ -771,6 +816,7 @@ async def media_stream(socket: WebSocket, token: str = "") -> None:
         board.live.discard(call_control_id)
         if session.call is not None:
             await session.call.close()
+            callbacks.calls.pop(session.call.conversation_id, None)
         if hang_up_after:
             # Hanging up an already ended call is refused harmlessly (HTTP 422).
             await board.control.hangup(call_control_id)

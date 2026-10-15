@@ -350,13 +350,18 @@ def prompt_block(conversation_id: str) -> str:
 GREETING = "Hi, this is Cadence. How can I help?"
 
 
+def display_name(conversation_id: str) -> str | None:
+    """The caller's name from earlier calls, if known (and not forgotten)."""
+    call = calls.get(conversation_id)
+    return call.memory.display_name if call and call.memory and not call.forgotten else None
+
+
 def greeting(conversation_id: str) -> str:
     """What the assistant says first on a phone call: by name for a known caller.
 
     Fixed text, so it is spoken at once without asking the LLM.
     """
-    call = calls.get(conversation_id)
-    name = call.memory.display_name if call and call.memory and not call.forgotten else None
+    name = display_name(conversation_id)
     return f"Hi {name}, this is Cadence. How can I help?" if name else GREETING
 
 

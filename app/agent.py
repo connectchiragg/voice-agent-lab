@@ -167,9 +167,10 @@ async def tools(state: Conversation, config: RunnableConfig) -> Conversation:
     committed = pending_commit(config)
     if committed is not None and any(has_side_effects(call["name"]) for call in calls):
         await committed.wait()
-    caller_key = memory.caller_of(config["configurable"]["thread_id"])
+    conversation_id = config["configurable"]["thread_id"]
+    caller_key = memory.caller_of(conversation_id)
     running = asyncio.ensure_future(asyncio.gather(
-        *(run_tool(call["name"], call["arguments"], caller_key) for call in calls)))
+        *(run_tool(call["name"], call["arguments"], caller_key, conversation_id) for call in calls)))
     try:  # Cancelled at any point (barge-in, a cancelled speculation): stop the tools too.
         done, _ = await asyncio.wait({running}, timeout=FILLER_AFTER_S)
         if not done and not request["parts"][0]["text"].strip():

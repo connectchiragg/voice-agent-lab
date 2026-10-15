@@ -15,7 +15,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from app import access, agent, groq_api, memory, recordings, telnyx, webrtc
+from app import access, agent, callbacks, groq_api, memory, recordings, telnyx, webrtc
 from app.deepgram import AuraSpeaker, DeepgramSettings, FluxListener
 from app.pipeline import Call, Engines, ReplyEvent, ReplyModel
 from app.transport import SpeechUnavailable, apply_player_event, open_call
@@ -61,7 +61,7 @@ def load_engines(sample_rate: int | None = None) -> Engines | None:
                    begin_call=memory.begin_call,
                    end_call=lambda conversation_id: memory.end_call(conversation_id,
                                                                     agent.load_history),
-                   greeting=memory.greeting, record_greeting=agent.record_greeting)
+                   greeting=callbacks.greeting, record_greeting=agent.record_greeting)
 
 
 async def watch_event_loop(interval_s: float = 0.1, threshold_s: float = 0.25) -> None:

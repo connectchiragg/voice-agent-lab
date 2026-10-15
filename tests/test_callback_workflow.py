@@ -171,6 +171,20 @@ def test_cancel_ends_it_without_calling():
     assert run_with_worker(test).dials == []
 
 
+def test_cancel_while_ringing_ends_at_once():
+    async def test(env, telnyx):
+        with env.auto_time_skipping_disabled():
+            now = await env.get_current_time()
+            due = next_local(now, 10)
+            handle = await start(env, due)
+            await dial_after(env, telnyx, due - now + timedelta(seconds=1))
+            await handle.signal(CallbackWorkflow.cancel)
+            status = await handle.result()
+        assert status.state == "cancelled"
+        assert [attempt.result for attempt in status.attempts] == ["cancelled"]
+    assert len(run_with_worker(test).dials) == 1
+
+
 def test_quiet_hours_are_refused_at_start_and_on_reschedule():
     async def test(env, telnyx):
         now = await env.get_current_time()

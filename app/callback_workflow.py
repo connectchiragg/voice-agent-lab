@@ -213,12 +213,12 @@ class CallbackWorkflow:
         except ActivityError:
             return "failed"
         try:
-            await workflow.wait_condition(lambda: self.result is not None,
+            await workflow.wait_condition(lambda: self.result is not None or self.cancelled,
                                           timeout=RESULT_TIMEOUT)
         except TimeoutError:
             return "no_answer"
-        assert self.result is not None
-        return self.result.result
+        # Cancelled while ringing: the ring is left to time out; nothing more is tried.
+        return self.result.result if self.result is not None else "cancelled"
 
     def set_due(self, due: datetime) -> None:
         self.due = due

@@ -14,8 +14,9 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
+from temporalio.service import RPCError
 
-from app import memory
+from app import callbacks, memory
 
 logger = logging.getLogger("uvicorn.error")
 TOOL_TIMEOUT_S = 5.0
@@ -51,6 +52,8 @@ class Tool:
     # True for tools about the caller: `run` also gets `caller_key` (None: unknown caller),
     # which the model can neither see nor set.
     takes_caller: bool = False
+    # True for tools about this call: `run` also gets `caller_key` and `conversation_id`.
+    takes_call: bool = False
 
     def schema(self) -> dict[str, Any]:
         return {"type": "function", "function": {
@@ -147,6 +150,33 @@ TOOLS = {tool.name: tool for tool in (
          "remember this call. Only when the caller asks you to forget them; then confirm.",
          {"type": "object", "properties": {}},
          forget_me, side_effects=True, takes_caller=True),
+    Tool("schedule_callback",
+         "Book a phone call back to this caller at a time they choose, about something they "
+         "name. Phone callers only. First say the exact day and time back to them and get a "
+         "yes; then call this once. Calls are made from 9 am to 9 pm their time.",
+         {"type": "object", "properties": {
+             "when": {"type": "string", "description": "The time in the caller's words, e.g. "
+                      "'tomorrow at 5 pm', 'in 2 hours', 'Friday 10:30 am', or local ISO "
+                      "'2026-10-16T17:00'"},
+             "reason": {"type": "string", "description": "What to call back about, a few words, "
+                        "e.g. 'the weekend weather in Mysuru'"},
+             "time_zone": {"type": "string", "description": "IANA zone, only if the caller says "
+                           "they are somewhere other than your local time zone"}},
+          "required": ["when", "reason"]},
+         callbacks.schedule_callback, side_effects=True, takes_call=True),
+    Tool("reschedule_callback",
+         "Move this caller's booked callback to another time, after confirming the new time "
+         "with them.",
+         {"type": "object", "properties": {"when": {
+             "type": "string", "description": "The new time, as for schedule_callback"}},
+          "required": ["when"]},
+         callbacks.reschedule_callback, side_effects=True, takes_call=True),
+    Tool("cancel_callback", "Cancel this caller's booked callback, when they ask to.",
+         {"type": "object", "properties": {}},
+         callbacks.cancel_callback, side_effects=True, takes_call=True),
+    Tool("get_callback", "This caller's booked callback, or how the last one went.",
+         {"type": "object", "properties": {}},
+         callbacks.get_callback, takes_call=True),
 )}
 SCHEMAS = [tool.schema() for tool in TOOLS.values()]
 
@@ -157,7 +187,8 @@ def has_side_effects(name: str) -> bool:
     return tool is not None and tool.side_effects
 
 
-async def run_tool(name: str, arguments: str, caller_key: str | None = None) -> str:
+async def run_tool(name: str, arguments: str, caller_key: str | None = None,
+                   conversation_id: str | None = None) -> str:
     """Run one tool call from the model and return its JSON result text."""
     started = time.perf_counter()
     try:
@@ -167,6 +198,8 @@ async def run_tool(name: str, arguments: str, caller_key: str | None = None) -> 
             raise ValueError("arguments must be a JSON object")
         if tool.takes_caller:
             args = {**args, "caller_key": caller_key}  # Overrides anything the model sent.
+        if tool.takes_call:
+            args = {**args, "caller_key": caller_key, "conversation_id": conversation_id}
         result = await asyncio.wait_for(tool.run(**args), TOOL_TIMEOUT_S)
     except KeyError:
         result = {"error": f"There is no tool called {name!r}."}
@@ -176,7 +209,7 @@ async def run_tool(name: str, arguments: str, caller_key: str | None = None) -> 
         logger.warning("Tool %s failed: %s returned %d", name, error.request.url.host,
                        error.response.status_code)
         result = {"error": f"{name} is unavailable right now."}
-    except (TimeoutError, httpx.HTTPError) as error:
+    except (TimeoutError, httpx.HTTPError, RPCError) as error:  # RPCError: Temporal.
         logger.warning("Tool %s failed: %s", name, type(error).__name__)
         result = {"error": f"{name} is unavailable right now."}
     logger.info("Tool %s took %.0f ms", name, (time.perf_counter() - started) * 1000)
