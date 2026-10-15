@@ -115,6 +115,14 @@ Inbound calls to the Telnyx number reach `/telnyx/webhook` (Call Control app
 paths bypass Cloudflare Access: the webhook is ed25519-signed and the stream
 needs a one-time per-call token. Set the three `TELNYX_*` variables in `.env`.
 
+- Audio is wideband: the call is answered with L16 at 16 kHz both ways
+  (`stream_codec`, `stream_bidirectional_codec`, `stream_bidirectional_sampling_rate`),
+  and Flux and Aura run at 16 kHz linear16, so our side never resamples. L16
+  payloads are big-endian (RTP network order). `TELNYX_CODEC=PCMU` returns to
+  8 kHz µ-law. Each call logs what Telnyx actually sends:
+  `Phone media: caller audio L16 16000 Hz, replies L16 16000 Hz`. A PSTN caller's
+  own leg is usually still 8 kHz G.711, which Telnyx transcodes; that leg caps
+  what the caller can hear.
 - An unsigned `curl -X POST https://<host>/telnyx/webhook` returns 401.
 - On a trial account only verified numbers can call in (Verified Numbers in the
   portal), and calls are cut at 10 minutes: we say goodbye at 9.
@@ -154,6 +162,7 @@ To roll back, run the same `docker rm -f` and `docker run` with the rollback tag
 | `HOST`, `PORT` | `0.0.0.0`, `7860` in the image | Address uvicorn binds |
 | `SPECULATIVE_LLM` | `1` | Start the LLM at Flux's EagerEndOfTurn; `0` turns it off |
 | `TELNYX_API_KEY`, `TELNYX_PUBLIC_KEY`, `TELNYX_STREAM_URL` | unset | Phone calls on the Telnyx number: Call Control key, webhook-signing public key (base64), and `wss://<host>/ws/telnyx`. Unset: `/telnyx/webhook` answers 503 |
+| `TELNYX_CODEC` | `L16` | Phone audio both ways: `L16` (16 kHz) or `PCMU` (8 kHz) |
 | `TELNYX_MAX_CALL_S`, `TELNYX_MAX_CALLS` | `540`, `2` | Per phone call: goodbye and hang up after this long (trial accounts are cut at 600 s); concurrent phone calls, beyond which callers get busy |
 | `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_PASSWORD` | `127.0.0.1`, `5432`, unset | Optional history store; in memory when unset |
 | `CF_TURN_KEY_ID`, `CF_TURN_KEY_API_TOKEN` | unset | Cloudflare Realtime TURN key for WebRTC media; run time only. Unset: public STUN only (see below) |

@@ -30,8 +30,8 @@ SPECULATIVE_LLM = os.getenv("SPECULATIVE_LLM", "1") == "1"
 def load_engines(sample_rate: int | None = None) -> Engines | None:
     """Deepgram Flux (STT) and Aura-2 (TTS) per call; None without an API key.
 
-    `sample_rate` sets both directions (phone calls: 8 kHz); by default the
-    browser's 16 kHz in and 24 kHz out.
+    `sample_rate` sets both directions (phone calls: 16 kHz, or 8 kHz with
+    TELNYX_CODEC=PCMU); by default the browser's 16 kHz in and 24 kHz out.
     """
     if not os.getenv("DEEPGRAM_API_KEY"):
         logger.warning("DEEPGRAM_API_KEY is not set; calls are refused.")
@@ -78,7 +78,7 @@ async def watch_event_loop(interval_s: float = 0.1, threshold_s: float = 0.25) -
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.engines = load_engines()
-    app.state.phone_engines = load_engines(telnyx.SAMPLE_RATE)
+    app.state.phone_engines = load_engines(telnyx.phone_codec().sample_rate)
     watcher = asyncio.create_task(watch_event_loop())
     try:
         # Exits in reverse: calls close first, then their summaries finish with the LLM

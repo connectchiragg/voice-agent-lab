@@ -19,8 +19,8 @@ from starlette.websockets import WebSocketDisconnect
 
 from app import g711, main, telnyx
 from app.deepgram import DeepgramSettings
-from app.telnyx import (CallControl, PendingCall, PhoneSession, Playout, Switchboard,
-                        TelnyxSettings, signature_valid)
+from app.telnyx import (L16, PCMU, CallControl, PendingCall, PhoneSession, Playout,
+                        Switchboard, TelnyxSettings, signature_valid)
 from tests.test_app import TalkingListener
 from tests.test_pipeline import make_engines
 
@@ -141,7 +141,7 @@ def test_webhook_is_refused_when_phone_calls_are_not_configured(monkeypatch):
     assert post_event(TestClient(main.app), call_initiated()).status_code == 503
 
 
-def test_incoming_call_is_answered_with_a_bidirectional_pcmu_stream(board):
+def test_incoming_call_is_answered_with_a_bidirectional_wideband_l16_stream(board):
     with webhook_client(board) as client:
         assert post_event(client, call_initiated()).json() == {"ok": True}
         assert post_event(client, call_initiated()).status_code == 200  # A retry: ignored.
@@ -152,9 +152,9 @@ def test_incoming_call_is_answered_with_a_bidirectional_pcmu_stream(board):
         assert len(token) >= 32 and token in board.pending
         # The caller's number travels with the token as their memory key.
         assert board.pending[token].caller_key == "tel:+15550001111"
-        assert body == {"stream_track": "inbound_track", "stream_codec": "PCMU",
-                        "stream_bidirectional_mode": "rtp", "stream_bidirectional_codec": "PCMU",
-                        "command_id": "evt-1"}
+        assert body == {"stream_track": "inbound_track", "stream_codec": "L16",
+                        "stream_bidirectional_mode": "rtp", "stream_bidirectional_codec": "L16",
+                        "stream_bidirectional_sampling_rate": 16000, "command_id": "evt-1"}
         # The stream never connects: the call is hung up and the token expires.
         wait_for(lambda: len(board.requests) == 2)
         assert board.requests[1][0] == f"/v2/calls/{CALL_ID}/actions/hangup"
@@ -182,15 +182,51 @@ def test_settings_need_key_public_key_and_stream_url(monkeypatch):
     monkeypatch.setenv("TELNYX_MAX_CALL_S", "300")
     settings = TelnyxSettings.from_env()
     assert settings is not None and settings.max_call_s == 300 and settings.max_calls == 2
+    assert settings.codec is L16
+    monkeypatch.setenv("TELNYX_CODEC", "pcmu")  # The narrowband fallback.
+    assert TelnyxSettings.from_env().codec is PCMU
+    monkeypatch.setenv("TELNYX_CODEC", "G729")
+    with pytest.raises(ValueError):
+        TelnyxSettings.from_env()
 
 
-def test_phone_engines_run_deepgram_at_8_khz_both_ways(monkeypatch):
+def test_the_pcmu_fallback_answers_in_pcmu_at_8_khz():
+    requests = []
+
+    def handle(request):
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json={})
+
+    async def scenario():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+            await CallControl(client, "k", PCMU).answer(CALL_ID, STREAM_URL, "evt-1")
+    asyncio.run(scenario())
+    assert (requests[0]["stream_codec"], requests[0]["stream_bidirectional_codec"],
+            requests[0]["stream_bidirectional_sampling_rate"]) == ("PCMU", "PCMU", 8000)
+
+
+def test_l16_is_big_endian_16_bit_and_round_trips():
+    # Fixture: 0x4000 = +16384 (0.5), 0xC000 = -16384 (-0.5), 0x7FFF, 0x8000, in network order.
+    payload = bytes([0x40, 0x00, 0xC0, 0x00, 0x7F, 0xFF, 0x80, 0x00])
+    assert L16.decode(payload).tolist() == [0.5, -0.5, 32767 / 32768, -1.0]
+    assert L16.encode(np.array([0.5, -0.5, 1.0, -1.0], np.float32)) == payload  # 1.0 clips.
+    tone = (0.5 * np.sin(2 * np.pi * 440 * np.arange(320) / 16000)).astype(np.float32)
+    assert np.abs(L16.decode(L16.encode(tone)) - tone).max() < 1 / 32768
+    assert len(L16.encode(tone)) == 640  # A 20 ms frame at 16 kHz.
+    with pytest.raises(ValueError):
+        L16.decode(b"\x00\x01\x02")
+
+
+def test_phone_engines_run_deepgram_at_16_khz_both_ways(monkeypatch):
     monkeypatch.setenv("DEEPGRAM_API_KEY", "k")
-    engines = main.load_engines(telnyx.SAMPLE_RATE)
-    assert engines is not None and engines.output_sample_rate == 8000
-    settings = DeepgramSettings(api_key="k", input_sample_rate=8000, output_sample_rate=8000)
-    assert "sample_rate=8000" in settings.flux_url() and "sample_rate=8000" in settings.aura_url()
-    assert "encoding=linear16" in settings.flux_url()
+    monkeypatch.delenv("TELNYX_CODEC", raising=False)
+    engines = main.load_engines(telnyx.phone_codec().sample_rate)
+    assert engines is not None and engines.output_sample_rate == 16000
+    settings = DeepgramSettings(api_key="k", input_sample_rate=16000, output_sample_rate=16000)
+    assert "sample_rate=16000" in settings.flux_url() and "sample_rate=16000" in settings.aura_url()
+    assert "encoding=linear16" in settings.flux_url() and "encoding=linear16" in settings.aura_url()
+    monkeypatch.setenv("TELNYX_CODEC", "PCMU")
+    assert main.load_engines(telnyx.phone_codec().sample_rate).output_sample_rate == 8000
 
 
 # Playout: pacing, marks and clear.
@@ -204,7 +240,7 @@ class Clock:
 
 
 def test_playout_paces_by_marks_and_clear_reports_what_was_heard():
-    playout = Playout(8000)
+    playout = Playout(PCMU)
     playout.start_reply()
     playout.push(np.full(16000, 0.1, np.float32))  # 2 s of reply.
     sent = []
@@ -222,8 +258,19 @@ def test_playout_paces_by_marks_and_clear_reports_what_was_heard():
     assert playout.heard_by(0.45) == 2800
 
 
+def test_l16_playout_sends_100_ms_chunks_of_16_bit_samples():
+    playout = Playout(L16)
+    playout.push(np.full(4000, 0.25, np.float32))  # 0.25 s at 16 kHz.
+    sent = []
+    while (message := playout.next_chunk(0.0)) is not None:
+        sent.append(message)
+    assert [len(payload) for payload, _ in sent] == [3200, 3200, 1600]
+    assert sent[0][0] == L16.encode(np.full(1600, 0.25, np.float32))
+    assert [mark for _, mark in sent] == ["0:1:1600", "0:2:3200", "0:3:4000"]
+
+
 def test_playout_without_marks_follows_the_clock_and_restarts_after_silence():
-    playout = Playout(8000)
+    playout = Playout(PCMU)
     playout.push(np.zeros(800, np.float32))
     assert playout.next_chunk(10.0) is not None
     assert playout.playing(10.05) and not playout.playing(10.1)
@@ -253,7 +300,8 @@ def test_session_batches_80_ms_for_flux_and_turns_interrupt_into_clear():
         async def to_telnyx(message):
             out.append(message)
 
-        session = PhoneSession(to_telnyx, clock=clock)
+        session = PhoneSession(to_telnyx, PCMU, clock=clock)
+        session.inbound = PCMU
         session.call = RecordingCall()
         frame = base64.b64encode(g711.encode(np.full(160, 0.1, np.float32))).decode()
         for chunk in range(1, 6):
@@ -291,6 +339,30 @@ def test_session_batches_80_ms_for_flux_and_turns_interrupt_into_clear():
     asyncio.run(scenario())
 
 
+def test_wideband_session_batches_80_ms_at_16_khz_and_upsamples_a_pcmu_stream():
+    async def scenario():
+        async def to_telnyx(message):
+            pass
+
+        session = PhoneSession(to_telnyx, L16)
+        session.call = RecordingCall()
+        frame = base64.b64encode(L16.encode(np.full(320, 0.1, np.float32))).decode()
+        for _ in range(4):
+            await session.handle({"event": "media", "media": {"track": "inbound", "payload": frame}})
+        assert [len(packet) for packet in session.call.heard] == [1280]  # 80 ms at 16 kHz.
+        assert session.call.heard[0] == pytest.approx(0.1, abs=1e-4)
+        session.inbound = PCMU  # Telnyx sent narrowband after all: resampled to 16 kHz.
+        frame = base64.b64encode(g711.encode(np.full(160, 0.1, np.float32))).decode()
+        for _ in range(4):
+            await session.handle({"event": "media", "media": {"track": "inbound", "payload": frame}})
+        assert [len(packet) for packet in session.call.heard] == [1280, 1280]
+        assert session.call.heard[1] == pytest.approx(0.1, abs=0.005)
+        with pytest.raises(ValueError):
+            session.inbound = L16
+            await session.hear(base64.b64encode(b"\x00\x01\x02").decode())
+    asyncio.run(scenario())
+
+
 def test_oversized_or_invalid_media_is_refused():
     async def scenario():
         async def to_telnyx(message):
@@ -307,7 +379,7 @@ def test_oversized_or_invalid_media_is_refused():
 
 # The media stream WebSocket, end to end with fake Deepgram stages.
 
-def start_message(call_control_id=CALL_ID, encoding="PCMU", rate=8000):
+def start_message(call_control_id=CALL_ID, encoding="L16", rate=16000):
     return {"event": "start", "sequence_number": "1", "stream_id": "stream-1",
             "start": {"user_id": "u-1", "call_control_id": call_control_id,
                       "call_session_id": "session-1", "from": "+15550001111", "to": "+12288888007",
@@ -316,7 +388,7 @@ def start_message(call_control_id=CALL_ID, encoding="PCMU", rate=8000):
 
 
 def media_frames(count, value=0.1):
-    payload = base64.b64encode(g711.encode(np.full(160, value, np.float32))).decode()
+    payload = base64.b64encode(L16.encode(np.full(320, value, np.float32))).decode()
     return [{"event": "media", "sequence_number": str(index + 2), "stream_id": "stream-1",
              "media": {"track": "inbound", "chunk": str(index + 1), "timestamp": str(index * 160),
                        "payload": payload}} for index in range(count)]
@@ -326,7 +398,7 @@ def media_frames(count, value=0.1):
 def phone_engines(monkeypatch):
     engines, seen = make_engines()
     engines.new_listener = TalkingListener  # A turn after its third packet.
-    engines.output_sample_rate = 8000
+    engines.output_sample_rate = 16000
     monkeypatch.setattr(main.app.state, "phone_engines", engines, raising=False)
     return seen
 
@@ -340,15 +412,16 @@ def test_stream_needs_a_valid_one_time_token(board, phone_engines):
         assert error.value.code == 1008
 
 
-def test_phone_call_hears_a_turn_and_replies_in_mulaw_with_marks(board, phone_engines):
+def test_phone_call_hears_a_turn_and_replies_in_l16_with_marks(board, phone_engines, caplog):
     board.pending["tok"] = PendingCall(CALL_ID, time.monotonic() + 5)
-    with TestClient(main.app).websocket_connect("/ws/telnyx?token=tok") as socket:
+    with (caplog.at_level("INFO", logger="uvicorn.error"),
+          TestClient(main.app).websocket_connect("/ws/telnyx?token=tok") as socket):
         socket.send_json({"event": "connected", "version": "1.0.0"})
         socket.send_json(start_message())
         for frame in media_frames(12):  # 3 Flux packets of 80 ms.
             socket.send_json(frame)
         audio, marks = b"", []
-        while len(marks) < 15:  # Two fake Aura segments of 6000 samples, in 800-sample chunks.
+        while len(audio) < 24000:  # Two fake Aura segments of 6000 samples, 16-bit.
             message = socket.receive_json()
             if message["event"] == "media":
                 audio += base64.b64decode(message["media"]["payload"])
@@ -356,11 +429,12 @@ def test_phone_call_hears_a_turn_and_replies_in_mulaw_with_marks(board, phone_en
                 marks.append(message["mark"]["name"])
                 socket.send_json({"event": "mark", "sequence_number": "99", "stream_id": "stream-1",
                                   "mark": {"name": marks[-1]}})
-        assert audio == g711.encode(np.full(12000, 0.25, np.float32))
-        assert len(marks) == 15
+        assert audio == L16.encode(np.full(12000, 0.25, np.float32))
+        assert len(marks) >= 7  # Each 1600-sample chunk is followed by its mark.
         socket.send_json({"event": "stop", "sequence_number": "100", "stream_id": "stream-1",
                           "stop": {"user_id": "u-1", "call_control_id": CALL_ID}})
     assert phone_engines["replies"] == ["what's up"]
+    assert "caller audio L16 16000 Hz, replies L16 16000 Hz" in caplog.text
     assert CALL_ID not in board.live
     time.sleep(0.05)
     assert board.requests == []  # Telnyx ended the call: no hangup from us.
@@ -369,14 +443,15 @@ def test_phone_call_hears_a_turn_and_replies_in_mulaw_with_marks(board, phone_en
 def test_stream_for_another_call_or_codec_is_refused_and_hung_up(board, phone_engines):
     client = TestClient(main.app)
     for token, start in (("a", start_message("v3:someone-else")),
-                         ("b", start_message(encoding="L16", rate=16000))):
+                         ("b", start_message(encoding="L16", rate=8000)),
+                         ("c", start_message(encoding="G722", rate=8000))):
         board.pending[token] = PendingCall(CALL_ID, time.monotonic() + 5)
         with client.websocket_connect(f"/ws/telnyx?token={token}") as socket:
             socket.send_json(start)
             with pytest.raises(WebSocketDisconnect) as error:
                 socket.receive_json()
             assert error.value.code == 1008
-    wait_for(lambda: len(board.requests) == 2)
+    wait_for(lambda: len(board.requests) == 3)
     assert {path for path, _, _ in board.requests} == {f"/v2/calls/{CALL_ID}/actions/hangup"}
 
 
@@ -394,7 +469,7 @@ def test_time_limit_says_goodbye_then_hangs_up(board, phone_engines, monkeypatch
                     audio += base64.b64decode(message["media"]["payload"])
                 elif message["event"] == "mark":
                     socket.send_json({"event": "mark", "mark": {"name": message["mark"]["name"]}})
-        assert len(audio) == 6000
+        assert len(audio) == 12000  # 6000 samples of 16-bit L16.
     assert phone_engines["speakers"][0].segments == [telnyx.GOODBYE]
     assert phone_engines["replies"] == []  # Nothing heard after the limit is answered.
     wait_for(lambda: len(board.requests) == 1)
@@ -419,7 +494,7 @@ def test_the_caller_key_reaches_open_call_and_the_greeting_plays_first(board, ph
         with TestClient(main.app).websocket_connect("/ws/telnyx?token=tok") as socket:
             socket.send_json(start_message())
             audio, marks = b"", 0
-            while marks < 8:  # The greeting: one fake Aura segment, before the caller speaks.
+            while len(audio) < 12000:  # The greeting: one fake Aura segment, before the caller speaks.
                 message = socket.receive_json()
                 if message["event"] == "media":
                     audio += base64.b64decode(message["media"]["payload"])

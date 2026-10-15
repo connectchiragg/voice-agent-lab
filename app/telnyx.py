@@ -4,15 +4,18 @@ Per inbound call to the Telnyx number:
 
 1. Telnyx POSTs `call.initiated` to /telnyx/webhook, signed with ed25519; unsigned
    or stale requests are refused. We answer with a media stream to
-   `TELNYX_STREAM_URL?token=<one-time token>`, PCMU both ways, RTP mode
-   (bidirectional), or reject the call when the server is full.
-2. Telnyx opens /ws/telnyx: `connected`, `start`, then `media` frames of 8 kHz
-   µ-law. These are decoded (no resampling: Flux listens at 8 kHz) and handed to
-   the pipeline in `INPUT_BATCH_S` packets.
-3. Reply audio (Aura at 8 kHz) is µ-law encoded and sent in `CHUNK_S` media
-   messages, each followed by a `mark`. Telnyx returns a mark when the audio
-   before it has played, so marks say what the caller has heard. Sending runs at
-   most `LEAD_S` ahead of that.
+   `TELNYX_STREAM_URL?token=<one-time token>`, in RTP mode (bidirectional), in
+   the TELNYX_CODEC both ways: L16 at 16 kHz (wideband, the default) or PCMU at
+   8 kHz. Or we reject the call when the server is full.
+2. Telnyx opens /ws/telnyx: `connected`, `start` (its `media_format` says what
+   Telnyx actually sends; logged), then 20 ms `media` frames. These are decoded,
+   resampled only if Telnyx sent another rate than the engines', and handed to
+   the pipeline in `INPUT_BATCH_S` packets. Flux and Aura run at the codec's
+   rate, so wideband audio is never resampled.
+3. Reply audio (Aura, linear16) is encoded in the TELNYX_CODEC and sent in
+   `CHUNK_S` media messages, each followed by a `mark`. Telnyx returns a mark
+   when the audio before it has played, so marks say what the caller has heard.
+   Sending runs at most `LEAD_S` ahead of that.
 4. Barge-in (Flux StartOfTurn while the assistant speaks): the pipeline's
    interrupt becomes `clear`, which drops the audio Telnyx has queued.
 5. At `max_call_s` the reply is cut, a goodbye is spoken, and we hang up.
@@ -23,7 +26,13 @@ Limits from Telnyx's documentation (checked 2026-10-15), and what we derive:
   limit on an answered inbound call (dial's own `time_limit_secs` is at most 4 h).
   TELNYX_MAX_CALL_S defaults to 540 s so the goodbye always beats the trial cap.
 - One bidirectional RTP stream per call. Outbound media chunks must be 20 ms to
-  30 s of audio; CHUNK_S is 100 ms. Telnyx may answer floods with
+  30 s of audio; CHUNK_S is 100 ms.
+- Codecs (`stream_codec`, `stream_bidirectional_codec`): PCMU, PCMA, G722 (all
+  8 kHz), OPUS, AMR-WB, and L16 at 16 kHz, with `stream_bidirectional_sampling_rate`
+  (default 8000). Payloads are base64 RTP payloads without headers. Telnyx does
+  not state L16's byte order; RTP L16 is network order (RFC 3551), as other
+  Telnyx clients decode it. The caller's own leg may still be 8 kHz (PSTN): then
+  Telnyx transcodes, and only our side of the path is wideband. Telnyx may answer floods with
   `rate_limit_reached`, so we pace rather than dump a whole reply at once.
 - Webhooks: 2xx is success; 408, 429 and 5xx are retried (the same `data.id`).
   We answer from a background task and return 200 at once, and skip repeats.
@@ -62,7 +71,6 @@ from app.transport import SpeechUnavailable, open_call
 logger = logging.getLogger("uvicorn.error")
 # Overridable only so the local fake-Telnyx harness can stand in for Call Control.
 API_URL = os.getenv("TELNYX_API_URL", "https://api.telnyx.com/v2")
-SAMPLE_RATE = 8000  # PCMU, Telnyx's default stream codec, which Flux and Aura both take natively.
 INPUT_BATCH_S = 0.08  # Deepgram recommends 80 ms chunks for Flux.
 CHUNK_S = 0.1  # Reply audio per media message.
 LEAD_S = 1.0  # Most reply audio sent but not yet heard; `clear` drops it on barge-in.
@@ -71,7 +79,49 @@ SIGNATURE_TOLERANCE_S = 300
 CONNECT_TIMEOUT_S = 10  # From answering to the media stream's `start`.
 GOODBYE = "We've reached the time limit for this call. Thanks for calling, goodbye!"
 GOODBYE_TIMEOUT_S = 15  # Synthesis plus playback of the goodbye, at most.
-MAX_PAYLOAD_CHARS = 16000  # About 1.5 s of base64 µ-law: far above Telnyx's 20 ms frames.
+MAX_PAYLOAD_CHARS = 16000  # 0.37 s of base64 L16 (1.5 s of µ-law): far above 20 ms frames.
+
+
+def l16_decode(payload: bytes) -> Samples:
+    """L16 (16-bit signed, big-endian, as RTP sends it) to float32 in [-1, 1)."""
+    if len(payload) % 2:
+        raise ValueError("L16 payload of an odd length")
+    return np.frombuffer(payload, dtype=">i2").astype(np.float32) / 32768
+
+
+def l16_encode(samples: Samples) -> bytes:
+    pcm = np.clip(np.round(np.asarray(samples, dtype=np.float32) * 32768), -32768, 32767)
+    return pcm.astype(">i2").tobytes()
+
+
+@dataclass(frozen=True)
+class PhoneCodec:
+    name: str  # As Telnyx names it, in `media_format.encoding` and on answer.
+    sample_rate: int
+    decode: Callable[[bytes], Samples]
+    encode: Callable[[Samples], bytes]
+
+
+L16 = PhoneCodec("L16", 16000, l16_decode, l16_encode)
+PCMU = PhoneCodec("PCMU", 8000, g711.decode, g711.encode)  # Fallback: TELNYX_CODEC=PCMU.
+CODECS = {codec.name: codec for codec in (L16, PCMU)}
+
+
+def phone_codec() -> PhoneCodec:
+    """TELNYX_CODEC: L16 (16 kHz, default) or PCMU (8 kHz)."""
+    name = os.getenv("TELNYX_CODEC", L16.name).strip().upper()
+    if name not in CODECS:
+        raise ValueError(f"TELNYX_CODEC must be one of {', '.join(CODECS)}")
+    return CODECS[name]
+
+
+def resample(samples: Samples, source_rate: int, target_rate: int) -> Samples:
+    """Linear interpolation; only for a stream Telnyx sent at another rate than asked."""
+    if source_rate == target_rate or not len(samples):
+        return samples
+    count = round(len(samples) * target_rate / source_rate)
+    positions = np.arange(count) * (source_rate / target_rate)
+    return np.interp(positions, np.arange(len(samples)), samples).astype(np.float32)
 
 
 @dataclass(frozen=True)
@@ -81,6 +131,7 @@ class TelnyxSettings:
     stream_url: str  # wss://<public host>/ws/telnyx
     max_call_s: int = 540
     max_calls: int = 2
+    codec: PhoneCodec = L16  # Asked for both ways; the engines run at its rate.
 
     @classmethod
     def from_env(cls) -> "TelnyxSettings | None":
@@ -94,7 +145,8 @@ class TelnyxSettings:
                    public_key=load_public_key(os.environ["TELNYX_PUBLIC_KEY"]),
                    stream_url=os.environ["TELNYX_STREAM_URL"],
                    max_call_s=int(os.getenv("TELNYX_MAX_CALL_S", cls.max_call_s)),
-                   max_calls=int(os.getenv("TELNYX_MAX_CALLS", cls.max_calls)))
+                   max_calls=int(os.getenv("TELNYX_MAX_CALLS", cls.max_calls)),
+                   codec=phone_codec())
 
 
 def load_public_key(encoded: str) -> Ed25519PublicKey:
@@ -119,9 +171,10 @@ def signature_valid(key: Ed25519PublicKey, body: bytes, signature: str | None,
 class CallControl:
     """The few Call Control commands we use. Errors are logged by status, never by body."""
 
-    def __init__(self, client: httpx.AsyncClient, api_key: str) -> None:
+    def __init__(self, client: httpx.AsyncClient, api_key: str, codec: PhoneCodec = L16) -> None:
         self.client = client
         self.headers = {"Authorization": f"Bearer {api_key}"}
+        self.codec = codec
 
     async def command(self, call_control_id: str, action: str, body: dict[str, Any]) -> bool:
         url = f"{API_URL}/calls/{call_control_id}/actions/{action}"
@@ -139,9 +192,10 @@ class CallControl:
         return await self.command(call_control_id, "answer", {
             "stream_url": stream_url,
             "stream_track": "inbound_track",  # The caller only; our own audio is not echoed back.
-            "stream_codec": "PCMU",
+            "stream_codec": self.codec.name,
             "stream_bidirectional_mode": "rtp",
-            "stream_bidirectional_codec": "PCMU",
+            "stream_bidirectional_codec": self.codec.name,
+            "stream_bidirectional_sampling_rate": self.codec.sample_rate,
             "command_id": command_id,  # Telnyx ignores a repeat (webhook retry).
         })
 
@@ -165,9 +219,10 @@ class Playout:
     the old epoch and are ignored.
     """
 
-    def __init__(self, sample_rate: int = SAMPLE_RATE) -> None:
-        self.rate = sample_rate
-        self.chunk = round(sample_rate * CHUNK_S)
+    def __init__(self, codec: PhoneCodec = L16) -> None:
+        self.encode = codec.encode
+        self.rate = codec.sample_rate
+        self.chunk = round(self.rate * CHUNK_S)
         self.chunks: deque[Samples] = deque()
         self.written = self.sent = self.heard = 0
         self.heard_at = -math.inf
@@ -199,7 +254,7 @@ class Playout:
         samples = self.take(self.chunk)
         self.sent += len(samples)
         self.marks += 1
-        return g711.encode(samples), f"{self.epoch}:{self.marks}:{self.sent}"
+        return self.encode(samples), f"{self.epoch}:{self.marks}:{self.sent}"
 
     def take(self, count: int) -> Samples:
         parts, needed = [], count
@@ -267,13 +322,15 @@ class PhoneSession:
     events (partials, captions, metrics) have no screen to go to.
     """
 
-    def __init__(self, to_telnyx: Sender, sample_rate: int = SAMPLE_RATE,
+    def __init__(self, to_telnyx: Sender, codec: PhoneCodec = L16,
                  clock: Callable[[], float] = time.monotonic) -> None:
         self.to_telnyx = to_telnyx
         self.clock = clock
-        self.playout = Playout(sample_rate)
+        self.codec = codec  # Reply audio, at the engines' rate.
+        self.inbound = codec  # What Telnyx says it sends (`start`), possibly another codec.
+        self.playout = Playout(codec)
         self.call: Call | None = None
-        self.batch = round(sample_rate * INPUT_BATCH_S)
+        self.batch = round(codec.sample_rate * INPUT_BATCH_S)
         self.pending: list[Samples] = []
         self.pending_count = 0
         self.listening = True
@@ -332,9 +389,10 @@ class PhoneSession:
     async def hear(self, payload: str) -> None:
         if len(payload) > MAX_PAYLOAD_CHARS:
             raise ValueError("Media frame too large")
-        samples = g711.decode(base64.b64decode(payload, validate=True))
+        samples = self.inbound.decode(base64.b64decode(payload, validate=True))
         if not self.listening or self.call is None:
             return
+        samples = resample(samples, self.inbound.sample_rate, self.codec.sample_rate)
         self.pending.append(samples)
         self.pending_count += len(samples)
         if self.pending_count >= self.batch:
@@ -451,7 +509,7 @@ async def lifespan(app: FastAPI, settings: TelnyxSettings | None = None) -> Asyn
         yield
         return
     async with httpx.AsyncClient() as client:
-        board = Switchboard(settings, CallControl(client, settings.api_key))
+        board = Switchboard(settings, CallControl(client, settings.api_key, settings.codec))
         app.state.switchboard = board
         try:
             yield
@@ -525,7 +583,7 @@ async def media_stream(socket: WebSocket, token: str = "") -> None:
         async with send_lock:  # The pump, the reply task and this loop all send.
             await socket.send_text(json.dumps(message))
 
-    session = PhoneSession(to_telnyx)
+    session = PhoneSession(to_telnyx, board.settings.codec)
     tasks: list[asyncio.Task[None]] = []
     hang_up_after = True
     try:
@@ -534,9 +592,13 @@ async def media_stream(socket: WebSocket, token: str = "") -> None:
         media = start.start.media_format
         if start.start.call_control_id != call_control_id:
             raise ValueError("The stream belongs to another call")
-        if (media.encoding, media.sample_rate, media.channels) != ("PCMU", SAMPLE_RATE, 1):
+        inbound = CODECS.get(media.encoding.upper())
+        if inbound is None or media.sample_rate != inbound.sample_rate or media.channels != 1:
             logger.warning("Unexpected Telnyx media format %s/%d", media.encoding, media.sample_rate)
             raise ValueError("Unexpected media format")
+        session.inbound = inbound
+        logger.info("Phone media: caller audio %s %d Hz, replies %s %d Hz", inbound.name,
+                    inbound.sample_rate, session.codec.name, session.codec.sample_rate)
         if engines is None:
             logger.warning("Phone call refused: speech services are not configured")
             return

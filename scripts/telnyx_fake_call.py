@@ -8,13 +8,14 @@ come here instead of api.telnyx.com. Deepgram and Groq keys are read from
 --env-file (default: this checkout's .env) and never printed.
 
 Then, like Telnyx on an inbound call: POST a signed `call.initiated`, wait for
-the `answer`, open its stream URL, send `connected` and `start`, and stream
-the clip (8 kHz mono 16-bit WAV) as 20 ms base64 µ-law `media` frames at real
-time, followed by silence, as a phone line does. Reply audio is "played" at
+the `answer`, open its stream URL, send `connected` and `start`, let the
+greeting play, and stream the clip (16 kHz mono 16-bit WAV) as 20 ms base64
+L16 (big-endian) `media` frames at real time, followed by silence, as a phone
+line does. Reply audio is "played" at
 real time: each mark is returned when the audio before it would have played,
 and a `clear` returns the queued marks at once. Make a clip with:
 
-    say -o q.aiff "What time is it in London?" && afconvert -f WAVE -d LEI16@8000 -c 1 q.aiff q.wav
+    say -o q.aiff "What time is it in London?" && afconvert -f WAVE -d LEI16@16000 -c 1 q.aiff q.wav
 
 Reported, on this client's clock: from the end of speech (the frame holding the
 last non-silent sample) to the first reply `media` frame; with --barge-in, the
@@ -44,9 +45,9 @@ from fastapi import FastAPI, Request
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-from app import g711  # noqa: E402
+from app.telnyx import L16  # noqa: E402
 
-RATE, FRAME = 8000, 160  # 20 ms frames, as Telnyx sends.
+RATE, FRAME = L16.sample_rate, L16.sample_rate // 50  # 20 ms frames, as Telnyx sends.
 SILENT = 0.01
 CALL_ID = "v3:fake-call-control-id"
 
@@ -54,7 +55,7 @@ CALL_ID = "v3:fake-call-control-id"
 def load(path: Path) -> np.ndarray:
     with wave.open(str(path)) as audio:
         if (audio.getframerate(), audio.getnchannels(), audio.getsampwidth()) != (RATE, 1, 2):
-            raise SystemExit(f"{path}: expected 8 kHz mono 16-bit PCM WAV.")
+            raise SystemExit(f"{path}: expected 16 kHz mono 16-bit PCM WAV.")
         pcm = np.frombuffer(audio.readframes(audio.getnframes()), dtype="<i2")
     return pcm.astype(np.float32) / 32768
 
@@ -90,6 +91,21 @@ class Line:
         self.timers: list[tuple[asyncio.TimerHandle, str]] = []  # Marks waiting to play.
         self.sequence = 1
 
+    async def hear_greeting(self, timeout_s: float = 5.0) -> None:
+        """The assistant speaks first: wait until its greeting has played, then forget it."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_s
+        while self.first_audio is None and loop.time() < deadline:
+            await asyncio.sleep(0.01)
+        if self.first_audio is None:
+            print("No greeting heard.")
+            return
+        while loop.time() < self.playhead + 0.3:  # Played, and no more is coming.
+            await asyncio.sleep(0.05)
+        greeting = sum(len(chunk) for chunk in self.reply) / RATE
+        print(f"Greeting: {greeting:.1f} s of audio")
+        self.reply, self.first_audio = [], None
+
     async def send(self, message: dict) -> None:
         self.sequence += 1
         await self.socket.send(json.dumps({**message, "sequence_number": str(self.sequence),
@@ -98,7 +114,7 @@ class Line:
     async def speak(self, audio: np.ndarray, sends: list[float]) -> None:
         started = time.perf_counter()
         for index, offset in enumerate(range(0, len(audio), FRAME)):
-            payload = base64.b64encode(g711.encode(audio[offset:offset + FRAME])).decode()
+            payload = base64.b64encode(L16.encode(audio[offset:offset + FRAME])).decode()
             await self.send({"event": "media", "media": {"track": "inbound", "chunk": str(index + 1),
                                                          "timestamp": str(offset), "payload": payload}})
             sends.append(time.perf_counter())
@@ -119,7 +135,7 @@ class Line:
             message = json.loads(raw)
             now = loop.time()
             if message["event"] == "media":
-                audio = g711.decode(base64.b64decode(message["media"]["payload"]))
+                audio = L16.decode(base64.b64decode(message["media"]["payload"]))
                 self.first_audio = self.first_audio or time.perf_counter()
                 self.reply.append(audio)
                 self.playhead = max(self.playhead, now) + len(audio) / RATE
@@ -201,8 +217,9 @@ async def call(stream_url: str, speech: np.ndarray, args: argparse.Namespace) ->
         await line.send({"event": "connected", "version": "1.0.0"})
         await line.send({"event": "start", "start": {
             "call_control_id": CALL_ID, "call_session_id": "fake-session", "user_id": "fake-user",
-            "media_format": {"encoding": "PCMU", "sample_rate": RATE, "channels": 1}}})
+            "media_format": {"encoding": "L16", "sample_rate": RATE, "channels": 1}}})
         listener = asyncio.create_task(line.listen())
+        await line.hear_greeting()
         sends: list[float] = []
         audio = np.concatenate([np.zeros(lead, np.float32), speech])
         speaking = asyncio.create_task(line.speak(np.concatenate([audio, tail]), sends))
