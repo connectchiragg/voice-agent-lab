@@ -119,6 +119,11 @@ for a cancelled speculative start.
 - Why 600 ms: on the AWS VM (30 requests, this prompt) gpt-oss-120b's first token
   was p50 466 ms, p75 479, p90 680, max 2.6 s; gpt-oss-20b p50 404, p90 505,
   max 722. So about one request in eight is hedged.
+- Live check through the tunnel (30 turns, 43 requests, 2026-10-15): 4 hedged
+  (9%), the fallback won 1. Per-request first token p50 438 ms, p90 587, max
+  1.08 s. Per-turn first token p90 fell from 1,206 to 885 ms against the
+  previous 40 turns (p50 unchanged at ~500 ms). No multi-second stall happened
+  during the check, so the tail cut is a bound, not yet an observed rescue.
 - Every request logs the winning model, its first-token time and the running
   hedge rate; the turn metrics carry `llm_model`. A watchdog logs any event-loop
   block over 250 ms.
