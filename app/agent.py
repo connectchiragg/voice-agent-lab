@@ -21,7 +21,7 @@ from langgraph.graph.state import CompiledStateGraph
 from psycopg.conninfo import make_conninfo
 
 from app.llm import ToolCallRequest, stream_model, to_chat_messages
-from app.tools import SCHEMAS, run_tool
+from app.tools import SCHEMAS, has_side_effects, run_tool
 
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 logger = logging.getLogger("uvicorn.error")
@@ -102,6 +102,12 @@ async def generate(messages: list[Message], allow_tools: bool, tool_choice: str 
             yield event
 
 
+def pending_commit(config: RunnableConfig) -> asyncio.Event | None:
+    """For a speculative run: the event set once its reply is committed, until then."""
+    committed = config["configurable"].get("committed")
+    return committed if committed is not None and not committed.is_set() else None
+
+
 async def agent(state: Conversation, config: RunnableConfig) -> Conversation:
     """Stream the model's text; end the turn, or hand its tool calls to `tools`."""
     messages = list(state["messages"])
@@ -124,7 +130,8 @@ async def agent(state: Conversation, config: RunnableConfig) -> Conversation:
                 writer({"type": "delta", "text": " "})
     except Exception:
         # Keep a failed reply once, rather than writing every token to storage.
-        if text:
+        # An uncommitted speculative reply was never heard: it leaves no trace.
+        if text and pending_commit(config) is None:
             messages.append(model_message(text, "interrupted"))
             await save_history(config["configurable"]["thread_id"], messages)
         raise
@@ -140,11 +147,18 @@ async def agent(state: Conversation, config: RunnableConfig) -> Conversation:
     return {"messages": messages, "updated_at": now()}
 
 
-async def tools(state: Conversation) -> Conversation:
-    """Run the requested tools concurrently and append their results."""
+async def tools(state: Conversation, config: RunnableConfig) -> Conversation:
+    """Run the requested tools concurrently and append their results.
+
+    A speculative run may only run tools without side effects; any other call
+    waits until the reply is committed (and is cancelled with it otherwise).
+    """
     messages = list(state["messages"])
     request = messages[-1]
     calls = request.get("tool_calls", [])
+    committed = pending_commit(config)
+    if committed is not None and any(has_side_effects(call["name"]) for call in calls):
+        await committed.wait()
     running = asyncio.ensure_future(
         asyncio.gather(*(run_tool(call["name"], call["arguments"]) for call in calls)))
     done, _ = await asyncio.wait({running}, timeout=FILLER_AFTER_S)
@@ -166,7 +180,7 @@ def after_agent(state: Conversation) -> str:
     return "tools" if state["messages"][-1].get("tool_calls") else END
 
 
-def build_graph(checkpointer: BaseCheckpointSaver[str]) -> ConversationGraph:
+def build_graph(checkpointer: BaseCheckpointSaver[str] | None) -> ConversationGraph:
     builder = StateGraph(Conversation)
     builder.add_node("agent", agent)
     builder.add_node("tools", tools)
@@ -174,6 +188,10 @@ def build_graph(checkpointer: BaseCheckpointSaver[str]) -> ConversationGraph:
     builder.add_conditional_edges("agent", after_agent, ["tools", END])
     builder.add_edge("tools", "agent")
     return builder.compile(checkpointer=checkpointer)
+
+
+# Speculative replies run without checkpoints: they are saved only once committed.
+speculative_graph = build_graph(None)
 
 
 @asynccontextmanager
@@ -222,18 +240,67 @@ async def save_history(conversation_id: str, messages: list[Message]) -> None:
     }, as_node="agent")
 
 
-async def stream_conversation(conversation_id: str, message: str) -> AsyncIterator[ChatEvent]:
-    """Supply a new turn to the graph and forward its custom streaming events."""
+async def stream_conversation(conversation_id: str, message: str,
+                              committed: asyncio.Event | None = None) -> AsyncIterator[ChatEvent]:
+    """Supply a new turn to the graph and forward its custom streaming events.
+
+    With `committed`, the turn is speculative (started from a partial
+    transcript): see `speculate`.
+    """
     if graph is None:
         raise RuntimeError("Conversation storage has not started.")
     messages = await load_history(conversation_id)
     messages.append({"role": "user", "parts": [{"text": message}], "status": "completed"})
     state: Conversation = {"messages": messages, "updated_at": now()}
+    if committed is not None:
+        async with aclosing(speculate(conversation_id, state, committed)) as events:
+            async for event in events:
+                yield event
+        return
     async with aclosing(graph.astream(
         state, config(conversation_id), stream_mode="custom", durability="async",
     )) as stream:
         async for event in stream:
             yield cast(ChatEvent, event)
+
+
+async def speculate(conversation_id: str, state: Conversation,
+                    committed: asyncio.Event) -> AsyncIterator[ChatEvent]:
+    """Run a turn that is stored only if `committed` is set before it is cancelled.
+
+    It runs on an uncheckpointed graph. Once committed, each completed step is
+    saved as the checkpointed graph would; a reply that finishes first waits
+    for the commit so it can be saved. Cancelled before the commit, it leaves
+    nothing in history.
+    """
+    run_config: RunnableConfig = {"configurable": {"thread_id": conversation_id,
+                                                   "committed": committed}}
+    latest: Conversation | None = None
+    saved: Conversation | None = None
+
+    async def save_if_committed() -> None:
+        nonlocal saved
+        if committed.is_set() and latest is not None and latest is not saved:
+            await save_history(conversation_id, latest["messages"])
+            saved = latest
+
+    try:
+        async with aclosing(speculative_graph.astream(
+            state, run_config, stream_mode=["custom", "values"],
+        )) as stream:
+            async for mode, event in stream:
+                if mode == "values":
+                    latest = cast(Conversation, event)
+                else:
+                    yield cast(ChatEvent, event)
+                await save_if_committed()
+        await committed.wait()
+        await save_if_committed()
+    except (asyncio.CancelledError, GeneratorExit):
+        # Interrupted after the commit: keep the steps completed so far, like a
+        # checkpointed run, so record_interruption can trim them.
+        await asyncio.shield(save_if_committed())
+        raise
 
 
 async def record_interruption(conversation_id: str, user_text: str, heard: str) -> None:

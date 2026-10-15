@@ -49,6 +49,9 @@ class Utterance:
     confident_ms: float = 0  # Speech above the confident threshold, for barge-in checks.
     text: str = ""  # Final transcript from the streaming listener.
     stt_ms: float = 0  # Time to finalise the transcript after the turn ended.
+    # From receiving the packet with the last speech to deciding the turn ended:
+    # the pause plus any backlog of audio waiting to be processed.
+    heard_to_decided_ms: float = 0
 
 
 class TurnDetector:
@@ -61,6 +64,10 @@ class TurnDetector:
 
     It also counts chunks above a stricter `confident_threshold`; while the
     assistant talks, only that much clear speech counts as an interruption.
+
+    `on_decided`, if set, gets the listener's live text the moment a turn ends,
+    before the transcript is finalised (which takes ~0.5 s on one AWS core). It
+    is called on the detector's worker thread.
     """
 
     def __init__(self, vad: SpeechProbability, turn: TurnCompletion, *,
@@ -81,6 +88,8 @@ class TurnDetector:
         self.max_turn_chunks = round(max_turn_s * 1000 / CHUNK_MS)
         self.preroll: deque[Samples] = deque(maxlen=max(1, round(preroll_ms / CHUNK_MS)))
         self.pending = np.empty(0, dtype=np.float32)
+        self.on_decided: Callable[[str], None] | None = None
+        self.received = self.last_voice_received = 0.0  # perf_counter times of packets.
         self.discard()
 
     @property
@@ -102,7 +111,9 @@ class TurnDetector:
         self.silent = 0
         self.preroll.clear()
 
-    def feed(self, samples: Samples) -> list[Utterance]:
+    def feed(self, samples: Samples, received: float | None = None) -> list[Utterance]:
+        """`received`: when the packet arrived (perf_counter), if earlier than now."""
+        self.received = time.perf_counter() if received is None else received
         self.pending = np.concatenate((self.pending, samples))
         finished = []
         while len(self.pending) >= CHUNK:
@@ -123,6 +134,7 @@ class TurnDetector:
             if self.voiced >= self.start_chunks:
                 self.utterance = list(self.preroll)
                 self.silent = 0
+                self.last_voice_received = self.received
                 if self.listener is not None:
                     self.listener.on_speech_start(np.concatenate(self.utterance))
             return None
@@ -132,6 +144,7 @@ class TurnDetector:
         self.confident += confident
         if voiced:
             self.silent = 0
+            self.last_voice_received = self.received
             return None
         self.silent += 1
         if len(self.utterance) >= self.max_turn_chunks:
@@ -148,14 +161,18 @@ class TurnDetector:
         assert self.utterance is not None
         audio = np.concatenate(self.utterance)
         pause_ms, confident_ms = self.silent * CHUNK_MS, self.confident_ms
+        heard_to_decided_ms = (time.perf_counter() - self.last_voice_received) * 1000
         text, stt_ms = "", 0.0
         if self.listener is not None:
+            if self.on_decided is not None:
+                self.on_decided(getattr(self.listener, "text", ""))
             # Every chunk since speech start was fed, including the pause just heard.
             text = self.listener.on_speech_end(self.silent * CHUNK_MS / 1000)
             stt_ms = getattr(self.listener, "final_ms", 0.0)
         self.utterance = None  # Finished, not discarded: the listener already closed it.
         self.discard()
-        return Utterance(audio, pause_ms, completion, confident_ms, text, stt_ms)
+        return Utterance(audio, pause_ms, completion, confident_ms, text, stt_ms,
+                         heard_to_decided_ms)
 
 
 WORD = re.compile(r"\S+(\s+|$)")
@@ -255,6 +272,10 @@ async def forget_interruption(conversation_id: str, user_text: str, heard: str) 
     """Default for engines without history: nothing to record."""
 
 
+def always() -> bool:
+    return True
+
+
 @dataclass
 class Engines:
     """Everything a call needs, injected so tests can replace any stage."""
@@ -265,6 +286,11 @@ class Engines:
     # (conversation_id, user text, assistant text the user actually heard)
     record_interruption: Callable[[str, str, str], Awaitable[None]] = forget_interruption
     output_sample_rate: int = 24000
+    # Optional early reply from the partial transcript: (conversation_id, text,
+    # committed). It must store nothing and run no side-effecting tool until
+    # `committed` is set. None disables speculation.
+    speculate: Callable[[str, str, asyncio.Event], AsyncIterator[str]] | None = None
+    may_speculate: Callable[[], bool] = always  # False near the provider's rate limit.
 
 
 def heard_text(spoken: list[tuple[str, float]], played_s: float) -> str:
@@ -289,14 +315,99 @@ def heard_text(spoken: list[tuple[str, float]], played_s: float) -> str:
     return " ".join(heard)
 
 
+def same_words(first: str, second: str) -> bool:
+    """Equal ignoring case, punctuation and spacing ("What's up?" == "whats up")."""
+    def normal(text: str) -> str:
+        return " ".join(re.sub(r"[^\w\s]", "", text.lower()).split())
+    return normal(first) == normal(second)
+
+
+class Speculation:
+    """A reply started from the live transcript while STT finalises the turn.
+
+    Its deltas (text, filler, anything after tool calls) are buffered, never
+    spoken, until `commit`; `replay` then yields the buffer and continues live.
+    Cancelling closes the LLM stream, so no more tokens are generated.
+    """
+
+    def __init__(self, engines: Engines, conversation_id: str, text: str) -> None:
+        assert engines.speculate is not None
+        self.text = text
+        self.started = time.perf_counter()
+        self.first_token_at: float | None = None
+        self.deltas: list[str] = []
+        self.error: Exception | None = None
+        self.done = False
+        self.cancelled = False
+        self.changed = asyncio.Event()
+        self.committed = asyncio.Event()
+        self.task = asyncio.create_task(
+            self.run(engines.speculate(conversation_id, text, self.committed)))
+
+    async def run(self, stream: AsyncIterator[str]) -> None:
+        try:
+            async for delta in stream:
+                if self.first_token_at is None:
+                    self.first_token_at = time.perf_counter()
+                self.deltas.append(delta)
+                self.changed.set()
+        except Exception as error:
+            self.error = error
+        finally:
+            self.done = True
+            self.changed.set()
+
+    @property
+    def failed(self) -> bool:
+        """Failed before the commit: a fresh call is better than a broken reply."""
+        return self.error is not None
+
+    def cancel(self, reason: str) -> None:
+        """Close the LLM stream; nothing was spoken or stored."""
+        if not self.cancelled:
+            self.cancelled = True
+            logger.info("Speculative reply cancelled: %s", reason)
+        self.task.cancel()
+
+    def commit(self) -> AsyncIterator[str]:
+        self.committed.set()
+        return self.replay()
+
+    async def replay(self) -> AsyncIterator[str]:
+        index = 0
+        while True:
+            while index < len(self.deltas):
+                yield self.deltas[index]
+                index += 1
+            if self.done:
+                if self.error is not None:
+                    raise self.error
+                return
+            self.changed.clear()
+            if index == len(self.deltas) and not self.done:
+                await self.changed.wait()
+
+    async def close(self) -> None:
+        """Cancel the stream (a no-op once finished) and wait for it to stop."""
+        self.task.cancel()
+        await asyncio.gather(self.task, return_exceptions=True)
+
+
 @dataclass
 class TurnMetrics:
     """Milliseconds for one turn; together they approximate perceived latency."""
     endpoint_ms: float  # Silence waited before deciding the user had finished.
     stt_ms: float = 0
-    llm_first_token_ms: float = 0
+    # From the final transcript; negative when a speculative reply started earlier.
+    llm_first_token_ms: float | None = None
     tts_first_audio_ms: float = 0  # Synthesis time of the first spoken piece.
-    started: float = field(default_factory=time.perf_counter)
+    heard_to_decided_ms: float = 0  # Last speech packet received -> turn ended.
+    speculative: str = "skipped"  # Or "committed" / "cancelled".
+    started: float = field(default_factory=time.perf_counter)  # Final transcript ready.
+
+    def first_token(self, at: float) -> None:
+        if self.llm_first_token_ms is None:
+            self.llm_first_token_ms = (at - self.started) * 1000
 
     def response_ms(self) -> float:
         """From the user's last word to the first assistant audio being sent."""
@@ -304,9 +415,10 @@ class TurnMetrics:
 
     def to_payload(self, first_audio_ms: float) -> dict[str, object]:
         return {"type": "metrics", "endpoint_ms": round(self.endpoint_ms),
-                "stt_ms": round(self.stt_ms), "llm_first_token_ms": round(self.llm_first_token_ms),
+                "stt_ms": round(self.stt_ms), "llm_first_token_ms": round(self.llm_first_token_ms or 0),
                 "tts_first_audio_ms": round(self.tts_first_audio_ms),
-                "response_ms": round(first_audio_ms)}
+                "heard_to_decided_ms": round(self.heard_to_decided_ms),
+                "speculative": self.speculative, "response_ms": round(first_audio_ms)}
 
 
 Send = Callable[[dict[str, object] | bytes], Awaitable[None]]
@@ -327,6 +439,10 @@ class Call:
     Barge-in: while the assistant is busy, `barge_in_ms` of confident user speech
     cancels the reply, tells the browser to flush its audio, and records only
     what the user actually heard. That speech then continues as the next turn.
+
+    Speculation: when a turn ends, at most one reply starts from the live text
+    while STT finalises. It is committed if the final transcript has the same
+    words, and cancelled if they differ or the user speaks again first.
     """
 
     def __init__(self, engines: Engines, send: Send, conversation_id: str, *,
@@ -347,6 +463,9 @@ class Call:
         self.user_text: str | None = None  # Transcript the current reply answers.
         self.spoken: list[tuple[str, float]] = []  # (piece, audio seconds) sent so far.
         self.overlapped = False  # Current utterance began while the assistant spoke.
+        self.speculation: Speculation | None = None  # Started for the turn just decided.
+        self.loop: asyncio.AbstractEventLoop | None = None
+        self.detector.on_decided = self.turn_decided
 
     @property
     def assistant_busy(self) -> bool:
@@ -362,7 +481,38 @@ class Call:
 
     async def hear(self, packet: bytes) -> None:
         samples = decode_pcm(packet)
-        utterances = await asyncio.to_thread(self.detector.feed, samples)
+        self.loop = asyncio.get_running_loop()
+        utterances = await asyncio.to_thread(self.detector.feed, samples, time.perf_counter())
+        # A speculation started during feed belongs to its last utterance, if answered.
+        speculation, self.speculation = self.speculation, None
+        if speculation is not None and self.detector.speaking:
+            speculation.cancel("the user spoke again")  # The turn is still answered.
+        claimed = False
+        try:
+            claimed = await self.handle(utterances, speculation)
+        finally:
+            if speculation is not None and not claimed:
+                speculation.cancel("the turn was not answered")
+
+    def turn_decided(self, text: str) -> None:
+        """Detector worker thread: a turn just ended with this live text."""
+        if self.loop is not None:
+            self.loop.call_soon_threadsafe(self.start_speculation, text)
+
+    def start_speculation(self, text: str) -> None:
+        if self.engines.speculate is None or self.speculation is not None:
+            return  # Disabled, or this turn already has one (at most one per turn).
+        history_pending = self.history_task is not None and not self.history_task.done()
+        if not text.strip() or self.assistant_busy or history_pending:
+            return  # Nothing to say yet, or the turn may not be answered as is.
+        if not self.engines.may_speculate():
+            logger.info("Speculative reply skipped: near the LLM rate limit")
+            return
+        logger.info("Speculative reply started from the live transcript")
+        self.speculation = Speculation(self.engines, self.conversation_id, text)
+
+    async def handle(self, utterances: list[Utterance], speculation: Speculation | None) -> bool:
+        """Start replies to finished utterances; True if one took the speculation."""
         if self.assistant_busy:
             if self.detector.speaking:
                 self.overlapped = True
@@ -374,17 +524,22 @@ class Call:
                 if utterances:
                     logger.info("Ignored %d short utterance(s) during the reply", len(utterances))
                 self.overlapped = self.detector.speaking
-                return
+                return False
         # Live words, shown only once the user holds the floor (never echo under our voice).
         if (partial := self.transcriber.take_partial()) is not None:
             await self.send({"type": "partial", "text": partial})
+        claimed = False
         for utterance in utterances:
             if self.overlapped and utterance.confident_ms < self.barge_in_ms:
                 # Began under the assistant's voice and never became clear speech.
                 self.overlapped = False
                 continue
             self.overlapped = False
-            self.reply_task = asyncio.create_task(self.respond(utterance))
+            # Only the last utterance can match the speculation; respond checks the words.
+            claim = speculation if utterance is utterances[-1] else None
+            claimed = claimed or claim is not None
+            self.reply_task = asyncio.create_task(self.respond(utterance, claim))
+        return claimed
 
     async def interrupt(self) -> None:
         """Stop the reply now; record what was heard once the browser reports it."""
@@ -409,25 +564,39 @@ class Call:
         logger.info("Interrupted after %.1f s of playback; heard %d chars", played_s, len(heard))
         await self.engines.record_interruption(self.conversation_id, user_text, heard)
 
-    async def respond(self, utterance: Utterance) -> None:
+    async def respond(self, utterance: Utterance, speculation: Speculation | None = None) -> None:
+        try:
+            await self.answer(utterance, speculation)
+        finally:
+            if speculation is not None:
+                # Committed: wait until it stops, so its history is saved before
+                # a barge-in records what was heard. Otherwise: just cancel.
+                await speculation.close()
+
+    async def answer(self, utterance: Utterance, speculation: Speculation | None) -> None:
         if self.history_task is not None:
             # The next reply must see the trimmed history of the interrupted one.
             await asyncio.gather(self.history_task, return_exceptions=True)
             self.history_task = None
         # The transcript was finalised by the streaming listener as the turn ended.
-        metrics = TurnMetrics(endpoint_ms=utterance.pause_ms, stt_ms=utterance.stt_ms)
+        metrics = TurnMetrics(endpoint_ms=utterance.pause_ms, stt_ms=utterance.stt_ms,
+                              heard_to_decided_ms=utterance.heard_to_decided_ms)
         text = utterance.text.strip()
         if not text:
             await self.send({"type": "partial", "text": ""})  # Clear the live line.
             return
-        self.user_text, self.spoken = text, []
+        deltas = self.reuse(speculation, text, metrics)
+        # History stores the text the committed reply answered (same words).
+        self.user_text = speculation.text if metrics.speculative == "committed" else text
+        self.spoken = []
         await self.send({"type": "transcript", "text": text})
 
         pieces: asyncio.Queue[str | None] = asyncio.Queue(maxsize=8)
         speaker = asyncio.create_task(self.speak(pieces, metrics))
         try:
             try:
-                await self.think(text, pieces, metrics)
+                await self.think(deltas or self.engines.reply(self.conversation_id, text),
+                                 pieces, metrics, speculation if deltas else None)
             except Exception as error:
                 # Pieces already queued are still spoken; nothing new is generated.
                 logger.warning("Reply generation failed: %s", type(error).__name__)
@@ -441,17 +610,33 @@ class Call:
         self.user_text = None
         await self.send({"type": "reply_end"})
 
-    async def think(self, text: str, pieces: "asyncio.Queue[str | None]", metrics: TurnMetrics) -> None:
+    def reuse(self, speculation: Speculation | None, text: str,
+              metrics: TurnMetrics) -> AsyncIterator[str] | None:
+        """Commit the speculative reply if it answered these words, else cancel it."""
+        if speculation is None:
+            return None
+        if speculation.cancelled or speculation.failed or not same_words(speculation.text, text):
+            speculation.cancel("it failed" if speculation.failed else "the final transcript differs")
+            metrics.speculative = "cancelled"
+            return None
+        metrics.speculative = "committed"
+        logger.info("Speculative reply committed: started %.0f ms before the final transcript, "
+                    "%d deltas buffered", (metrics.started - speculation.started) * 1000,
+                    len(speculation.deltas))
+        return speculation.commit()
+
+    async def think(self, deltas: AsyncIterator[str], pieces: "asyncio.Queue[str | None]",
+                    metrics: TurnMetrics, speculation: Speculation | None = None) -> None:
         """Hand speakable pieces of the streamed LLM reply to TTS.
 
         The browser gets text only as captions alongside each piece's audio, so
         the screen never runs ahead of (or past an interruption of) the speech.
         """
         chunker = SpeechChunker()
-        started = time.perf_counter()
-        async for delta in self.engines.reply(self.conversation_id, text):
-            if not metrics.llm_first_token_ms:
-                metrics.llm_first_token_ms = (time.perf_counter() - started) * 1000
+        async for delta in deltas:
+            # A committed speculation's first token may predate the final transcript.
+            first_at = speculation.first_token_at if speculation is not None else None
+            metrics.first_token(first_at or time.perf_counter())
             for piece in chunker.push(delta):
                 await pieces.put(piece)
         for piece in chunker.flush():
@@ -496,6 +681,8 @@ class Call:
             logger.info("Estimated playback gaps: %.0f ms over %d pieces", gaps_s * 1000, len(self.spoken))
 
     async def close(self) -> None:
+        if self.speculation is not None:
+            await self.speculation.close()
         for task in (self.reply_task, self.history_task):
             if task is not None and not task.done():
                 task.cancel()

@@ -43,6 +43,9 @@ class Tool:
     description: str
     parameters: dict[str, Any]
     run: Callable[..., Awaitable[dict[str, Any]]]
+    # True for tools that change something outside the conversation (book, send, pay).
+    # A speculative reply runs only tools without side effects before it is committed.
+    side_effects: bool = False
 
     def schema(self) -> dict[str, Any]:
         return {"type": "function", "function": {
@@ -127,6 +130,12 @@ TOOLS = {tool.name: tool for tool in (
          get_time),
 )}
 SCHEMAS = [tool.schema() for tool in TOOLS.values()]
+
+
+def has_side_effects(name: str) -> bool:
+    """Unknown names count as safe: run_tool only reports them as errors."""
+    tool = TOOLS.get(name)
+    return tool is not None and tool.side_effects
 
 
 async def run_tool(name: str, arguments: str) -> str:

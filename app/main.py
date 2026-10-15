@@ -23,6 +23,8 @@ load_dotenv(ROOT / ".env")
 logger = logging.getLogger("uvicorn.error")
 # Kokoro weights: fp32 "kokoro-v1.0.onnx" or the same release's int8 / fp16 exports.
 KOKORO_MODEL = os.getenv("KOKORO_MODEL", "kokoro-v1.0.onnx")
+# Start the LLM from the live transcript while STT finalises (see Call); 0 disables it.
+SPECULATIVE_LLM = os.getenv("SPECULATIVE_LLM", "1") == "1"
 MODEL_FILES = ("silero_vad.onnx", "smart-turn-v3.2-cpu.onnx", KOKORO_MODEL, "voices-v1.0.bin",
                "sherpa-onnx-nemotron-speech-streaming-en-0.6b-160ms-int8-2026-04-25/encoder.int8.onnx")
 
@@ -54,8 +56,9 @@ def load_engines() -> Engines:
     warm.on_speech_start(np.zeros(16000, dtype=np.float32))
     warm.on_speech_end()
 
-    async def reply(conversation_id: str, text: str) -> AsyncIterator[str]:
-        async for event in agent.stream_conversation(conversation_id, text):
+    async def reply(conversation_id: str, text: str,
+                    committed: asyncio.Event | None = None) -> AsyncIterator[str]:
+        async for event in agent.stream_conversation(conversation_id, text, committed):
             if event["type"] == "delta":
                 yield event["text"]
 
@@ -67,7 +70,9 @@ def load_engines() -> Engines:
                                                              listener=listener),
                    reply=reply, synthesize=synthesize,
                    record_interruption=agent.record_interruption,
-                   output_sample_rate=OUTPUT_SAMPLE_RATE)
+                   output_sample_rate=OUTPUT_SAMPLE_RATE,
+                   speculate=reply if SPECULATIVE_LLM else None,
+                   may_speculate=lambda: not groq_api.near_rate_limit())
 
 
 async def watch_event_loop(interval_s: float = 0.1, threshold_s: float = 0.25) -> None:
