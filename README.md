@@ -43,6 +43,7 @@ How a call flows (`app/pipeline.py`):
    recognizer (live `partial` text); the final transcript is ready as the turn
    ends. `Call.respond` hands it to the LangGraph agent, which
    (`app/agent.py`) streams the reply from Groq and checkpoints history.
+   With `SPECULATIVE_LLM=1` (default), see below, the LLM starts earlier.
 4. `SpeechChunker` cuts streamed text into pieces that grow over the reply
    (about 3 words, then 5, 7, 10, 14, then whole sentences) at natural boundaries, and
    Kokoro synthesizes each while the previous one plays.
@@ -55,6 +56,32 @@ piece's text and audio length, just before its audio), `metrics`, `notice`,
 playback, so the screen never runs ahead of the voice; on an interruption the
 remaining words are dropped, matching the history saved on the server. Postgres is used when running,
 otherwise history is in memory (logged at startup).
+
+### Speculative LLM start
+
+STT finalization takes about 0.5 s on one AWS core, after the turn has already
+ended. So when Smart Turn ends a turn, `Call` starts one LLM reply from the live
+transcript in parallel. Its output is buffered and never spoken. When the final
+transcript arrives:
+
+- same words (case, punctuation and spacing ignored): **commit**. The buffer is
+  replayed and the reply continues live;
+- different words, or the user spoke again first: **cancel**. The Groq stream
+  is closed and a normal call answers the final text.
+
+A cancelled speculation leaves no history (it runs on an uncheckpointed graph
+and is saved only once committed), and tools marked `side_effects` wait for
+the commit. At most one runs per turn. It is skipped after a Groq 429 in the
+last minute, or above 70% of the per-minute request or input-token limit.
+
+Measured on the AWS VM (2026-10-15, 20 scripted turns over the tunnel):
+
+- 16 of 20 turns committed. Every cancel was the live text missing the end of
+  the last word ("octop" for "octopuses"). The VM benchmark agrees: 87% of 30
+  turns matched (`scripts/bench_latency.py`, `live_match_pct`).
+- On committed turns without tools, the first audio came about 410 ms sooner
+  (median of paired turns).
+- Each cancel costs one extra Groq request: 1.45 requests per turn in that run.
 
 ### Barge-in
 
@@ -77,7 +104,8 @@ own voice would otherwise interrupt it. Headphones are the most reliable setup.
 
 Free-tier limits for the LLM: 30 requests per minute (only stated in 429
 bodies), 1,000 per day and 8,000 tokens per minute. Speech-to-text is local, so
-each user turn makes one or two LLM requests (two when a tool is used).
+each user turn makes one or two LLM requests (two when a tool is used), plus one
+for a cancelled speculative start.
 
 - One shared Groq client for the process (connection reuse; first token about
   110-170 ms instead of opening a TLS connection per request).
