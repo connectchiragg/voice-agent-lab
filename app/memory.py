@@ -351,9 +351,48 @@ GREETING = "Hi, this is Cadence. How can I help?"
 
 
 def display_name(conversation_id: str) -> str | None:
-    """The caller's name from earlier calls, if known (and not forgotten)."""
+    """The caller's name from earlier calls, if known (and not forgotten).
+
+    Checked again here, so a placeholder stored before names were validated
+    ("name") is never spoken.
+    """
     call = calls.get(conversation_id)
-    return call.memory.display_name if call and call.memory and not call.forgotten else None
+    stored = call.memory.display_name if call and call.memory and not call.forgotten else None
+    return plausible_name(stored)
+
+
+# Words a summarizer may put where it has no name; never a caller's name.
+NOT_NAMES = frozenset("""
+    name names caller callers user users unknown none null nil na n/a anonymous anon customer
+    client guest person someone somebody anyone people sir madam maam ma'am mr mrs ms miss dear
+    friend there me myself you your yourself assistant agent cadence bot hello hi hey yes no okay
+    ok test testing not provided given stated specified mentioned shared their his her them they
+    the a an caller's
+    """.split())
+NAME_WORD = re.compile(r"[^\W\d_]+(?:['’-][^\W\d_]+)*")
+
+
+def plausible_name(name: object, heard: str | None = None) -> str | None:
+    """`name` if it can be a person's name, else None.
+
+    One to three words of letters (apostrophes and hyphens inside), none of
+    them a placeholder or generic word, each at least two letters. With
+    `heard` (what the caller said), every word must also appear in it.
+    """
+    if not isinstance(name, str):
+        return None
+    text = " ".join(name.strip(" \t\n.,;:!?\"'").split())
+    words = text.split(" ") if text else []
+    if not 1 <= len(words) <= 3 or len(text) > 40:
+        return None
+    for word in words:
+        if not NAME_WORD.fullmatch(word) or len(word) < 2 or word.lower() in NOT_NAMES:
+            return None
+    if heard is not None:
+        said = {word.lower() for word in NAME_WORD.findall(heard)}
+        if not all(word.lower() in said for word in words):
+            return None
+    return text
 
 
 def greeting(conversation_id: str) -> str:
@@ -480,7 +519,9 @@ async def forget(caller_key: str) -> bool:
 SUMMARY_PROMPT = (
     "You keep short notes about callers of a voice assistant, so that it can remember them "
     "next time. From the earlier notes and this call, reply with only a JSON object with "
-    'these keys: "name": the name the caller gave for themselves, else null; "summary": two '
+    'these keys: "name": the caller\'s own name exactly as they said it in this call, such '
+    'as "Asha" from "I\'m Asha" or "my name is Asha", or null if they did not clearly say '
+    'their name (never a placeholder such as "name", "caller" or "unknown"); "summary": two '
     'to four sentences about this call; "facts": up to five short preferences or facts the '
     'caller shared that would help next time; "open_items": up to five short unresolved '
     'items, such as "wants a callback" or "asked about Mysore weather", keeping earlier ones '
@@ -516,7 +557,7 @@ def dialogue_text(messages: Dialogue) -> str:
 def notes_prompt(previous: CallerMemory | None, dialogue: str) -> str:
     earlier = "None: this is their first call."
     if previous is not None:
-        earlier = (f"Name: {previous.display_name or 'unknown'}\n"
+        earlier = (f"Name: {plausible_name(previous.display_name) or 'not known'}\n"
                    f"Profile: {previous.profile or 'none'}\n"
                    f"Open items: {'; '.join(previous.open_items) or 'none'}")
     return f"Earlier notes:\n{earlier}\n\nThis call:\n{dialogue}"
@@ -528,7 +569,13 @@ async def summarize(previous: CallerMemory | None, dialogue: str) -> CallNotes:
                 {"role": "user", "content": notes_prompt(previous, dialogue)}]
     reply = "".join([event async for event in stream_model(messages, max_tokens=SUMMARY_MAX_TOKENS)
                      if isinstance(event, str)])
-    return parse_notes(reply)
+    return parse_notes(reply, caller_words(dialogue))
+
+
+def caller_words(dialogue: str) -> str:
+    """What the caller said in `dialogue_text`'s lines, for checking a name against."""
+    return " ".join(line.removeprefix("Caller:") for line in dialogue.splitlines()
+                    if line.startswith("Caller:"))
 
 
 def clip(text: str, limit: int) -> str:
@@ -543,7 +590,8 @@ def clip(text: str, limit: int) -> str:
     return cut[:cut.rfind(" ")].rstrip(" ,;:") + "..." if " " in cut else cut + "..."
 
 
-def parse_notes(reply: str) -> CallNotes:
+def parse_notes(reply: str, heard: str | None = None) -> CallNotes:
+    """The summarizer's notes, trimmed; the name only if plausible (and, with `heard`, said)."""
     start, end = reply.find("{"), reply.rfind("}")
     if start < 0 or end < start:
         raise ValueError("The summary is not a JSON object")
@@ -551,9 +599,7 @@ def parse_notes(reply: str) -> CallNotes:
         notes = CallNotes.model_validate(json.loads(reply[start:end + 1]))
     except (json.JSONDecodeError, ValidationError) as error:
         raise ValueError("The summary is not valid notes") from error
-    name = clip(notes.name or "", 60) or None
-    if name is not None and (re.search(r"[\d@]", name) or name.lower() in ("null", "unknown")):
-        name = None
+    name = plausible_name(notes.name, heard)
     summary = clip(notes.summary, 600)
     if not summary:
         raise ValueError("The summary is empty")
@@ -585,7 +631,8 @@ def render_block(memory: CallerMemory, max_tokens: int = MAX_BLOCK_TOKENS) -> st
     """
     budget = max_tokens * CHARS_PER_TOKEN
     zone = ZoneInfo(os.getenv("ASSISTANT_TIMEZONE", "Asia/Kolkata"))
-    head = [f"Name: {memory.display_name}."] if memory.display_name else []
+    name = plausible_name(memory.display_name)
+    head = [f"Name: {name}."] if name else []
     head.append(f"Last call: {memory.last_seen.astimezone(zone):%d %B %Y}.")
     items = list(memory.open_items)
     while items and len(" ".join(head + [open_items_line(items)])) > budget:

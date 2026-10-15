@@ -202,7 +202,7 @@ def test_block_has_name_date_summary_open_items_and_profile():
 
 
 def test_block_stays_within_the_token_cap_without_counting_the_rules():
-    long = remembered(display_name="A" * 60, last_summary="She talked at length. " * 80,
+    long = remembered(display_name="Anantharamakrishnan Venkatasubramanian", last_summary="She talked at length. " * 80,
                       profile="Profile sentence. " * 50,
                       open_items=[f"open item number {index} " + "x" * 100 for index in range(5)])
     block = facts(memory.render_block(long))
@@ -533,3 +533,45 @@ def test_the_greeting_is_history_the_model_sees_and_the_summary_reads(store, gra
         ("assistant", "Hi, this is Cadence. How can I help?"), ("user", "Weather in Mysore?")]
     history = asyncio.run(agent.load_history(cid))
     assert memory.dialogue_text(history).startswith("Assistant: Hi, this is Cadence.")
+
+
+
+# Names: only a plausible one that the caller actually said.
+
+@pytest.mark.parametrize("bad", ["name", "Name", "caller", "the caller", "User", "unknown", "n/a",
+                                 "", "  ", None, "null", "Not provided", "A", "Asha 2", "asha@x.com",
+                                 "call me at 98123", "Hi there", "One Two Three Four", "you",
+                                 "Cadence", 42])
+def test_placeholders_and_non_names_are_not_names(bad):
+    assert memory.plausible_name(bad) is None
+
+
+def test_real_names_are_kept_only_if_the_caller_said_them():
+    for good in ("Asha", "Mary-Jane O'Neil", "José", "Priya Raman", "D'Souza"):
+        assert memory.plausible_name(good) == good
+    assert memory.plausible_name(" Asha. ") == "Asha"
+    assert memory.plausible_name("Asha", "hi i'm asha, weather please") == "Asha"
+    assert memory.plausible_name("Asha", "what's the weather in Mysore") is None
+    assert memory.plausible_name("Asha Rao", "I'm Asha") is None  # Every word must be heard.
+
+
+def test_the_summarizer_name_must_be_in_what_the_caller_said(store, monkeypatch):
+    requests = fake_llm(monkeypatch, json.dumps({**NOTES, "name": "name"}),
+                        json.dumps({**NOTES, "name": "Asha"}), json.dumps({**NOTES, "name": "Asha"}))
+
+    async def scenario():
+        await one_call(PHONE, said("I'd like to give my name.", "Sure, go ahead."))
+        assert store.callers[PHONE].display_name is None  # The placeholder is dropped.
+        await one_call(PHONE, said("What's the weather?", "Sunny, Asha."))  # Only the assistant said it.
+        assert store.callers[PHONE].display_name is None
+        await one_call(PHONE, said("This is Asha again.", "Hello."))
+    asyncio.run(scenario())
+    assert store.callers[PHONE].display_name == "Asha"
+    assert "null if they did not clearly say" in requests[0][0]["content"]
+
+
+def test_a_stored_placeholder_is_never_spoken_or_prompted(store):
+    store.callers[PHONE] = remembered(display_name="name")
+    asyncio.run(memory.begin_call("c", PHONE))
+    assert memory.greeting("c") == memory.GREETING == "Hi, this is Cadence. How can I help?"
+    assert "Name:" not in memory.prompt_block("c")
