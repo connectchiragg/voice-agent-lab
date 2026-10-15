@@ -30,8 +30,9 @@ Limits from Telnyx's documentation (checked 2026-10-15), and what we derive:
 - Codecs (`stream_codec`, `stream_bidirectional_codec`): PCMU, PCMA, G722 (all
   8 kHz), OPUS, AMR-WB, and L16 at 16 kHz, with `stream_bidirectional_sampling_rate`
   (default 8000). Payloads are base64 RTP payloads without headers. Telnyx does
-  not state L16's byte order; RTP L16 is network order (RFC 3551), as other
-  Telnyx clients decode it. The caller's own leg may still be 8 kHz (PSTN): then
+  not state L16's byte order. RTP L16 is network order (RFC 3551), but a real
+  call proved Telnyx's L16 media little-endian (big-endian decoding gave loud
+  static both ways), so TELNYX_L16_BYTE_ORDER defaults to `little`. The caller's own leg may still be 8 kHz (PSTN): then
   Telnyx transcodes, and only our side of the path is wideband. Telnyx may answer floods with
   `rate_limit_reached`, so we pace rather than dump a whole reply at once.
 - Webhooks: 2xx is success; 408, 429 and 5xx are retried (the same `data.id`).
@@ -40,6 +41,10 @@ Limits from Telnyx's documentation (checked 2026-10-15), and what we derive:
   checked against the account's public key; timestamps older than 5 minutes are
   refused (Telnyx SDK tolerance).
 - Concurrent calls start at 2 on a new account; TELNYX_MAX_CALLS defaults to 2.
+- Recording (TELNYX_RECORD=1, see app/recordings.py): `record_start` once the
+  stream has started, WAV, dual channel. `call.recording.saved` has download
+  URLs valid for 10 minutes, so only the recording's id is kept. Telnyx charges
+  $0.002 per recorded minute; storage is free (pricing page, 2026-10-15).
 """
 import asyncio
 import base64
@@ -51,9 +56,11 @@ import os
 import secrets
 import time
 from collections import deque
+from datetime import datetime, timezone
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
 from contextlib import aclosing, asynccontextmanager
 from dataclasses import dataclass, field
+from functools import partial
 from typing import Any, Literal
 from uuid import uuid4
 
@@ -64,7 +71,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from fastapi import APIRouter, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from app import g711, memory
+from app import g711, memory, recordings
 from app.pipeline import Call, Engines, Samples
 from app.transport import SpeechUnavailable, open_call
 
@@ -80,18 +87,27 @@ CONNECT_TIMEOUT_S = 10  # From answering to the media stream's `start`.
 GOODBYE = "We've reached the time limit for this call. Thanks for calling, goodbye!"
 GOODBYE_TIMEOUT_S = 15  # Synthesis plus playback of the goodbye, at most.
 MAX_PAYLOAD_CHARS = 16000  # 0.37 s of base64 L16 (1.5 s of µ-law): far above 20 ms frames.
+# Undecodable caller audio (wrong codec or byte order) reaches Flux as noise it
+# never transcribes. After the greeting has played, if this long passes with no
+# words from Flux while the caller's audio is loud, warn.
+DECODE_CHECK_S = 8.0
+LOUD_RMS = 0.03  # About -30 dBFS per 20 ms frame: speech, or noise from a misdecoded line.
+LOUD_SHARE = 0.2  # Of the frames heard during the check.
 
 
-def l16_decode(payload: bytes) -> Samples:
-    """L16 (16-bit signed, big-endian, as RTP sends it) to float32 in [-1, 1)."""
+L16_DTYPES = {"little": "<i2", "big": ">i2"}  # TELNYX_L16_BYTE_ORDER.
+
+
+def l16_decode(payload: bytes, byte_order: str = "little") -> Samples:
+    """L16 (16-bit signed) to float32 in [-1, 1)."""
     if len(payload) % 2:
         raise ValueError("L16 payload of an odd length")
-    return np.frombuffer(payload, dtype=">i2").astype(np.float32) / 32768
+    return np.frombuffer(payload, dtype=L16_DTYPES[byte_order]).astype(np.float32) / 32768
 
 
-def l16_encode(samples: Samples) -> bytes:
+def l16_encode(samples: Samples, byte_order: str = "little") -> bytes:
     pcm = np.clip(np.round(np.asarray(samples, dtype=np.float32) * 32768), -32768, 32767)
-    return pcm.astype(">i2").tobytes()
+    return pcm.astype(L16_DTYPES[byte_order]).tobytes()
 
 
 @dataclass(frozen=True)
@@ -100,19 +116,48 @@ class PhoneCodec:
     sample_rate: int
     decode: Callable[[bytes], Samples]
     encode: Callable[[Samples], bytes]
+    byte_order: str = ""  # L16 only; G.711 is bytewise.
+
+    @property
+    def label(self) -> str:
+        return f"{self.name} {self.byte_order}-endian" if self.byte_order else self.name
 
 
-L16 = PhoneCodec("L16", 16000, l16_decode, l16_encode)
+def l16_codec(byte_order: str) -> PhoneCodec:
+    return PhoneCodec("L16", 16000, partial(l16_decode, byte_order=byte_order),
+                      partial(l16_encode, byte_order=byte_order), byte_order)
+
+
+# Telnyx sends and expects L16 little-endian, although RTP L16 is network order
+# (RFC 3551): big-endian was heard as loud static on a real call and Flux heard
+# nothing. TELNYX_L16_BYTE_ORDER=big returns to network order.
+L16 = l16_codec("little")
+L16_BE = l16_codec("big")
 PCMU = PhoneCodec("PCMU", 8000, g711.decode, g711.encode)  # Fallback: TELNYX_CODEC=PCMU.
 CODECS = {codec.name: codec for codec in (L16, PCMU)}
 
 
+def l16_byte_order() -> str:
+    order = os.getenv("TELNYX_L16_BYTE_ORDER", "little").strip().lower()
+    if order not in L16_DTYPES:
+        raise ValueError("TELNYX_L16_BYTE_ORDER must be little or big")
+    return order
+
+
+def codec_named(name: str, byte_order: str = "little") -> PhoneCodec | None:
+    """A codec by its Telnyx name; L16 in the configured byte order."""
+    name = name.strip().upper()
+    if name == L16.name:
+        return L16 if byte_order == "little" else L16_BE
+    return CODECS.get(name)
+
+
 def phone_codec() -> PhoneCodec:
-    """TELNYX_CODEC: L16 (16 kHz, default) or PCMU (8 kHz)."""
-    name = os.getenv("TELNYX_CODEC", L16.name).strip().upper()
-    if name not in CODECS:
+    """TELNYX_CODEC: L16 (16 kHz, default) or PCMU (8 kHz); L16 in TELNYX_L16_BYTE_ORDER."""
+    codec = codec_named(os.getenv("TELNYX_CODEC", L16.name), l16_byte_order())
+    if codec is None:
         raise ValueError(f"TELNYX_CODEC must be one of {', '.join(CODECS)}")
-    return CODECS[name]
+    return codec
 
 
 def resample(samples: Samples, source_rate: int, target_rate: int) -> Samples:
@@ -132,6 +177,7 @@ class TelnyxSettings:
     max_call_s: int = 540
     max_calls: int = 2
     codec: PhoneCodec = L16  # Asked for both ways; the engines run at its rate.
+    record: bool = False  # TELNYX_RECORD=1: record each call (dual-channel WAV).
 
     @classmethod
     def from_env(cls) -> "TelnyxSettings | None":
@@ -146,7 +192,7 @@ class TelnyxSettings:
                    stream_url=os.environ["TELNYX_STREAM_URL"],
                    max_call_s=int(os.getenv("TELNYX_MAX_CALL_S", cls.max_call_s)),
                    max_calls=int(os.getenv("TELNYX_MAX_CALLS", cls.max_calls)),
-                   codec=phone_codec())
+                   codec=phone_codec(), record=recordings.enabled())
 
 
 def load_public_key(encoded: str) -> Ed25519PublicKey:
@@ -175,6 +221,18 @@ class CallControl:
         self.client = client
         self.headers = {"Authorization": f"Bearer {api_key}"}
         self.codec = codec
+
+    async def get(self, path: str, params: dict[str, str] | None = None) -> dict[str, Any] | None:
+        try:
+            response = await self.client.get(f"{API_URL}/{path}", params=params,
+                                             headers=self.headers, timeout=5)
+        except httpx.HTTPError as error:
+            logger.warning("Telnyx GET %s failed: %s", path.split("/")[0], type(error).__name__)
+            return None
+        if not response.is_success:
+            logger.warning("Telnyx GET %s refused: HTTP %d", path.split("/")[0], response.status_code)
+            return None
+        return response.json()
 
     async def command(self, call_control_id: str, action: str, body: dict[str, Any]) -> bool:
         url = f"{API_URL}/calls/{call_control_id}/actions/{action}"
@@ -205,6 +263,20 @@ class CallControl:
 
     async def hangup(self, call_control_id: str) -> bool:
         return await self.command(call_control_id, "hangup", {})
+
+    async def record_start(self, call_control_id: str) -> bool:
+        return await self.command(call_control_id, "record_start", {
+            "format": "wav", "channels": "dual",  # The caller and the assistant apart.
+            "command_id": f"record-{call_control_id}"})
+
+    async def recording(self, recording_id: str | None, call_control_id: str) -> dict[str, Any] | None:
+        """The recording object (`id`, `duration_millis`, `created_at`, fresh `download_urls`)."""
+        if recording_id:
+            found = await self.get(f"recordings/{recording_id}")
+            return found.get("data") if found else None
+        found = await self.get("recordings", {"filter[call_control_id]": call_control_id})
+        listed = found.get("data") if found else None
+        return max(listed, key=lambda item: str(item.get("created_at", ""))) if listed else None
 
 
 class Playout:
@@ -336,6 +408,9 @@ class PhoneSession:
         self.listening = True
         self.playing = False
         self.wake = asyncio.Event()
+        self.greeted = asyncio.Event()  # The greeting finished or was interrupted.
+        self.words_heard = False  # Flux transcribed something.
+        self.frames = self.loud_frames = 0  # Caller frames during the decode check.
 
     # Pipeline -> Telnyx.
 
@@ -345,10 +420,15 @@ class PhoneSession:
             self.wake.set()
             return
         kind = data.get("type")
+        if kind in ("partial", "transcript") and data.get("text"):
+            self.words_heard = True
         if kind == "transcript":
             self.playout.start_reply()
         elif kind == "interrupt":
+            self.greeted.set()
             await self.interrupt()
+        elif kind == "reply_end":
+            self.greeted.set()
 
     async def interrupt(self) -> None:
         played_s = self.playout.clear(self.clock())
@@ -392,6 +472,9 @@ class PhoneSession:
         samples = self.inbound.decode(base64.b64decode(payload, validate=True))
         if not self.listening or self.call is None:
             return
+        if len(samples):
+            self.frames += 1
+            self.loud_frames += float(np.sqrt(np.mean(np.square(samples)))) > LOUD_RMS
         samples = resample(samples, self.inbound.sample_rate, self.codec.sample_rate)
         self.pending.append(samples)
         self.pending_count += len(samples)
@@ -417,6 +500,18 @@ class PhoneSession:
         elif event == "stop":
             return False
         return True
+
+    async def check_decoding(self, wait_s: float = DECODE_CHECK_S) -> None:
+        """Warn when the caller's line is loud after the greeting but Flux hears no words."""
+        await self.greeted.wait()
+        await self.drained()
+        self.frames = self.loud_frames = 0
+        await asyncio.sleep(wait_s)
+        if not self.words_heard and self.frames and self.loud_frames >= LOUD_SHARE * self.frames:
+            logger.warning("Phone call: caller audio may be undecodable: codec %s, byte order %s "
+                           "(no words from Flux %.0f s after the greeting; %d of %d frames loud)",
+                           self.inbound.name, self.inbound.byte_order or "n/a", wait_s,
+                           self.loud_frames, self.frames)
 
     async def say_goodbye(self) -> None:
         """Cut any reply, stop listening, speak the goodbye and wait until it has played."""
@@ -546,7 +641,48 @@ async def webhook(request: Request) -> dict[str, bool]:
         board.spawn(hang_up(board, call_control_id))
     elif kind == "call.hangup":
         logger.info("Phone call ended: %s", payload.get("hangup_cause"))
+    elif kind == "call.recording.saved" and call_control_id:
+        board.spawn(recording_saved(board, call_control_id, payload))
+    elif kind == "call.recording.error":
+        logger.warning("Telnyx recording failed: %s", payload.get("reason") or payload.get("error"))
     return {"ok": True}
+
+
+async def start_recording(board: Switchboard, call_control_id: str) -> None:
+    if await board.control.record_start(call_control_id):
+        logger.info("Phone call recording started (wav, dual channel)")
+
+
+def iso_time(value: object) -> datetime | None:
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+async def recording_saved(board: Switchboard, call_control_id: str, payload: dict[str, Any]) -> None:
+    """Keep the recording's id and metadata; its URLs expire, so they are never stored."""
+    found = await board.control.recording(payload.get("recording_id"), call_control_id)
+    recording_id = str((found or {}).get("id") or payload.get("recording_id") or "")
+    if not recording_id:
+        logger.warning("Phone call recording saved, but its id was not found")
+        return
+    started, ended = (iso_time(payload.get(key)) for key in ("recording_started_at",
+                                                             "recording_ended_at"))
+    duration_ms = (found or {}).get("duration_millis")
+    if duration_ms is None and started and ended:
+        duration_ms = round((ended - started).total_seconds() * 1000)
+    created_at = (iso_time((found or {}).get("created_at")) or ended or started
+                  or datetime.now(timezone.utc))
+    try:
+        stored = await recordings.save(recordings.Recording(recording_id, call_control_id,
+                                                            created_at, duration_ms))
+    except Exception as error:
+        logger.warning("Recording metadata not stored: %s", type(error).__name__)
+        stored = False
+    logger.info("Phone call recording saved: id %s, %s s%s", recording_id,
+                "?" if duration_ms is None else f"{duration_ms / 1000:.1f}",
+                "" if stored else " (not stored: no Postgres)")
 
 
 async def hang_up(board: Switchboard, call_control_id: str) -> None:
@@ -592,13 +728,15 @@ async def media_stream(socket: WebSocket, token: str = "") -> None:
         media = start.start.media_format
         if start.start.call_control_id != call_control_id:
             raise ValueError("The stream belongs to another call")
-        inbound = CODECS.get(media.encoding.upper())
+        inbound = codec_named(media.encoding, board.settings.codec.byte_order or l16_byte_order())
         if inbound is None or media.sample_rate != inbound.sample_rate or media.channels != 1:
             logger.warning("Unexpected Telnyx media format %s/%d", media.encoding, media.sample_rate)
             raise ValueError("Unexpected media format")
         session.inbound = inbound
-        logger.info("Phone media: caller audio %s %d Hz, replies %s %d Hz", inbound.name,
-                    inbound.sample_rate, session.codec.name, session.codec.sample_rate)
+        if board.settings.record:  # Once the stream has started, so the greeting is on it.
+            board.spawn(start_recording(board, call_control_id))
+        logger.info("Phone media: caller audio %s %d Hz, replies %s %d Hz", inbound.label,
+                    inbound.sample_rate, session.codec.label, session.codec.sample_rate)
         if engines is None:
             logger.warning("Phone call refused: speech services are not configured")
             return
@@ -611,7 +749,8 @@ async def media_stream(socket: WebSocket, token: str = "") -> None:
         session.call.greet()  # The assistant speaks first; barge-in can cut it.
         time_limit = asyncio.create_task(end_at_time_limit(session, board.settings.max_call_s))
         reader = asyncio.create_task(read_stream(socket, session))
-        tasks += [asyncio.create_task(session.pump()), time_limit, reader]
+        tasks += [asyncio.create_task(session.pump()), asyncio.create_task(session.check_decoding()),
+                  time_limit, reader]
         await asyncio.wait((reader, time_limit), return_when=asyncio.FIRST_COMPLETED)
         if reader.done():
             reader.result()  # Raises what ended the stream, if anything did.

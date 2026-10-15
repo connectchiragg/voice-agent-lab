@@ -15,7 +15,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from app import access, agent, groq_api, memory, telnyx, webrtc
+from app import access, agent, groq_api, memory, recordings, telnyx, webrtc
 from app.deepgram import AuraSpeaker, DeepgramSettings, FluxListener
 from app.pipeline import Call, Engines, ReplyEvent, ReplyModel
 from app.transport import SpeechUnavailable, apply_player_event, open_call
@@ -85,6 +85,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # and history still available.
         async with (groq_api.shared_groq_client(), access.lifespan(), agent.lifespan(app),
                     memory.lifespan(agent.postgres_conninfo, agent.delete_thread),
+                    recordings.lifespan(agent.postgres_conninfo),
                     webrtc.lifespan(app),
                     telnyx.lifespan(app)):
             yield

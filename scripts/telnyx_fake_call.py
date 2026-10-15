@@ -1,6 +1,7 @@
 """A fake Telnyx for local phone-call tests: signed webhook, Call Control and the media stream.
 
     python scripts/telnyx_fake_call.py CLIP.wav [--env-file PATH] [--out reply.wav] [--barge-in]
+                                       [--byte-order little|big] [--record]
 
 Starts the app on --port with phone calls pointed at this script: a fresh
 ed25519 key pair signs the webhook, and Call Control requests (answer, hangup)
@@ -10,7 +11,8 @@ come here instead of api.telnyx.com. Deepgram and Groq keys are read from
 Then, like Telnyx on an inbound call: POST a signed `call.initiated`, wait for
 the `answer`, open its stream URL, send `connected` and `start`, let the
 greeting play, and stream the clip (16 kHz mono 16-bit WAV) as 20 ms base64
-L16 (big-endian) `media` frames at real time, followed by silence, as a phone
+L16 `media` frames at real time (little-endian, as Telnyx sends; --byte-order
+sets both this line's and the server's TELNYX_L16_BYTE_ORDER), followed by silence, as a phone
 line does. Reply audio is "played" at
 real time: each mark is returned when the audio before it would have played,
 and a `clear` returns the queued marks at once. Make a clip with:
@@ -45,7 +47,7 @@ from fastapi import FastAPI, Request
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-from app.telnyx import L16  # noqa: E402
+from app.telnyx import L16, codec_named  # noqa: E402
 
 RATE, FRAME = L16.sample_rate, L16.sample_rate // 50  # 20 ms frames, as Telnyx sends.
 SILENT = 0.01
@@ -82,8 +84,9 @@ class FakeCallControl:
 class Line:
     """The phone side of the stream: sends caller audio, plays reply audio at real time."""
 
-    def __init__(self, socket) -> None:
+    def __init__(self, socket, codec=L16) -> None:
         self.socket = socket
+        self.codec = codec
         self.reply: list[np.ndarray] = []
         self.first_audio: float | None = None
         self.cleared: float | None = None
@@ -114,7 +117,7 @@ class Line:
     async def speak(self, audio: np.ndarray, sends: list[float]) -> None:
         started = time.perf_counter()
         for index, offset in enumerate(range(0, len(audio), FRAME)):
-            payload = base64.b64encode(L16.encode(audio[offset:offset + FRAME])).decode()
+            payload = base64.b64encode(self.codec.encode(audio[offset:offset + FRAME])).decode()
             await self.send({"event": "media", "media": {"track": "inbound", "chunk": str(index + 1),
                                                          "timestamp": str(offset), "payload": payload}})
             sends.append(time.perf_counter())
@@ -135,7 +138,7 @@ class Line:
             message = json.loads(raw)
             now = loop.time()
             if message["event"] == "media":
-                audio = L16.decode(base64.b64decode(message["media"]["payload"]))
+                audio = self.codec.decode(base64.b64decode(message["media"]["payload"]))
                 self.first_audio = self.first_audio or time.perf_counter()
                 self.reply.append(audio)
                 self.playhead = max(self.playhead, now) + len(audio) / RATE
@@ -169,7 +172,9 @@ async def run(args: argparse.Namespace) -> None:
     env = {**os.environ, **{name: value for name, value in dotenv_values(args.env_file).items() if value},
            "TELNYX_API_KEY": "fake-local-key", "TELNYX_PUBLIC_KEY": public_key,
            "TELNYX_STREAM_URL": f"ws://127.0.0.1:{args.port}/ws/telnyx",
-           "TELNYX_API_URL": f"http://127.0.0.1:{fake_port}/v2"}
+           "TELNYX_API_URL": f"http://127.0.0.1:{fake_port}/v2",
+           "TELNYX_CODEC": "L16", "TELNYX_L16_BYTE_ORDER": args.byte_order,
+           "TELNYX_RECORD": "1" if args.record else "0"}
     server = subprocess.Popen([sys.executable, "-m", "uvicorn", "app.main:app", "--port", str(args.port)],
                               cwd=ROOT, env=env)
     base = f"http://127.0.0.1:{args.port}"
@@ -213,7 +218,7 @@ async def run(args: argparse.Namespace) -> None:
 async def call(stream_url: str, speech: np.ndarray, args: argparse.Namespace) -> None:
     lead, tail = RATE // 2, np.zeros(RATE * args.listen_s, np.float32)
     async with websockets.connect(stream_url) as socket:
-        line = Line(socket)
+        line = Line(socket, codec_named("L16", args.byte_order))
         await line.send({"event": "connected", "version": "1.0.0"})
         await line.send({"event": "start", "start": {
             "call_control_id": CALL_ID, "call_session_id": "fake-session", "user_id": "fake-user",
@@ -265,6 +270,8 @@ def main() -> None:
     parser.add_argument("--listen-s", type=int, default=8, help="Silence streamed after speech.")
     parser.add_argument("--out", type=Path, help="Write the reply audio here (never commit it).")
     parser.add_argument("--barge-in", action="store_true")
+    parser.add_argument("--byte-order", choices=("little", "big"), default="little")
+    parser.add_argument("--record", action="store_true", help="Expect a record_start command.")
     asyncio.run(run(parser.parse_args()))
 
 

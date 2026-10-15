@@ -118,13 +118,27 @@ needs a one-time per-call token. Set the three `TELNYX_*` variables in `.env`.
 
 - Audio is wideband: the call is answered with L16 at 16 kHz both ways
   (`stream_codec`, `stream_bidirectional_codec`, `stream_bidirectional_sampling_rate`),
-  and Flux and Aura run at 16 kHz linear16, so our side never resamples. L16
-  payloads are big-endian (RTP network order). `TELNYX_CODEC=PCMU` returns to
+  and Flux and Aura run at 16 kHz linear16, so our side never resamples. Telnyx's
+  L16 payloads are little-endian, not RTP network order: big-endian was heard as
+  loud static on a real call and Flux transcribed nothing
+  (`TELNYX_L16_BYTE_ORDER`, default `little`). `TELNYX_CODEC=PCMU` returns to
   8 kHz µ-law. Each call logs what Telnyx actually sends:
-  `Phone media: caller audio L16 16000 Hz, replies L16 16000 Hz`. A PSTN caller's
+  `Phone media: caller audio L16 little-endian 16000 Hz, replies L16 little-endian 16000 Hz`.
+  If the caller's line is loud for 8 s after the greeting but Flux hears no words,
+  the log says `caller audio may be undecodable: codec L16, byte order little`:
+  try the other byte order, or `TELNYX_CODEC=PCMU`. A PSTN caller's
   own leg is usually still 8 kHz G.711, which Telnyx transcodes; that leg caps
   what the caller can hear.
 - An unsigned `curl -X POST https://<host>/telnyx/webhook` returns 401.
+- Recording, for debugging (`TELNYX_RECORD=1`): each answered call is recorded
+  by Telnyx once its stream starts, as dual-channel WAV (the caller on one
+  channel, the assistant on the other). `call.recording.saved` logs the
+  recording id and duration and stores them in `call_recordings` (id, call
+  control id, created_at, duration). Telnyx's download URLs expire after 10
+  minutes, so only the id is kept; `scripts/fetch_recording.py [ID]` gets a fresh
+  URL and saves the file (the latest recording without an id). Telnyx charges
+  $0.002 per recorded minute; storage is free. Callers are not told they are
+  recorded.
 - On a trial account only verified numbers can call in (Verified Numbers in the
   portal), and calls are cut at 10 minutes: we say goodbye at 9.
 - Watch a call: `sudo docker logs -f voice-agent-lab 2>&1 | grep -iE 'phone|telnyx|turn latency|barge'`.
@@ -160,7 +174,7 @@ rm -f "$init"
 ```
 
 The app creates its tables at startup (LangGraph's checkpoints, `callers`,
-`call_summaries`). Check them with
+`call_summaries`, and `call_recordings` with `TELNYX_RECORD=1`). Check them with
 `sudo docker exec voice-postgres psql -U voice_agent -d voice_agent -c '\dt'`.
 If Postgres is down when the app starts, the app logs "Postgres unavailable"
 and keeps history and memory in RAM until its next restart.
@@ -204,6 +218,8 @@ To roll back, run the same `docker rm -f` and `docker run` with the rollback tag
 | `SPECULATIVE_LLM` | `1` | Start the LLM at Flux's EagerEndOfTurn; `0` turns it off |
 | `TELNYX_API_KEY`, `TELNYX_PUBLIC_KEY`, `TELNYX_STREAM_URL` | unset | Phone calls on the Telnyx number: Call Control key, webhook-signing public key (base64), and `wss://<host>/ws/telnyx`. Unset: `/telnyx/webhook` answers 503 |
 | `TELNYX_CODEC` | `L16` | Phone audio both ways: `L16` (16 kHz) or `PCMU` (8 kHz) |
+| `TELNYX_L16_BYTE_ORDER` | `little` | L16 payload byte order, both ways (`big` is RTP network order) |
+| `TELNYX_RECORD` | `0` | `1` records each phone call through Telnyx (dual-channel WAV; ids in `call_recordings`) |
 | `TELNYX_MAX_CALL_S`, `TELNYX_MAX_CALLS` | `540`, `2` | Per phone call: goodbye and hang up after this long (trial accounts are cut at 600 s); concurrent phone calls, beyond which callers get busy |
 | `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_PASSWORD` | `127.0.0.1`, `5432`, unset | History and caller memory (database and role `voice_agent`); on the VM `voice-postgres`. In memory when unset or unreachable |
 | `CF_ACCESS_AUD`, `CF_ACCESS_TEAM_DOMAIN` | unset, `https://small-brook-8402.cloudflareaccess.com` | Browser caller identity: the Access app's AUD tag; unset, every browser caller is anonymous |

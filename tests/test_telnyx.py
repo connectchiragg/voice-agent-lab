@@ -19,7 +19,7 @@ from starlette.websockets import WebSocketDisconnect
 
 from app import g711, main, telnyx
 from app.deepgram import DeepgramSettings
-from app.telnyx import (L16, PCMU, CallControl, PendingCall, PhoneSession, Playout,
+from app.telnyx import (L16, L16_BE, PCMU, CallControl, PendingCall, PhoneSession, Playout,
                         Switchboard, TelnyxSettings, signature_valid)
 from tests.test_app import TalkingListener
 from tests.test_pipeline import make_engines
@@ -205,9 +205,11 @@ def test_the_pcmu_fallback_answers_in_pcmu_at_8_khz():
             requests[0]["stream_bidirectional_sampling_rate"]) == ("PCMU", "PCMU", 8000)
 
 
-def test_l16_is_big_endian_16_bit_and_round_trips():
-    # Fixture: 0x4000 = +16384 (0.5), 0xC000 = -16384 (-0.5), 0x7FFF, 0x8000, in network order.
-    payload = bytes([0x40, 0x00, 0xC0, 0x00, 0x7F, 0xFF, 0x80, 0x00])
+def test_l16_is_little_endian_16_bit_and_round_trips():
+    # Telnyx's L16 media is little-endian (big-endian was loud static on a real call).
+    # Fixture: +16384 (0.5), -16384 (-0.5), 0x7FFF, 0x8000, low byte first.
+    payload = bytes([0x00, 0x40, 0x00, 0xC0, 0xFF, 0x7F, 0x00, 0x80])
+    assert L16.byte_order == "little"
     assert L16.decode(payload).tolist() == [0.5, -0.5, 32767 / 32768, -1.0]
     assert L16.encode(np.array([0.5, -0.5, 1.0, -1.0], np.float32)) == payload  # 1.0 clips.
     tone = (0.5 * np.sin(2 * np.pi * 440 * np.arange(320) / 16000)).astype(np.float32)
@@ -215,6 +217,29 @@ def test_l16_is_big_endian_16_bit_and_round_trips():
     assert len(L16.encode(tone)) == 640  # A 20 ms frame at 16 kHz.
     with pytest.raises(ValueError):
         L16.decode(b"\x00\x01\x02")
+
+
+def test_big_endian_l16_is_network_order():
+    payload = bytes([0x40, 0x00, 0xC0, 0x00, 0x7F, 0xFF, 0x80, 0x00])
+    assert L16_BE.decode(payload).tolist() == [0.5, -0.5, 32767 / 32768, -1.0]
+    assert L16_BE.encode(np.array([0.5, -0.5, 1.0, -1.0], np.float32)) == payload
+    # The bug: one order read as the other turns a quiet tone into full-scale noise.
+    quiet = np.full(320, 0.01, np.float32)
+    assert np.abs(L16_BE.decode(L16.encode(quiet))).max() > 0.5
+
+
+def test_l16_byte_order_setting(monkeypatch):
+    monkeypatch.delenv("TELNYX_CODEC", raising=False)
+    monkeypatch.delenv("TELNYX_L16_BYTE_ORDER", raising=False)
+    assert telnyx.phone_codec() is L16
+    monkeypatch.setenv("TELNYX_L16_BYTE_ORDER", "big")
+    assert telnyx.phone_codec() is L16_BE
+    assert telnyx.codec_named("l16", "big") is L16_BE and telnyx.codec_named("PCMU", "big") is PCMU
+    monkeypatch.setenv("TELNYX_CODEC", "PCMU")
+    assert telnyx.phone_codec() is PCMU  # Bytewise: the order does not apply.
+    monkeypatch.setenv("TELNYX_L16_BYTE_ORDER", "middle")
+    with pytest.raises(ValueError):
+        telnyx.phone_codec()
 
 
 def test_phone_engines_run_deepgram_at_16_khz_both_ways(monkeypatch):
@@ -434,7 +459,7 @@ def test_phone_call_hears_a_turn_and_replies_in_l16_with_marks(board, phone_engi
         socket.send_json({"event": "stop", "sequence_number": "100", "stream_id": "stream-1",
                           "stop": {"user_id": "u-1", "call_control_id": CALL_ID}})
     assert phone_engines["replies"] == ["what's up"]
-    assert "caller audio L16 16000 Hz, replies L16 16000 Hz" in caplog.text
+    assert "caller audio L16 little-endian 16000 Hz, replies L16 little-endian 16000 Hz" in caplog.text
     assert CALL_ID not in board.live
     time.sleep(0.05)
     assert board.requests == []  # Telnyx ended the call: no hangup from us.
@@ -516,3 +541,105 @@ def test_an_anonymous_or_withheld_number_has_no_caller_key(board):
         post_event(client, event)
         wait_for(lambda: len(board.pending) == 1)
         assert next(iter(board.pending.values())).caller_key is None
+
+
+# Undecodable caller audio.
+
+def test_loud_caller_audio_without_words_after_the_greeting_is_flagged(caplog):
+    async def scenario(words):
+        async def to_telnyx(message):
+            pass
+
+        session = PhoneSession(to_telnyx, L16)
+        session.call = RecordingCall()
+        check = asyncio.create_task(session.check_decoding(wait_s=0.05))
+        await session.send({"type": "reply_end"})  # The greeting is over (nothing queued).
+        await asyncio.sleep(0.01)
+        if words:
+            await session.send({"type": "partial", "text": "hello"})
+        noise = base64.b64encode(L16.encode(np.full(320, 0.3, np.float32))).decode()
+        for _ in range(10):
+            await session.hear(noise)
+        await check
+    with caplog.at_level("INFO", logger="uvicorn.error"):
+        asyncio.run(scenario(words=True))
+        assert "undecodable" not in caplog.text
+        asyncio.run(scenario(words=False))
+    assert "caller audio may be undecodable: codec L16, byte order little" in caplog.text
+
+
+# Recording.
+
+def test_recording_starts_after_the_stream_starts_in_dual_channel_wav(board, phone_engines):
+    board.settings = TelnyxSettings(api_key="test-key", public_key=board.settings.public_key,
+                                    stream_url=STREAM_URL, max_call_s=600, max_calls=1, record=True)
+    board.pending["tok"] = PendingCall(CALL_ID, time.monotonic() + 5)
+    with TestClient(main.app).websocket_connect("/ws/telnyx?token=tok") as socket:
+        socket.send_json(start_message())
+        wait_for(lambda: board.requests)
+        socket.send_json({"event": "stop", "stop": {"call_control_id": CALL_ID}})
+    path, body, _ = board.requests[0]
+    assert path == f"/v2/calls/{CALL_ID}/actions/record_start"
+    assert body == {"format": "wav", "channels": "dual", "command_id": f"record-{CALL_ID}"}
+
+
+def test_recording_off_by_default(monkeypatch):
+    monkeypatch.delenv("TELNYX_RECORD", raising=False)
+    assert not telnyx.recordings.enabled()
+    monkeypatch.setenv("TELNYX_RECORD", "1")
+    assert telnyx.recordings.enabled()
+
+
+def test_saved_recording_keeps_its_id_and_metadata_but_no_url_or_number(board, monkeypatch, caplog):
+    gets, saved = [], []
+
+    def handle(request):
+        gets.append((request.method, request.url.path))
+        return httpx.Response(200, json={"data": {
+            "id": "rec-1", "call_control_id": CALL_ID, "duration_millis": 42500,
+            "created_at": "2026-10-15T10:01:00Z", "from": "+15550001111",
+            "download_urls": {"wav": "https://s3.example.test/signed?X-Amz-Signature=secret"}}})
+
+    async def save(recording):
+        saved.append(recording)
+        return True
+    board.control.client = httpx.AsyncClient(transport=httpx.MockTransport(handle))
+    monkeypatch.setattr(telnyx.recordings, "save", save)
+    event = {"data": {"event_type": "call.recording.saved", "id": "evt-r1", "record_type": "event",
+                      "payload": {"call_control_id": CALL_ID, "recording_id": "rec-1",
+                                  "channels": "dual", "from": "+15550001111",
+                                  "recording_started_at": "2026-10-15T10:00:00Z",
+                                  "recording_ended_at": "2026-10-15T10:00:42Z",
+                                  "recording_urls": {"wav": "https://s3.example.test/signed?X-Amz-Signature=secret"}}}}
+    with caplog.at_level("INFO", logger="uvicorn.error"), webhook_client(board) as client:
+        assert post_event(client, event).status_code == 200
+        wait_for(lambda: saved)
+    assert gets == [("GET", "/v2/recordings/rec-1")]
+    recording = saved[0]
+    assert (recording.recording_id, recording.call_control_id, recording.duration_ms) == (
+        "rec-1", CALL_ID, 42500)
+    assert recording.created_at.isoformat() == "2026-10-15T10:01:00+00:00"
+    assert "Phone call recording saved: id rec-1, 42.5 s" in caplog.text
+    assert "15550001111" not in caplog.text and "secret" not in caplog.text
+
+
+def test_saved_recording_without_an_id_is_found_by_call(board, monkeypatch):
+    saved = []
+
+    def handle(request):
+        assert request.url.params["filter[call_control_id]"] == CALL_ID
+        return httpx.Response(200, json={"data": [
+            {"id": "old", "created_at": "2026-10-15T09:00:00Z", "duration_millis": 1000},
+            {"id": "new", "created_at": "2026-10-15T10:00:00Z", "duration_millis": 2000}]})
+
+    async def save(recording):
+        saved.append(recording)
+        return True
+    board.control.client = httpx.AsyncClient(transport=httpx.MockTransport(handle))
+    monkeypatch.setattr(telnyx.recordings, "save", save)
+    event = {"data": {"event_type": "call.recording.saved", "id": "evt-r2", "record_type": "event",
+                      "payload": {"call_control_id": CALL_ID}}}
+    with webhook_client(board) as client:
+        post_event(client, event)
+        wait_for(lambda: saved)
+    assert (saved[0].recording_id, saved[0].duration_ms) == ("new", 2000)
