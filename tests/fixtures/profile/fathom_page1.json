@@ -1,0 +1,14 @@
+{"limit": 1, "next_cursor": "c2", "items": [{
+  "title": "Acme <> Asha", "meeting_title": "Acme interview - system design round", "recording_id": 111,
+  "url": "https://fathom.video/calls/111", "created_at": "2026-09-01T10:00:00Z",
+  "recording_start_time": "2026-09-01T10:00:00Z", "recording_end_time": "2026-09-01T10:45:00Z",
+  "transcript": [
+    {"speaker": {"display_name": "Priya Interviewer", "matched_calendar_invitee_email": "priya@acme.example"}, "text": "How would you design a rate limiter?", "timestamp": "00:00:05"},
+    {"speaker": {"display_name": "Chirag Goel", "matched_calendar_invitee_email": null}, "text": "Um so basically I would start with a token bucket per tenant and keep counters in Redis with a TTL.", "timestamp": "00:00:12"},
+    {"speaker": {"display_name": "Priya Interviewer", "matched_calendar_invitee_email": null}, "text": "What about expected compensation?", "timestamp": "00:01:30"}
+  ],
+  "default_summary": {"template_name": "General", "markdown_formatted": "System design discussion about rate limiting."},
+  "calendar_invitees": [{"name": "Priya Interviewer", "email": "priya@acme.example", "email_domain": "acme.example", "is_external": true},
+                        {"name": null, "matched_speaker_display_name": "Chirag Goel", "email": "owner@example.com", "is_external": false}],
+  "recorded_by": {"name": "Chirag Goel", "email": "owner@example.com", "email_domain": "example.com", "team": null}
+}]}

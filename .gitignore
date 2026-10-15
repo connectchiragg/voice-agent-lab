@@ -9,3 +9,6 @@ __pycache__/
 !.env.example
 .DS_Store
 .cache/
+
+# VALR private data: profile, compensation, evaluation, raw recording cache
+data/
