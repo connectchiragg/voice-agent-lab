@@ -80,6 +80,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.engines = load_engines()
     app.state.phone_engines = load_engines(telnyx.phone_codec().sample_rate)
     watcher = asyncio.create_task(watch_event_loop())
+    announcing = asyncio.create_task(callbacks.announce())  # Off the startup path.
     try:
         # Exits in reverse: calls close first, then their summaries finish with the LLM
         # and history still available.
@@ -91,6 +92,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             yield
     finally:
         watcher.cancel()
+        announcing.cancel()
 
 
 app = FastAPI(title="Voice Agent Lab", docs_url=None, redoc_url=None, openapi_url=None,

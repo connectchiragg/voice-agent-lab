@@ -308,3 +308,21 @@ def test_a_callback_opens_with_its_reason_and_the_callers_name(monkeypatch):
     monkeypatch.setattr(memory, "display_name", lambda conversation_id: "Chirag")
     assert callbacks.greeting("conv-cb") == "Hi Chirag, you asked me to call back about the weather."
     assert callbacks.greeting("conv-other") == memory.greeting("conv-other")
+
+
+def test_startup_logs_whether_callbacks_are_on(monkeypatch, caplog):
+    import logging
+    from app import callbacks as module
+    monkeypatch.delenv("TEMPORAL_ADDRESS", raising=False)
+    with caplog.at_level(logging.INFO, logger="uvicorn.error"):
+        asyncio.run(module.announce())
+    assert "Callbacks are off" in caplog.text
+
+    async def connected():
+        return object()
+    monkeypatch.setenv("TEMPORAL_ADDRESS", "temporal:7233")
+    monkeypatch.setenv("TEMPORAL_NAMESPACE", "voice-agent-lab")
+    monkeypatch.setattr(module, "temporal", connected)
+    with caplog.at_level(logging.INFO, logger="uvicorn.error"):
+        asyncio.run(module.announce())
+    assert "Callbacks enabled: Temporal at temporal:7233, namespace voice-agent-lab" in caplog.text

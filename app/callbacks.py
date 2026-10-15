@@ -75,6 +75,17 @@ async def temporal() -> TemporalClient | None:
         return client
 
 
+async def announce() -> None:
+    """At startup: connect once and log whether callbacks are on, so the logs say so."""
+    settings = TemporalSettings.from_env()
+    if settings is None:
+        logger.info("Callbacks are off (TEMPORAL_ADDRESS is not set).")
+        return
+    if await temporal() is not None:
+        logger.info("Callbacks enabled: Temporal at %s, namespace %s", settings.address,
+                    settings.namespace)
+
+
 # Natural times, in the caller's time zone.
 
 WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
