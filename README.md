@@ -342,7 +342,10 @@ its state; an **update** is a signal that answers yes or no.
 How one callback flows:
 
 1. During a phone call the caller asks. The model says the day and time back,
-   gets a yes, and calls `schedule_callback(when, reason)`. The tool reads the
+   gets a yes, and books it. The yes is enforced in code: `schedule_callback`
+   without `confirmed` only proposes (nothing is booked), and `confirmed=true`
+   books that proposed time only if the caller's very next turn is a clear yes
+   (no "no" in it); `reschedule_callback` works the same way. The tool reads the
    time ("tomorrow at 5 pm", "in 2 hours", "Friday 10:30 am", or ISO) in the
    caller's time zone (`ASSISTANT_TIMEZONE`, or a `time_zone` the caller
    names), refuses the past, more than two weeks ahead and, when
