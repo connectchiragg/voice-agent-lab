@@ -1,0 +1,579 @@
+"""Phone calls over Telnyx: Call Control answers, a bidirectional media stream carries the audio.
+
+Per inbound call to the Telnyx number:
+
+1. Telnyx POSTs `call.initiated` to /telnyx/webhook, signed with ed25519; unsigned
+   or stale requests are refused. We answer with a media stream to
+   `TELNYX_STREAM_URL?token=<one-time token>`, PCMU both ways, RTP mode
+   (bidirectional), or reject the call when the server is full.
+2. Telnyx opens /ws/telnyx: `connected`, `start`, then `media` frames of 8 kHz
+   µ-law. These are decoded (no resampling: Flux listens at 8 kHz) and handed to
+   the pipeline in `INPUT_BATCH_S` packets.
+3. Reply audio (Aura at 8 kHz) is µ-law encoded and sent in `CHUNK_S` media
+   messages, each followed by a `mark`. Telnyx returns a mark when the audio
+   before it has played, so marks say what the caller has heard. Sending runs at
+   most `LEAD_S` ahead of that.
+4. Barge-in (Flux StartOfTurn while the assistant speaks): the pipeline's
+   interrupt becomes `clear`, which drops the audio Telnyx has queued.
+5. At `max_call_s` the reply is cut, a goodbye is spoken, and we hang up.
+
+Limits from Telnyx's documentation (checked 2026-10-15), and what we derive:
+
+- Trial accounts cap every call at 10 minutes; paid accounts have no documented
+  limit on an answered inbound call (dial's own `time_limit_secs` is at most 4 h).
+  TELNYX_MAX_CALL_S defaults to 540 s so the goodbye always beats the trial cap.
+- One bidirectional RTP stream per call. Outbound media chunks must be 20 ms to
+  30 s of audio; CHUNK_S is 100 ms. Telnyx may answer floods with
+  `rate_limit_reached`, so we pace rather than dump a whole reply at once.
+- Webhooks: 2xx is success; 408, 429 and 5xx are retried (the same `data.id`).
+  We answer from a background task and return 200 at once, and skip repeats.
+- Signatures: `telnyx-signature-ed25519` over "{telnyx-timestamp}|{raw body}",
+  checked against the account's public key; timestamps older than 5 minutes are
+  refused (Telnyx SDK tolerance).
+- Concurrent calls start at 2 on a new account; TELNYX_MAX_CALLS defaults to 2.
+"""
+import asyncio
+import base64
+import binascii
+import json
+import logging
+import math
+import os
+import secrets
+import time
+from collections import deque
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
+from contextlib import aclosing, asynccontextmanager
+from dataclasses import dataclass, field
+from typing import Any, Literal
+from uuid import uuid4
+
+import httpx
+import numpy as np
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+from fastapi import APIRouter, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from pydantic import BaseModel, ConfigDict, ValidationError
+
+from app import g711
+from app.pipeline import Call, Engines, Samples
+from app.transport import SpeechUnavailable, open_call
+
+logger = logging.getLogger("uvicorn.error")
+# Overridable only so the local fake-Telnyx harness can stand in for Call Control.
+API_URL = os.getenv("TELNYX_API_URL", "https://api.telnyx.com/v2")
+SAMPLE_RATE = 8000  # PCMU, Telnyx's default stream codec, which Flux and Aura both take natively.
+INPUT_BATCH_S = 0.08  # Deepgram recommends 80 ms chunks for Flux.
+CHUNK_S = 0.1  # Reply audio per media message.
+LEAD_S = 1.0  # Most reply audio sent but not yet heard; `clear` drops it on barge-in.
+TICK_S = 0.02
+SIGNATURE_TOLERANCE_S = 300
+CONNECT_TIMEOUT_S = 10  # From answering to the media stream's `start`.
+GOODBYE = "We've reached the time limit for this call. Thanks for calling, goodbye!"
+GOODBYE_TIMEOUT_S = 15  # Synthesis plus playback of the goodbye, at most.
+MAX_PAYLOAD_CHARS = 16000  # About 1.5 s of base64 µ-law: far above Telnyx's 20 ms frames.
+
+
+@dataclass(frozen=True)
+class TelnyxSettings:
+    api_key: str
+    public_key: Ed25519PublicKey
+    stream_url: str  # wss://<public host>/ws/telnyx
+    max_call_s: int = 540
+    max_calls: int = 2
+
+    @classmethod
+    def from_env(cls) -> "TelnyxSettings | None":
+        """None (phone calls refused) unless the key, public key and stream URL are set."""
+        names = ("TELNYX_API_KEY", "TELNYX_PUBLIC_KEY", "TELNYX_STREAM_URL")
+        missing = [name for name in names if not os.getenv(name)]
+        if missing:
+            logger.warning("Phone calls disabled; not set: %s", ", ".join(missing))
+            return None
+        return cls(api_key=os.environ["TELNYX_API_KEY"],
+                   public_key=load_public_key(os.environ["TELNYX_PUBLIC_KEY"]),
+                   stream_url=os.environ["TELNYX_STREAM_URL"],
+                   max_call_s=int(os.getenv("TELNYX_MAX_CALL_S", cls.max_call_s)),
+                   max_calls=int(os.getenv("TELNYX_MAX_CALLS", cls.max_calls)))
+
+
+def load_public_key(encoded: str) -> Ed25519PublicKey:
+    """The portal's public key: 32 raw bytes, base64."""
+    return Ed25519PublicKey.from_public_bytes(base64.b64decode(encoded.strip(), validate=True))
+
+
+def signature_valid(key: Ed25519PublicKey, body: bytes, signature: str | None,
+                    timestamp: str | None, now: float | None = None) -> bool:
+    """Telnyx's webhook signature: ed25519 over "{timestamp}|{raw body}", recent timestamp."""
+    if not signature or not timestamp:
+        return False
+    try:
+        sent_at = int(timestamp)
+        key.verify(base64.b64decode(signature, validate=True), f"{sent_at}|".encode() + body)
+    except (ValueError, binascii.Error, InvalidSignature):
+        return False
+    now = time.time() if now is None else now
+    return abs(now - sent_at) <= SIGNATURE_TOLERANCE_S
+
+
+class CallControl:
+    """The few Call Control commands we use. Errors are logged by status, never by body."""
+
+    def __init__(self, client: httpx.AsyncClient, api_key: str) -> None:
+        self.client = client
+        self.headers = {"Authorization": f"Bearer {api_key}"}
+
+    async def command(self, call_control_id: str, action: str, body: dict[str, Any]) -> bool:
+        url = f"{API_URL}/calls/{call_control_id}/actions/{action}"
+        try:
+            response = await self.client.post(url, json=body, headers=self.headers, timeout=5)
+        except httpx.HTTPError as error:
+            logger.warning("Telnyx %s failed: %s", action, type(error).__name__)
+            return False
+        if response.is_success:
+            return True
+        logger.warning("Telnyx %s refused: HTTP %d", action, response.status_code)
+        return False
+
+    async def answer(self, call_control_id: str, stream_url: str, command_id: str) -> bool:
+        return await self.command(call_control_id, "answer", {
+            "stream_url": stream_url,
+            "stream_track": "inbound_track",  # The caller only; our own audio is not echoed back.
+            "stream_codec": "PCMU",
+            "stream_bidirectional_mode": "rtp",
+            "stream_bidirectional_codec": "PCMU",
+            "command_id": command_id,  # Telnyx ignores a repeat (webhook retry).
+        })
+
+    async def reject(self, call_control_id: str, command_id: str) -> bool:
+        return await self.command(call_control_id, "reject",
+                                  {"cause": "USER_BUSY", "command_id": command_id})
+
+    async def hangup(self, call_control_id: str) -> bool:
+        return await self.command(call_control_id, "hangup", {})
+
+
+class Playout:
+    """Reply audio queued for Telnyx, and an estimate of what the caller has heard.
+
+    Positions count reply samples only. `written` is the end of the queue and
+    `sent` how much has gone to Telnyx. `heard` is anchored at the last mark
+    Telnyx returned (or where sending resumed after silence) and advances with
+    the clock from there, never past what was sent.
+
+    Marks carry an epoch: those Telnyx returns because of a `clear` belong to
+    the old epoch and are ignored.
+    """
+
+    def __init__(self, sample_rate: int = SAMPLE_RATE) -> None:
+        self.rate = sample_rate
+        self.chunk = round(sample_rate * CHUNK_S)
+        self.chunks: deque[Samples] = deque()
+        self.written = self.sent = self.heard = 0
+        self.heard_at = -math.inf
+        self.epoch = 0
+        self.marks = 0
+        self.reply_start = 0
+
+    def push(self, samples: Samples) -> None:
+        if len(samples):
+            self.chunks.append(samples)
+            self.written += len(samples)
+
+    def heard_by(self, now: float) -> int:
+        played = (now - self.heard_at) * self.rate  # Since the anchor; -inf: never anchored.
+        return self.sent if played >= self.sent - self.heard else self.heard + max(0, round(played))
+
+    def playing(self, now: float) -> bool:
+        return self.heard_by(now) < self.written
+
+    def next_chunk(self, now: float) -> tuple[bytes, str] | None:
+        """µ-law for the next media message and the mark to send after it, or None to wait."""
+        if self.sent == self.written:
+            return None
+        heard = self.heard_by(now)
+        if heard >= self.sent:  # Nothing in flight: playback (re)starts with this chunk.
+            self.heard, self.heard_at = self.sent, now
+        elif self.sent - heard >= LEAD_S * self.rate:
+            return None
+        samples = self.take(self.chunk)
+        self.sent += len(samples)
+        self.marks += 1
+        return g711.encode(samples), f"{self.epoch}:{self.marks}:{self.sent}"
+
+    def take(self, count: int) -> Samples:
+        parts, needed = [], count
+        while needed and self.chunks:
+            head = self.chunks[0]
+            parts.append(head[:needed])
+            if len(head) <= needed:
+                self.chunks.popleft()
+            else:
+                self.chunks[0] = head[needed:]
+            needed -= len(parts[-1])
+        return np.concatenate(parts)
+
+    def marked(self, name: str, now: float) -> None:
+        """Telnyx returned a mark: the audio before it has played."""
+        try:
+            epoch, _, position = (int(part) for part in name.split(":"))
+        except ValueError:
+            return
+        if epoch == self.epoch and position >= self.heard:
+            self.heard, self.heard_at = position, now
+
+    def clear(self, now: float) -> float:
+        """Barge-in: drop everything unplayed; seconds of the current reply heard."""
+        heard = self.heard_by(now)
+        played_s = max(0, heard - self.reply_start) / self.rate
+        self.chunks.clear()
+        self.epoch += 1
+        self.written = self.sent = self.heard = self.reply_start = heard
+        self.heard_at = now
+        return played_s
+
+    def start_reply(self) -> None:
+        self.reply_start = self.written
+
+
+class MediaFormat(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    encoding: str
+    sample_rate: int
+    channels: int = 1
+
+
+class StartInfo(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    call_control_id: str
+    media_format: MediaFormat
+
+
+class StartMessage(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    event: Literal["start"]
+    stream_id: str
+    start: StartInfo
+
+
+Sender = Callable[[dict[str, Any]], Awaitable[None]]
+
+
+class PhoneSession:
+    """One Telnyx media stream and its pipeline call.
+
+    `send` is the pipeline's Send: audio is queued for pacing, an interrupt
+    becomes `clear` and reports the heard seconds back to the call. Other
+    events (partials, captions, metrics) have no screen to go to.
+    """
+
+    def __init__(self, to_telnyx: Sender, sample_rate: int = SAMPLE_RATE,
+                 clock: Callable[[], float] = time.monotonic) -> None:
+        self.to_telnyx = to_telnyx
+        self.clock = clock
+        self.playout = Playout(sample_rate)
+        self.call: Call | None = None
+        self.batch = round(sample_rate * INPUT_BATCH_S)
+        self.pending: list[Samples] = []
+        self.pending_count = 0
+        self.listening = True
+        self.playing = False
+        self.wake = asyncio.Event()
+
+    # Pipeline -> Telnyx.
+
+    async def send(self, data: dict[str, object] | bytes) -> None:
+        if isinstance(data, bytes):
+            self.playout.push(np.frombuffer(data, dtype="<f4"))
+            self.wake.set()
+            return
+        kind = data.get("type")
+        if kind == "transcript":
+            self.playout.start_reply()
+        elif kind == "interrupt":
+            await self.interrupt()
+
+    async def interrupt(self) -> None:
+        played_s = self.playout.clear(self.clock())
+        await self.to_telnyx({"event": "clear"})
+        self.set_playing(False)
+        if self.call is not None:
+            self.call.report_played(played_s)
+
+    def set_playing(self, playing: bool) -> None:
+        if playing != self.playing:
+            self.playing = playing
+            if self.call is not None:
+                self.call.set_playing(playing)
+
+    async def pump(self) -> None:
+        """Send queued reply audio, paced; keep the call's playing state current."""
+        while True:
+            message = self.playout.next_chunk(self.clock())
+            if message is not None:
+                payload, mark = message
+                await self.to_telnyx({"event": "media",
+                                      "media": {"payload": base64.b64encode(payload).decode()}})
+                await self.to_telnyx({"event": "mark", "mark": {"name": mark}})
+            self.set_playing(self.playout.playing(self.clock()))
+            if message is None:
+                self.wake.clear()
+                try:
+                    await asyncio.wait_for(self.wake.wait(), TICK_S)
+                except TimeoutError:
+                    pass
+
+    async def drained(self) -> None:
+        while self.playout.playing(self.clock()):
+            await asyncio.sleep(TICK_S)
+
+    # Telnyx -> pipeline.
+
+    async def hear(self, payload: str) -> None:
+        if len(payload) > MAX_PAYLOAD_CHARS:
+            raise ValueError("Media frame too large")
+        samples = g711.decode(base64.b64decode(payload, validate=True))
+        if not self.listening or self.call is None:
+            return
+        self.pending.append(samples)
+        self.pending_count += len(samples)
+        if self.pending_count >= self.batch:
+            packet = np.concatenate(self.pending).astype("<f4")
+            self.pending, self.pending_count = [], 0
+            await self.call.hear(packet.tobytes())
+
+    async def handle(self, message: dict[str, Any]) -> bool:
+        """One message from Telnyx; False once the stream has stopped."""
+        event = message.get("event")
+        if event == "media":
+            media = message.get("media") or {}
+            if media.get("track", "inbound") == "inbound":
+                await self.hear(str(media.get("payload", "")))
+        elif event == "mark":
+            self.playout.marked(str((message.get("mark") or {}).get("name", "")), self.clock())
+        elif event == "dtmf":
+            logger.info("Phone call: DTMF received (not used yet)")
+        elif event == "error":
+            error = message.get("payload") or {}
+            logger.warning("Telnyx stream error %s: %s", error.get("code"), error.get("title"))
+        elif event == "stop":
+            return False
+        return True
+
+    async def say_goodbye(self) -> None:
+        """Cut any reply, stop listening, speak the goodbye and wait until it has played."""
+        assert self.call is not None
+        self.listening = False
+        if self.call.assistant_busy:
+            await self.call.interrupt()
+        self.playout.start_reply()
+        async with aclosing(self.call.speaker.synthesize(GOODBYE)) as stream:
+            async for audio in stream:
+                await self.send(audio.astype("<f4").tobytes())
+        await self.drained()
+
+
+@dataclass
+class Switchboard:
+    """Phone calls on this server: answered calls awaiting their stream, and live ones."""
+    settings: TelnyxSettings
+    control: CallControl
+    pending: dict[str, tuple[str, float]] = field(default_factory=dict)  # token -> (call, deadline)
+    live: set[str] = field(default_factory=set)
+    seen: deque[str] = field(default_factory=lambda: deque(maxlen=1000))  # Webhook ids handled.
+    tasks: set[asyncio.Task[None]] = field(default_factory=set)
+
+    def spawn(self, work: Coroutine[object, object, None]) -> None:
+        task = asyncio.create_task(work)
+        self.tasks.add(task)
+        task.add_done_callback(self.tasks.discard)
+
+    def first_time(self, event_id: str) -> bool:
+        if event_id in self.seen:
+            return False
+        self.seen.append(event_id)
+        return True
+
+    @property
+    def calls(self) -> int:
+        now = time.monotonic()
+        return len(self.live) + sum(1 for _, deadline in self.pending.values() if deadline > now)
+
+    async def incoming(self, call_control_id: str, event_id: str) -> None:
+        if self.calls >= self.settings.max_calls:
+            logger.info("Phone call rejected: %d calls in progress", self.calls)
+            await self.control.reject(call_control_id, event_id)
+            return
+        token = secrets.token_urlsafe(24)
+        self.pending[token] = (call_control_id, time.monotonic() + CONNECT_TIMEOUT_S)
+        if not await self.control.answer(call_control_id, f"{self.settings.stream_url}?token={token}",
+                                         event_id):
+            self.pending.pop(token, None)
+            return
+        logger.info("Phone call answered; waiting for its media stream")
+        await asyncio.sleep(CONNECT_TIMEOUT_S)
+        if self.pending.pop(token, None) is not None:
+            logger.warning("Phone call media stream never connected; hanging up")
+            await self.control.hangup(call_control_id)
+
+    def claim(self, token: str) -> str | None:
+        """The call this one-time stream token was issued for, if still valid."""
+        call_control_id, deadline = self.pending.pop(token, ("", 0.0))
+        if not call_control_id or deadline < time.monotonic():
+            return None
+        self.live.add(call_control_id)
+        return call_control_id
+
+
+router = APIRouter()
+
+
+def board_of(app: FastAPI) -> Switchboard | None:
+    return getattr(app.state, "switchboard", None)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI, settings: TelnyxSettings | None = None) -> AsyncIterator[None]:
+    """App lifespan: one HTTP client for Call Control; background work stops on shutdown."""
+    settings = settings or TelnyxSettings.from_env()
+    if settings is None:
+        app.state.switchboard = None
+        yield
+        return
+    async with httpx.AsyncClient() as client:
+        board = Switchboard(settings, CallControl(client, settings.api_key))
+        app.state.switchboard = board
+        try:
+            yield
+        finally:
+            for task in list(board.tasks):
+                task.cancel()
+            await asyncio.gather(*board.tasks, return_exceptions=True)
+
+
+@router.post("/telnyx/webhook")
+async def webhook(request: Request) -> dict[str, bool]:
+    board = board_of(request.app)
+    if board is None:
+        raise HTTPException(503, "Phone calls are not configured.")
+    body = await request.body()
+    if not signature_valid(board.settings.public_key, body,
+                           request.headers.get("telnyx-signature-ed25519"),
+                           request.headers.get("telnyx-timestamp")):
+        raise HTTPException(401, "Invalid signature.")
+    try:
+        data = json.loads(body)["data"]
+        kind, event_id, payload = data["event_type"], str(data["id"]), data.get("payload") or {}
+    except (ValueError, KeyError, TypeError) as error:
+        raise HTTPException(400, "Unexpected webhook.") from error
+    if not board.first_time(event_id):
+        return {"ok": True}  # A retry of something already handled.
+    call_control_id = str(payload.get("call_control_id", ""))
+    if kind == "call.initiated" and payload.get("direction") == "incoming" and call_control_id:
+        board.spawn(board.incoming(call_control_id, event_id))
+    elif kind == "streaming.failed" and call_control_id:
+        logger.warning("Telnyx media stream failed: %s", payload.get("failure_reason"))
+        board.spawn(hang_up(board, call_control_id))
+    elif kind == "call.hangup":
+        logger.info("Phone call ended: %s", payload.get("hangup_cause"))
+    return {"ok": True}
+
+
+async def hang_up(board: Switchboard, call_control_id: str) -> None:
+    await board.control.hangup(call_control_id)
+
+
+async def receive_json(socket: WebSocket) -> dict[str, Any]:
+    message = json.loads(await socket.receive_text())
+    if not isinstance(message, dict):
+        raise ValueError("Expected a JSON object")
+    return message
+
+
+async def wait_for_start(socket: WebSocket) -> StartMessage:
+    """Skip `connected`; the first other message must be `start`."""
+    while (message := await receive_json(socket)).get("event") == "connected":
+        pass
+    return StartMessage.model_validate(message)
+
+
+@router.websocket("/ws/telnyx")
+async def media_stream(socket: WebSocket, token: str = "") -> None:
+    board = board_of(socket.app)
+    call_control_id = board.claim(token) if board is not None else None
+    if board is None or call_control_id is None:
+        await socket.close(code=1008)  # Refused before accepting: HTTP 403.
+        return
+    await socket.accept()
+    engines: Engines | None = getattr(socket.app.state, "phone_engines", None)
+    send_lock = asyncio.Lock()
+
+    async def to_telnyx(message: dict[str, Any]) -> None:
+        async with send_lock:  # The pump, the reply task and this loop all send.
+            await socket.send_text(json.dumps(message))
+
+    session = PhoneSession(to_telnyx)
+    tasks: list[asyncio.Task[None]] = []
+    hang_up_after = True
+    try:
+        async with asyncio.timeout(CONNECT_TIMEOUT_S):
+            start = await wait_for_start(socket)
+        media = start.start.media_format
+        if start.start.call_control_id != call_control_id:
+            raise ValueError("The stream belongs to another call")
+        if (media.encoding, media.sample_rate, media.channels) != ("PCMU", SAMPLE_RATE, 1):
+            logger.warning("Unexpected Telnyx media format %s/%d", media.encoding, media.sample_rate)
+            raise ValueError("Unexpected media format")
+        if engines is None:
+            logger.warning("Phone call refused: speech services are not configured")
+            return
+        # Echo: the carrier cancels line echo, and only the caller's track is
+        # streamed to us, so barge-in stays on (unlike a browser without AEC).
+        session.call = await open_call(engines, session.send, str(uuid4()), barge_in=True)
+        logger.info("Phone call connected")
+        time_limit = asyncio.create_task(end_at_time_limit(session, board.settings.max_call_s))
+        reader = asyncio.create_task(read_stream(socket, session))
+        tasks += [asyncio.create_task(session.pump()), time_limit, reader]
+        await asyncio.wait((reader, time_limit), return_when=asyncio.FIRST_COMPLETED)
+        if reader.done():
+            reader.result()  # Raises what ended the stream, if anything did.
+            hang_up_after = False  # `stop`: the call has already ended.
+    except WebSocketDisconnect:
+        logger.info("Telnyx media stream disconnected")
+    except SpeechUnavailable:
+        pass  # Logged by open_call; the caller is hung up.
+    except (ValidationError, ValueError, binascii.Error, TimeoutError) as error:
+        logger.warning("Telnyx media stream refused: %s", type(error).__name__)
+        await socket.close(code=1008)
+    except Exception as error:
+        logger.warning("Phone call failed: %s", type(error).__name__)
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        board.live.discard(call_control_id)
+        if session.call is not None:
+            await session.call.close()
+        if hang_up_after:
+            # Hanging up an already ended call is refused harmlessly (HTTP 422).
+            await board.control.hangup(call_control_id)
+        try:
+            await socket.close()
+        except (RuntimeError, WebSocketDisconnect):
+            pass
+
+
+async def read_stream(socket: WebSocket, session: PhoneSession) -> None:
+    """Telnyx's messages until `stop`."""
+    while await session.handle(await receive_json(socket)):
+        pass
+
+
+async def end_at_time_limit(session: PhoneSession, max_call_s: float) -> None:
+    await asyncio.sleep(max_call_s)
+    logger.info("Phone call reached its %d s limit; saying goodbye", max_call_s)
+    try:
+        async with asyncio.timeout(GOODBYE_TIMEOUT_S):
+            await session.say_goodbye()
+    except Exception as error:  # Hang up regardless.
+        logger.warning("Goodbye failed: %s", type(error).__name__)

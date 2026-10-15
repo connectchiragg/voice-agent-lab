@@ -4,6 +4,7 @@ import logging
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from pathlib import Path
 from typing import Literal
 from uuid import uuid4
@@ -14,8 +15,8 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from app import agent, groq_api, webrtc
-from app.deepgram import OUTPUT_SAMPLE_RATE, AuraSpeaker, DeepgramSettings, FluxListener
+from app import agent, groq_api, telnyx, webrtc
+from app.deepgram import AuraSpeaker, DeepgramSettings, FluxListener
 from app.pipeline import Call, Engines, ReplyEvent, ReplyModel
 from app.transport import SpeechUnavailable, apply_player_event, open_call
 
@@ -26,12 +27,18 @@ logger = logging.getLogger("uvicorn.error")
 SPECULATIVE_LLM = os.getenv("SPECULATIVE_LLM", "1") == "1"
 
 
-def load_engines() -> Engines | None:
-    """Deepgram Flux (STT) and Aura-2 (TTS) per call; None without an API key."""
+def load_engines(sample_rate: int | None = None) -> Engines | None:
+    """Deepgram Flux (STT) and Aura-2 (TTS) per call; None without an API key.
+
+    `sample_rate` sets both directions (phone calls: 8 kHz); by default the
+    browser's 16 kHz in and 24 kHz out.
+    """
     if not os.getenv("DEEPGRAM_API_KEY"):
         logger.warning("DEEPGRAM_API_KEY is not set; calls are refused.")
         return None
     settings = DeepgramSettings.from_env()
+    if sample_rate is not None:
+        settings = replace(settings, input_sample_rate=sample_rate, output_sample_rate=sample_rate)
     logger.info("Deepgram %s: Flux eot %.2f, eager %s, timeout %d ms; voice %s", settings.host,
                 settings.eot_threshold, settings.eager_eot_threshold, settings.eot_timeout_ms,
                 settings.voice)
@@ -48,7 +55,7 @@ def load_engines() -> Engines | None:
     return Engines(new_listener=lambda on_event: FluxListener(settings, on_event),
                    new_speaker=lambda: AuraSpeaker(settings),
                    reply=reply, record_interruption=agent.record_interruption,
-                   output_sample_rate=OUTPUT_SAMPLE_RATE,
+                   output_sample_rate=settings.output_sample_rate,
                    speculate=reply if speculate else None,
                    may_speculate=lambda: not groq_api.near_rate_limit())
 
@@ -67,9 +74,11 @@ async def watch_event_loop(interval_s: float = 0.1, threshold_s: float = 0.25) -
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.engines = load_engines()
+    app.state.phone_engines = load_engines(telnyx.SAMPLE_RATE)
     watcher = asyncio.create_task(watch_event_loop())
     try:
-        async with groq_api.shared_groq_client(), agent.lifespan(app), webrtc.lifespan(app):
+        async with (groq_api.shared_groq_client(), agent.lifespan(app), webrtc.lifespan(app),
+              telnyx.lifespan(app)):
             yield
     finally:
         watcher.cancel()
@@ -79,6 +88,7 @@ app = FastAPI(title="Voice Agent Lab", docs_url=None, redoc_url=None, openapi_ur
               lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
 app.include_router(webrtc.router)
+app.include_router(telnyx.router)
 
 
 class CallSettings(BaseModel):

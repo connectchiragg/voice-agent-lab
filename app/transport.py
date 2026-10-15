@@ -2,7 +2,8 @@
 
 Every transport drives a `CallSession` the same way:
 
-- audio in: `hear` with 16 kHz mono float32 PCM (sent on to Flux as linear16);
+- audio in: `hear` with mono float32 PCM at the engines' input rate, 16 kHz
+  (8 kHz for phone calls), sent on to Flux as linear16;
 - audio and events out: the pipeline's `Send` callback, given event dicts
   (partial, transcript, caption, metrics, interrupt, reply_end, notice) and
   raw float32 PCM bytes at the engines' output sample rate;
