@@ -146,7 +146,18 @@ def test_purge_removes_cache(tmp_path):
 
 
 def test_export_repairs_bad_escapes_and_skips_garbage(tmp_path):
-    (tmp_path / "a.json").write_text('{"id": "1", "title": "x \\_y", "transcript": []}')
+    (tmp_path / "a.json").write_text('{"id": "1", "title": "x \\_y \\u00 a\\\\\\> b", "transcript": []}')
     (tmp_path / "b.json").write_text('{not json')
     meetings = recordings.load_export(tmp_path)
-    assert [m["title"] for m in meetings] == ["x \\_y"]
+    assert [m["title"] for m in meetings] == ["x \\_y \\u00 a\\\\> b"]
+
+
+def test_export_index_and_transcript_file_dedupe(tmp_path):
+    (tmp_path / "index.json").write_text(json.dumps({"source": "fathom", "meetings": [
+        {"source": "fathom", "id": "9", "title": "Round", "transcript": []},
+        {"source": "fathom", "id": "10", "title": "Other", "transcript": []}]}))
+    (tmp_path / "fathom_9.json").write_text(json.dumps(
+        {"source": "fathom", "id": "9", "title": "Round",
+         "transcript": [{"speaker": "A", "text": "hi"}]}))
+    meetings = {m["id"]: m for m in recordings.load_export(tmp_path)}
+    assert len(meetings) == 2 and len(meetings["9"]["turns"]) == 1

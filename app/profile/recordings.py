@@ -273,16 +273,31 @@ def load_export(path: Path) -> list[dict]:
         else:
             items, source = (data if isinstance(data, list) else [data]), None
         meetings += [normalize_export(m, source) for m in items]
-    return meetings
+    return dedupe(meetings)
 
 
-BAD_ESCAPE = re.compile(r'\\(?!["\\/bfnrtu])')
+def dedupe(meetings: list[dict]) -> list[dict]:
+    """One meeting per (source, id); an index entry loses to a file that has the transcript."""
+    best: dict[tuple, dict] = {}
+    for m in meetings:
+        key = (m["source"], m["id"]) if m["id"] else (m["source"], m["title"], m["date"])
+        if key not in best or len(m["turns"]) > len(best[key]["turns"]):
+            best[key] = m
+    return list(best.values())
+
+
+ESCAPE = re.compile(r'\\(u[0-9a-fA-F]{4}|["\\/bfnrt])?')
+
+
+def repair_escapes(text: str) -> str:
+    """Walk escapes pairwise; double any backslash that does not start a valid JSON escape."""
+    return ESCAPE.sub(lambda m: m.group(0) if m.group(1) else "\\\\", text)
 
 
 def _parse_lenient(path: Path):
     """Exports written by an LLM agent sometimes carry invalid backslash escapes; repair those."""
     text = path.read_text(encoding="utf-8")
-    for candidate in (text, BAD_ESCAPE.sub(r"\\\\", text)):
+    for candidate in (text, repair_escapes(text)):
         try:
             return json.loads(candidate, strict=False)
         except ValueError:
