@@ -107,6 +107,7 @@ has 1 GB and is too small.
 | `MODELS_DIR` | `/models` in the image | Model files |
 | `STT_THREADS` | `1` in the image, `2` locally | Nemotron threads; keep at or below physical cores (2 vCPU is often 1 core) |
 | `TTS_THREADS` | `1` in the image, onnxruntime default locally | Kokoro threads; containers often see all host cores |
+| `KOKORO_MODEL` | `kokoro-v1.0.onnx` (fp32) | Kokoro weights in `MODELS_DIR`; build with `--build-arg KOKORO_MODEL=kokoro-v1.0.fp16.onnx` to bake in another export |
 | `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_PASSWORD` | `127.0.0.1`, `5432`, unset | Optional history store; in memory when unset |
 
 The image runs as non-root UID 1000. Dependency versions come from

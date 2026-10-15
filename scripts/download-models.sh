@@ -19,5 +19,7 @@ if [ -s "$dir/$stt/encoder.int8.onnx" ]; then echo "have $stt"; else
   curl -fL --retry 3 "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/$stt.tar.bz2" | tar xj -C "$dir"
 fi
 # Kokoro-82M (Apache-2.0), ONNX export by thewh1teagle/kokoro-onnx
-fetch kokoro-v1.0.onnx https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx
+# KOKORO_MODEL picks the weights: kokoro-v1.0.onnx (fp32, default), .fp16.onnx or .int8.onnx.
+kokoro="${KOKORO_MODEL:-kokoro-v1.0.onnx}"
+fetch "$kokoro" "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/$kokoro"
 fetch voices-v1.0.bin https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin

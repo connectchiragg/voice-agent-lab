@@ -21,7 +21,9 @@ from app.pipeline import Call, Engines, Samples, TurnDetector
 ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT / ".env")
 logger = logging.getLogger("uvicorn.error")
-MODEL_FILES = ("silero_vad.onnx", "smart-turn-v3.2-cpu.onnx", "kokoro-v1.0.onnx", "voices-v1.0.bin",
+# Kokoro weights: fp32 "kokoro-v1.0.onnx" or the same release's int8 / fp16 exports.
+KOKORO_MODEL = os.getenv("KOKORO_MODEL", "kokoro-v1.0.onnx")
+MODEL_FILES = ("silero_vad.onnx", "smart-turn-v3.2-cpu.onnx", KOKORO_MODEL, "voices-v1.0.bin",
                "sherpa-onnx-nemotron-speech-streaming-en-0.6b-160ms-int8-2026-04-25/encoder.int8.onnx")
 
 
@@ -41,7 +43,7 @@ def load_engines() -> Engines:
                            "Run scripts/download-models.sh first.")
     vad_session = load_session(str(models / "silero_vad.onnx"))
     turn = SmartTurn(load_session(str(models / "smart-turn-v3.2-cpu.onnx")))
-    voice = KokoroVoice(str(models / "kokoro-v1.0.onnx"), str(models / "voices-v1.0.bin"),
+    voice = KokoroVoice(str(models / KOKORO_MODEL), str(models / "voices-v1.0.bin"),
                         os.getenv("KOKORO_VOICE", "af_heart"))
     recognizer = load_recognizer(str(models / MODEL_DIR), int(os.getenv("STT_THREADS", "2")))
     recognizer_lock = threading.Lock()
