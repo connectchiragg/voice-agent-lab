@@ -230,6 +230,7 @@ at most three tool rounds per turn, each step checkpointed. Tools
   three-day forecast, returned as short phrases to save input tokens.
 - `get_time`: any other time zone, as 12-hour time. The user's own date and
   time are in the system prompt on every call, so the model never invents them.
+- `forget_me`: deletes what is remembered about the caller (see Caller memory).
 
 Voice-specific behaviour:
 
@@ -247,6 +248,53 @@ Model choice (`GROQ_LLM_MODEL`): the default is gpt-oss-120b with low reasoning,
 9/9 correct in a tool-use check. Qwen 3.8 27B (reasoning off) is about 250 ms
 faster to the first token but skipped tools on follow-up questions (6/9) and
 made up answers instead.
+
+### Caller memory
+
+A returning caller is recognised and the last call recalled (`app/memory.py`).
+
+- Who: phone calls by the caller's E.164 number (Telnyx `call.initiated` `from`),
+  stored as `tel:+919812345678`; browser calls by the Cloudflare Access email,
+  stored as `email:someone@example.com`, read from `Cf-Access-Authenticated-User-Email`
+  only with `CF_ACCESS_EMAIL_HEADER=1`. Anyone can send that header to an origin
+  reachable without Access (a quick tunnel URL, for example), so set it only
+  when every route to the app goes through Access. Anonymous, SIP and
+  national-format numbers and unauthenticated browsers are unknown callers: no
+  memory is read or written for them.
+- Call start: the transport passes the key to `open_call(..., caller_id=)`. The
+  memory loads beside the Deepgram sockets with a 150 ms limit; a slower load is
+  dropped and the call starts without memory, so the first reply never waits.
+  Measured against local Postgres: p50 0.2 ms, max 1.1 ms over 50 loads.
+- Prompt: for a known caller the system prompt ends with a block of at most
+  about 150 tokens (estimated at 4 characters a token): short behaviour rules
+  (greet by name, mention the last topic only if natural, never read the notes
+  out), the name, the last call's date, its summary (cut to fit) and open items.
+- Call end: a background task sends the dialogue (no tool results, last 6,000
+  characters) and the earlier notes to the same LLM, hedge included, and stores
+  a two-to-four-sentence summary, up to five facts, and the updated name,
+  rolling profile and open items. It never delays the call. A failed or
+  unusable reply is stored as a failed summary (exception class only) and not
+  retried. A call in which the caller said nothing is not recorded.
+- `forget_me` tool: deletes the caller's rows, drops the memory from the
+  prompt at once, and the current call is not summarized. It has side effects,
+  so a speculative reply runs it only once committed. Conversation transcripts
+  (LangGraph checkpoints) are untouched.
+
+Tables, created if missing at startup in the same Postgres database (in memory,
+lost on restart, without Postgres; `CALLER_MEMORY=0` turns the feature off):
+
+```sql
+callers (caller_key text PRIMARY KEY, display_name text, first_seen timestamptz,
+         last_seen timestamptz, call_count integer, profile text, open_items jsonb)
+call_summaries (call_id text PRIMARY KEY,  -- the conversation (LangGraph thread) id
+                caller_key text, started_at timestamptz, ended_at timestamptz,
+                summary text,              -- NULL when summarizing failed
+                facts jsonb, error text)
+```
+
+Not yet verified on a live call: the summarizer's output with the real model
+(tests use a fake LLM), and Telnyx caller numbers (the phone transport is on
+another branch).
 
 Next: Temporal workflows.
 
