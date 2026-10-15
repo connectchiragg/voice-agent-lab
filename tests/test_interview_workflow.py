@@ -25,8 +25,9 @@ OWNER = "tel:+15550100001"
 
 class Fakes:
     def __init__(self, env: WorkflowEnvironment, answer_on: int | None = None, cache_hit=False,
-                 ready=True):
+                 ready=True, paused=False):
         self.env = env
+        self.paused = paused  # The dashboard's pause switch, as dials_paused reads it.
         self.answer_on = answer_on
         self.cache_hit = cache_hit
         self.is_ready = ready
@@ -69,7 +70,12 @@ class Fakes:
         async def block_record(record: BlockRecord) -> None:
             self.records.append(record)
 
-        return [slot_plan, interview_part, slot_synthesize, slot_finish, slots_ready, block_record]
+        @activity.defn(name="dials_paused")
+        async def dials_paused() -> bool:
+            return self.paused
+
+        return [slot_plan, interview_part, slot_synthesize, slot_finish, slots_ready, block_record,
+                dials_paused]
 
     def calls(self, client):
         @activity.defn(name="reserve_dial_slot")
@@ -266,3 +272,33 @@ def test_on_demand_waits_for_the_call_to_end_then_calls_back():
         status = await drive(env, handle, fakes)
         assert status.state == "briefed" and len(fakes.dials) == 1
     run(test, answer_on=1)
+
+
+def test_paused_automatic_calls_never_dial():
+    async def test(env, fakes):
+        start = await env.get_current_time() + timedelta(hours=1)
+        status = await (await start_block(env, start)).result()
+        assert status.state == "paused" and fakes.dials == [] and fakes.budgets == []
+        assert fakes.records[-1].state == "paused"
+    run(test, paused=True)
+
+
+def test_resuming_before_t5_still_calls():
+    async def test(env, fakes):
+        start = await env.get_current_time() + timedelta(hours=1)
+        handle = await start_block(env, start)
+        await env.sleep(timedelta(minutes=47))  # Past T-15 (skipped while paused).
+        fakes.paused = False
+        status = await drive(env, handle, fakes)
+        assert status.state == "briefed" and len(fakes.dials) == 1
+        assert round((start - fakes.dials[0][0]).total_seconds() / 60) == 10
+    run(test, paused=True, answer_on=2)
+
+
+def test_pause_does_not_stop_a_callback_the_owner_asked_for():
+    async def test(env, fakes):
+        handle = await start_block(env, await env.get_current_time(), on_demand=True)
+        await handle.signal(BlockCallWorkflow.call_ended_signal)
+        status = await drive(env, handle, fakes)
+        assert status.state == "briefed" and len(fakes.dials) == 1
+    run(test, paused=True, answer_on=1)
