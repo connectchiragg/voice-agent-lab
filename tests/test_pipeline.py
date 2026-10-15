@@ -51,7 +51,7 @@ class FakeTranscriber:
     def on_speech(self, samples):
         self.events.append(("audio", len(samples)))
 
-    def on_speech_end(self):
+    def on_speech_end(self, silence_s):
         self.events.append(("end",))
         self.partial = None
         return self.transcripts.pop(0) if len(self.transcripts) > 1 else self.transcripts[0]

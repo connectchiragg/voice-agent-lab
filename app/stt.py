@@ -5,7 +5,8 @@ Chosen by benchmark (see README): lowest word error on Indian-accented English
 
 One recognizer (the model weights) is shared by every call; each utterance
 gets its own stream. Audio is only fed while the turn detector hears speech,
-so the model costs nothing during silence or while the assistant talks.
+so the model costs nothing during silence or while the assistant talks. The
+pause that ends a turn is real audio and is fed too, so it counts as tail.
 """
 import threading
 import time
@@ -17,8 +18,11 @@ from numpy.typing import NDArray
 SAMPLE_RATE = 16000
 # Measured: the model drops first words without lead-in, and needs a short tail
 # to emit the last ones. 0.32 s lead / 0.5 s tail cut word errors by about a third.
+# The tail now counts the real pause (192 ms) that ended the turn. A 0.6 s total
+# kept word errors unchanged and cut finalization p90 from 690 to 520 ms on one
+# AWS core; 0.5 s saved another ~170 ms but lost a final plural in 1 of 48 clips.
 LEAD_SECONDS = 0.32
-TAIL_SECONDS = 0.5
+TAIL_SECONDS = 0.6
 MODEL_DIR = "sherpa-onnx-nemotron-speech-streaming-en-0.6b-160ms-int8-2026-04-25"
 
 
@@ -67,12 +71,18 @@ class StreamingTranscriber:
         if self.stream is not None:
             self._decode(samples)
 
-    def on_speech_end(self) -> str:
-        """Flush the stream and return the final transcript."""
+    def on_speech_end(self, silence_s: float = 0.0) -> str:
+        """Flush the stream and return the final transcript.
+
+        `silence_s` of real post-speech audio was already fed; only the rest of
+        the tail is padded, so less audio is decoded after the turn ends.
+        """
         if self.stream is None:
             return ""
         started = time.perf_counter()
-        self._decode(np.zeros(int(SAMPLE_RATE * TAIL_SECONDS), np.float32))
+        padding = int(SAMPLE_RATE * max(0.0, TAIL_SECONDS - silence_s))
+        if padding:
+            self._decode(np.zeros(padding, np.float32))
         with self.lock:
             self.stream.input_finished()
             while self.recognizer.is_ready(self.stream):

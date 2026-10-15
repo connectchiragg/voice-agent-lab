@@ -37,7 +37,7 @@ class SpeechListener(Protocol):
     """Follows each utterance as it is heard (the streaming transcriber)."""
     def on_speech_start(self, preroll: Samples) -> None: ...
     def on_speech(self, samples: Samples) -> None: ...
-    def on_speech_end(self) -> str: ...
+    def on_speech_end(self, silence_s: float) -> str: ...  # Trailing silence already fed.
     def on_discard(self) -> None: ...
 
 
@@ -150,7 +150,8 @@ class TurnDetector:
         pause_ms, confident_ms = self.silent * CHUNK_MS, self.confident_ms
         text, stt_ms = "", 0.0
         if self.listener is not None:
-            text = self.listener.on_speech_end()
+            # Every chunk since speech start was fed, including the pause just heard.
+            text = self.listener.on_speech_end(self.silent * CHUNK_MS / 1000)
             stt_ms = getattr(self.listener, "final_ms", 0.0)
         self.utterance = None  # Finished, not discarded: the listener already closed it.
         self.discard()

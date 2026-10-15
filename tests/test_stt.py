@@ -54,3 +54,14 @@ def test_discard_and_end_without_start_are_safe():
     transcriber.on_speech_start(np.zeros(32000, np.float32))
     transcriber.on_discard()
     assert transcriber.take_partial() is None and transcriber.on_speech_end() == ""
+
+
+def test_tail_padding_counts_real_silence_already_fed():
+    recognizer = FakeRecognizer()
+    transcriber = stt.StreamingTranscriber(recognizer, threading.Lock())
+    transcriber.on_speech_start(np.zeros(16000, np.float32))
+    transcriber.on_speech_end(0.2)
+    assert len(recognizer.streams[0].samples[-1]) == int((stt.TAIL_SECONDS - 0.2) * 16000)
+    transcriber.on_speech_start(np.zeros(16000, np.float32))
+    transcriber.on_speech_end(stt.TAIL_SECONDS + 0.1)  # Pause longer than the tail: no padding.
+    assert len(recognizer.streams[1].samples) == 1 and recognizer.streams[1].finished
