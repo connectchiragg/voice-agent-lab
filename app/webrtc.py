@@ -40,7 +40,7 @@ from aiortc.rtp import RtpPacket
 from fastapi import APIRouter, FastAPI, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from app import ice
+from app import ice, memory
 from app.pipeline import Engines, Samples
 from app.transport import CallSession, SpeechUnavailable, open_call
 
@@ -467,7 +467,8 @@ async def offer(offer: Offer, request: Request) -> dict[str, str]:
     if not offer.echo_cancelled:
         logger.warning("No browser echo cancellation; barge-in disabled for this call.")
     try:
-        peer.call = await open_call(engines, peer.send, str(uuid4()), barge_in=offer.echo_cancelled)
+        peer.call = await open_call(engines, peer.send, str(uuid4()), barge_in=offer.echo_cancelled,
+                                    caller_id=memory.web_caller_key(request.headers))
     except SpeechUnavailable as error:
         await peer.close("the speech service is unavailable")
         raise HTTPException(503, str(error)) from error

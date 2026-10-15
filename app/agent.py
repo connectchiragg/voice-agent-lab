@@ -20,6 +20,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from psycopg.conninfo import make_conninfo
 
+from app import memory
 from app.llm import ModelUsed, ToolCallRequest, stream_model, to_chat_messages
 from app.tools import SCHEMAS, has_side_effects, run_tool
 
@@ -96,8 +97,10 @@ def tool_rounds(messages: list[Message]) -> int:
 
 
 async def generate(messages: list[Message], allow_tools: bool, tool_choice: str | None = None,
+                   caller_memory: str = "",
                    ) -> AsyncIterator[str | list[ToolCallRequest] | ModelUsed]:
-    async with aclosing(stream_model(to_chat_messages(messages), SCHEMAS if allow_tools else None,
+    async with aclosing(stream_model(to_chat_messages(messages, caller_memory),
+                                     SCHEMAS if allow_tools else None,
                                      tool_choice=tool_choice)) as stream:
         async for event in stream:
             yield event
@@ -114,10 +117,12 @@ async def agent(state: Conversation, config: RunnableConfig) -> Conversation:
     messages = list(state["messages"])
     writer = get_stream_writer()
     allow_tools = tool_rounds(messages) < MAX_TOOL_ROUNDS  # Then the model must answer.
+    # Looked up per step, so a forget_me earlier in the turn already removes it.
+    caller_memory = memory.prompt_block(config["configurable"]["thread_id"])
     text, calls = "", []
     try:
         for tool_choice in (None, "required"):
-            async for event in generate(messages, allow_tools, tool_choice):
+            async for event in generate(messages, allow_tools, tool_choice, caller_memory):
                 if isinstance(event, ModelUsed):
                     writer({"type": "model", "model": event.name})
                 elif isinstance(event, str):
@@ -162,8 +167,9 @@ async def tools(state: Conversation, config: RunnableConfig) -> Conversation:
     committed = pending_commit(config)
     if committed is not None and any(has_side_effects(call["name"]) for call in calls):
         await committed.wait()
-    running = asyncio.ensure_future(
-        asyncio.gather(*(run_tool(call["name"], call["arguments"]) for call in calls)))
+    caller_key = memory.caller_of(config["configurable"]["thread_id"])
+    running = asyncio.ensure_future(asyncio.gather(
+        *(run_tool(call["name"], call["arguments"], caller_key) for call in calls)))
     try:  # Cancelled at any point (barge-in, a cancelled speculation): stop the tools too.
         done, _ = await asyncio.wait({running}, timeout=FILLER_AFTER_S)
         if not done and not request["parts"][0]["text"].strip():
@@ -197,21 +203,25 @@ def build_graph(checkpointer: BaseCheckpointSaver[str] | None) -> ConversationGr
 speculative_graph = build_graph(None)
 
 
+def postgres_conninfo() -> str:
+    """The local Postgres (Homebrew, see README); KeyError without POSTGRES_PASSWORD."""
+    return make_conninfo(
+        host=os.getenv("POSTGRES_HOST", "127.0.0.1"),
+        port=int(os.getenv("POSTGRES_PORT", "5432")),
+        dbname="voice_agent", user="voice_agent",
+        password=os.environ["POSTGRES_PASSWORD"], connect_timeout=5,
+        options="-c statement_timeout=5000",
+    )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Use local Postgres (Homebrew, see README) when running; otherwise keep history in memory."""
     global graph
     async with AsyncExitStack() as stack:
         try:
-            connection_string = make_conninfo(
-                host=os.getenv("POSTGRES_HOST", "127.0.0.1"),
-                port=int(os.getenv("POSTGRES_PORT", "5432")),
-                dbname="voice_agent", user="voice_agent",
-                password=os.environ["POSTGRES_PASSWORD"], connect_timeout=5,
-                options="-c statement_timeout=5000",
-            )
             saver: BaseCheckpointSaver[str] = await stack.enter_async_context(
-                AsyncPostgresSaver.from_conn_string(connection_string))
+                AsyncPostgresSaver.from_conn_string(postgres_conninfo()))
             await saver.setup()
         except Exception as error:
             logger.warning("Postgres unavailable (%s); conversation history is in memory "

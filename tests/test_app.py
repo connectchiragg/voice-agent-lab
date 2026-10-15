@@ -112,3 +112,19 @@ def test_call_ui_assets_are_served():
 
 def test_health_reports_whether_speech_is_configured(engines):
     assert TestClient(main.app).get("/healthz").json() == {"ok": True, "speech": True}
+
+
+def test_access_email_identifies_a_browser_caller_when_trusted(engines, monkeypatch):
+    callers = []
+
+    async def begin_call(conversation_id, caller_id):
+        callers.append(caller_id)
+
+    main.app.state.engines.begin_call = begin_call
+    headers = {"Cf-Access-Authenticated-User-Email": "Asha@Example.com"}
+    for trusted in ("0", "1"):
+        monkeypatch.setenv("CF_ACCESS_EMAIL_HEADER", trusted)
+        with TestClient(main.app).websocket_connect("/ws/voice", headers=headers) as socket:
+            socket.send_json(START)
+            assert socket.receive_json()["type"] == "ready"
+    assert callers == [None, "email:asha@example.com"]

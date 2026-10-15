@@ -1,4 +1,4 @@
-"""Tools the voice agent can call. All free and keyless (Open-Meteo, local clock).
+"""Tools the voice agent can call. All free and keyless (Open-Meteo, local clock, our own memory).
 
 Every tool returns a small JSON-serialisable dict. Failures come back as
 {"error": ...} for the model to explain, never as exceptions that end a turn.
@@ -14,6 +14,8 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
+
+from app import memory
 
 logger = logging.getLogger("uvicorn.error")
 TOOL_TIMEOUT_S = 5.0
@@ -46,6 +48,9 @@ class Tool:
     # True for tools that change something outside the conversation (book, send, pay).
     # A speculative reply runs only tools without side effects before it is committed.
     side_effects: bool = False
+    # True for tools about the caller: `run` also gets `caller_key` (None: unknown caller),
+    # which the model can neither see nor set.
+    takes_caller: bool = False
 
     def schema(self) -> dict[str, Any]:
         return {"type": "function", "function": {
@@ -114,6 +119,15 @@ async def get_time(timezone: str = "Asia/Kolkata") -> dict[str, Any]:
             "time": f"{now.strftime('%I').lstrip('0')}:{now:%M %p}"}
 
 
+async def forget_me(caller_key: str | None = None) -> dict[str, Any]:
+    if caller_key is None:
+        return {"forgotten": False, "reason": "This caller is not identified, so nothing is "
+                                              "remembered about them."}
+    had_memory = await memory.forget(caller_key)
+    logger.info("Caller memory deleted at the caller's request")
+    return {"forgotten": True, "had_memory": had_memory}
+
+
 TOOLS = {tool.name: tool for tool in (
     Tool("get_weather",
          "Current weather and a three-day forecast (today first) for a city or town.",
@@ -128,6 +142,11 @@ TOOLS = {tool.name: tool for tool in (
              "type": "string", "description": "IANA time zone, e.g. Europe/London"}},
           "required": ["timezone"]},
          get_time),
+    Tool("forget_me",
+         "Delete everything remembered about the caller from earlier calls, and do not "
+         "remember this call. Only when the caller asks you to forget them; then confirm.",
+         {"type": "object", "properties": {}},
+         forget_me, side_effects=True, takes_caller=True),
 )}
 SCHEMAS = [tool.schema() for tool in TOOLS.values()]
 
@@ -138,7 +157,7 @@ def has_side_effects(name: str) -> bool:
     return tool is not None and tool.side_effects
 
 
-async def run_tool(name: str, arguments: str) -> str:
+async def run_tool(name: str, arguments: str, caller_key: str | None = None) -> str:
     """Run one tool call from the model and return its JSON result text."""
     started = time.perf_counter()
     try:
@@ -146,6 +165,8 @@ async def run_tool(name: str, arguments: str) -> str:
         args = json.loads(arguments or "{}")
         if not isinstance(args, dict):
             raise ValueError("arguments must be a JSON object")
+        if tool.takes_caller:
+            args = {**args, "caller_key": caller_key}  # Overrides anything the model sent.
         result = await asyncio.wait_for(tool.run(**args), TOOL_TIMEOUT_S)
     except KeyError:
         result = {"error": f"There is no tool called {name!r}."}

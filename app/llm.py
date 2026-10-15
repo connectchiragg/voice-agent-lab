@@ -67,8 +67,10 @@ def system_prompt(now: datetime | None = None) -> str:
             f"{hour}:{now:%M %p} ({zone}).")
 
 
-def to_chat_messages(history: Sequence[Any]) -> list[dict[str, Any]]:
+def to_chat_messages(history: Sequence[Any], caller_memory: str = "") -> list[dict[str, Any]]:
     """Stored conversation -> Groq chat messages, kept small for the token budget.
+
+    `caller_memory` (see app/memory.py) ends the system prompt for a known caller.
 
     - Tool calls and results from earlier turns are left out: the spoken answer
       that followed them already carries the facts.
@@ -84,7 +86,8 @@ def to_chat_messages(history: Sequence[Any]) -> list[dict[str, Any]]:
                if turn["role"] != "tool" and not turn.get("tool_calls")]
     turns = earlier[-HISTORY_MESSAGES:] + list(history[current:])
     answered = {turn["tool_call_id"] for turn in turns if turn["role"] == "tool"}
-    messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt()}]
+    system = system_prompt() + (f"\n\n{caller_memory}" if caller_memory else "")
+    messages: list[dict[str, Any]] = [{"role": "system", "content": system}]
     for index, turn in enumerate(turns):
         text = turn["parts"][0]["text"]
         if turn["role"] == "tool":
