@@ -98,6 +98,12 @@ def part(name, ok=True, researched=()):
                                [f"https://{name}.example"], researched=list(researched))
 
 
+def test_a_failed_part_never_replaces_an_earlier_good_one():
+    stored = {"company": {"ok": True, "findings": {"summary": "good"}}}
+    merged = interview_worker.merge_parts(stored, [part("company", ok=False)], [])
+    assert merged["company"]["findings"]["summary"] == "good"
+
+
 def test_merge_overlays_new_parts_and_drops_removed_interviewers():
     stored = {"private": {"ok": True, "findings": {"summary": "old"}, "seen_urls": []},
               "interviewers_by_email": {"dev@acme.com": {"ok": True}, "a@acme.com,b@acme.com": {"ok": True}}}

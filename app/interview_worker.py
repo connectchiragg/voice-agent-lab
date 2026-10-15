@@ -372,8 +372,10 @@ class InterviewActivities:
         if task.part == "company" and (outcome.ok or outcome.evidence):
             async with await connect() as connection:
                 await interview_store.setup(connection)
-                await interview_store.save_company(connection, company_key(event), event.company,
-                                                   part_record(result))
+                cached = await interview_store.company(connection, company_key(event))
+                if outcome.ok or not (cached or {}).get("ok"):  # Never replace good with worse.
+                    await interview_store.save_company(connection, company_key(event),
+                                                       event.company, part_record(result))
         logger.info("VALR %s researcher: %s, $%.4f%s", task.part, "ok" if outcome.ok else "no findings",
                     usd, f", stopped ({outcome.stopped})" if outcome.stopped else "")
         return result
@@ -472,7 +474,7 @@ def merge_parts(stored: dict[str, Any], results: list[InterviewPartResult],
         if result.part == "interviewers":
             if result.researched:
                 batches[",".join(sorted(result.researched))] = part_record(result)
-        else:
+        elif result.ok or not (parts.get(result.part) or {}).get("ok"):
             parts[result.part] = part_record(result)
     if gone:
         batches = {key: value for key, value in batches.items()
