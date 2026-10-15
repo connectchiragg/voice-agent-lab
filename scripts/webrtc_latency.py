@@ -17,7 +17,9 @@ is timed where the listener would hear it:
 
 - WebRTC: the remote track (after the jitter buffer) goes through an
   AudioWorklet that timestamps the first non-silent block;
-- WebSocket: the time the page's player schedules the first reply buffer.
+- WebSocket: when the page's player schedules the first audible sample.
+
+Both skip near-silent samples (|x| <= 0.02): Aura's audio starts with some.
 
 Without --url a local server runs here with a stub pipeline (energy VAD,
 fixed transcript, instant LLM and a tone for TTS; no models loaded), so the
@@ -138,10 +140,16 @@ INIT_SCRIPT = r"""
     }
   };
   const start = AudioBufferSourceNode.prototype.start;
+  // WebSocket: when the first audible sample of a reply buffer will play (TTS
+  // audio starts with near-silence; WebRTC's detector skips it the same way).
   AudioBufferSourceNode.prototype.start = function (when = 0, ...rest) {
-    if (this.context !== ctx) {
-      const wait = Math.max(0, when - this.context.currentTime);
-      h.scheduled.push(performance.now() + wait * 1000);
+    if (this.context !== ctx && this.buffer) {
+      const samples = this.buffer.getChannelData(0);
+      const first = samples.findIndex(x => Math.abs(x) > 0.02);
+      if (first >= 0) {
+        const wait = Math.max(0, when - this.context.currentTime) + first / this.buffer.sampleRate;
+        h.scheduled.push(performance.now() + wait * 1000);
+      }
     }
     return start.call(this, when, ...rest);
   };
@@ -179,7 +187,7 @@ def tone() -> Utterance:
 
 def load_wav(path: str | Path) -> Utterance:
     """A 16-bit mono WAV, resampled to 48 kHz; speech spans its first to last loud sample."""
-    with wave.open(path) as audio:
+    with wave.open(str(path)) as audio:
         if (audio.getnchannels(), audio.getsampwidth()) != (1, 2):
             raise SystemExit("Expected mono 16-bit PCM WAV.")
         rate = audio.getframerate()
@@ -317,7 +325,7 @@ async def run_transport(browser, base: str, transport: str, turns: int,
     page = await browser.new_page()
     await page.add_init_script(INIT_SCRIPT)
     query = "?transport=ws" if transport == "ws" else ""
-    await page.goto(base + "/" + query)
+    await page.goto(base + "/" + query, wait_until="networkidle")  # The client module is loaded.
     await page.click("#call")
     await page.wait_for_function(
         "window.__harness.events.some(e => e.type === 'ready')", timeout=20000)
