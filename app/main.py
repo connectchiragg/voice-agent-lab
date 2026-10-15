@@ -5,18 +5,19 @@ import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Literal
 from uuid import uuid4
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
+from pydantic import BaseModel, ConfigDict, ValidationError
 
-from app import agent, groq_api
+from app import agent, groq_api, webrtc
 from app.deepgram import OUTPUT_SAMPLE_RATE, AuraSpeaker, DeepgramSettings, FluxListener
 from app.pipeline import Call, Engines, ReplyEvent, ReplyModel
+from app.transport import SpeechUnavailable, apply_player_event, open_call
 
 ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT / ".env")
@@ -68,7 +69,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.engines = load_engines()
     watcher = asyncio.create_task(watch_event_loop())
     try:
-        async with groq_api.shared_groq_client(), agent.lifespan(app):
+        async with groq_api.shared_groq_client(), agent.lifespan(app), webrtc.lifespan(app):
             yield
     finally:
         watcher.cancel()
@@ -77,6 +78,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 app = FastAPI(title="Voice Agent Lab", docs_url=None, redoc_url=None, openapi_url=None,
               lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
+app.include_router(webrtc.router)
 
 
 class CallSettings(BaseModel):
@@ -85,22 +87,6 @@ class CallSettings(BaseModel):
     sample_rate: Literal[16000]
     encoding: Literal["pcm_f32le"]
     echo_cancelled: bool
-
-
-class PlaybackState(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-    type: Literal["playback"]
-    active: bool
-
-
-class PlayedReport(BaseModel):
-    """Sent after an interrupt: seconds of the interrupted reply's audio played."""
-    model_config = ConfigDict(extra="forbid", strict=True)
-    type: Literal["interrupted"]
-    played_s: float = Field(ge=0, le=3600)
-
-
-ClientEvent = TypeAdapter(Annotated[PlaybackState | PlayedReport, Field(discriminator="type")])
 
 
 @app.get("/")
@@ -137,14 +123,10 @@ async def voice(socket: WebSocket) -> None:
         if not settings.echo_cancelled:
             logger.warning("No browser echo cancellation; barge-in disabled for this call.")
         # Without echo cancellation the assistant's own voice would interrupt it.
-        call = Call(engines, send, str(uuid4()), barge_in=settings.echo_cancelled)
         try:
-            await call.start()  # Opens the Flux and Aura sockets for this call.
-        except Exception as error:
-            # A refused handshake carries Deepgram's HTTP status (401 key, 402 credit).
-            status = getattr(getattr(error, "response", None), "status_code", None)
-            logger.warning("Deepgram connection failed: %s %s", type(error).__name__, status or "")
-            await send({"type": "error", "error": "The speech service is unavailable. Try again later."})
+            call = await open_call(engines, send, str(uuid4()), barge_in=settings.echo_cancelled)
+        except SpeechUnavailable as error:
+            await send({"type": "error", "error": str(error)})
             return
         await send({"type": "ready", "sample_rate": engines.output_sample_rate,
                     "encoding": "pcm_f32le"})
@@ -153,11 +135,7 @@ async def voice(socket: WebSocket) -> None:
             if frame["type"] == "websocket.disconnect":
                 break
             if frame.get("text") is not None:
-                event = ClientEvent.validate_json(frame["text"])
-                if isinstance(event, PlaybackState):
-                    call.set_playing(event.active)
-                else:
-                    call.report_played(event.played_s)
+                apply_player_event(call, frame["text"])
                 continue
             packet = frame.get("bytes")
             if packet is None:

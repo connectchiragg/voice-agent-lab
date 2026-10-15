@@ -103,6 +103,11 @@ def test_call_ui_assets_are_served():
     assert "AudioWorkletNode" in source and '"transcript"' in source
     assert client.get("/static/microphone-worklet.js").status_code == 200
     assert client.get("/static/audio-player.js").status_code == 200
+    # WebRTC is the default client; ?transport=ws keeps the WebSocket one.
+    assert 'transport === "ws"' in client.get("/").text
+    webrtc_source = client.get("/static/voice-webrtc.js").text
+    assert "RTCPeerConnection" in webrtc_source and '"/webrtc/offer"' in webrtc_source
+    assert client.get("/static/playout-delay.js").status_code == 200
 
 
 def test_health_reports_whether_speech_is_configured(engines):
