@@ -116,6 +116,14 @@ def always() -> bool:
     return True
 
 
+async def no_caller_memory(conversation_id: str, caller_id: str | None) -> None:
+    """Default for engines without caller memory: nothing to load."""
+
+
+def nothing_to_remember(conversation_id: str) -> None:
+    """Default for engines without caller memory: nothing to store."""
+
+
 @dataclass
 class Engines:
     """Everything a call needs, injected so tests can replace any stage."""
@@ -130,6 +138,12 @@ class Engines:
     # until `committed` is set. None disables speculation.
     speculate: Callable[[str, str, asyncio.Event], AsyncIterator[ReplyEvent]] | None = None
     may_speculate: Callable[[], bool] = always  # False near the provider's rate limit.
+    # Caller memory (app/memory.py). `begin_call` (conversation_id, caller_id) runs
+    # beside the Deepgram sockets as the call starts, bounded by its own timeout,
+    # and never raises; `end_call` (conversation_id) runs once the call has closed
+    # and must return at once (it hands any work to a background task).
+    begin_call: Callable[[str, str | None], Awaitable[None]] = no_caller_memory
+    end_call: Callable[[str], None] = nothing_to_remember
 
 
 def heard_text(spoken: list[tuple[str, float]], played_s: float) -> str:
@@ -299,10 +313,12 @@ class Call:
     """
 
     def __init__(self, engines: Engines, send: Send, conversation_id: str, *,
-                 barge_in: bool = True, played_report_timeout_s: float = 1.0) -> None:
+                 barge_in: bool = True, played_report_timeout_s: float = 1.0,
+                 caller_id: str | None = None) -> None:
         self.engines = engines
         self.send = send
         self.conversation_id = conversation_id
+        self.caller_id = caller_id  # Normalized caller key ("tel:+…", "email:…"); None: unknown.
         self.listener = engines.new_listener(self.on_turn_event)
         self.speaker = engines.new_speaker()
         self.barge_in = barge_in
@@ -320,8 +336,12 @@ class Call:
         self.speculations = 0  # Started during the current turn.
 
     async def start(self) -> None:
-        """Open the Deepgram sockets; the browser starts streaming once this returns."""
-        await asyncio.gather(self.listener.start(), self.speaker.start())
+        """Open the Deepgram sockets, and load the caller's memory meanwhile.
+
+        The browser starts streaming once this returns.
+        """
+        await asyncio.gather(self.listener.start(), self.speaker.start(),
+                             self.engines.begin_call(self.conversation_id, self.caller_id))
 
     @property
     def assistant_busy(self) -> bool:
@@ -560,3 +580,4 @@ class Call:
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
         await asyncio.gather(self.listener.close(), self.speaker.close(), return_exceptions=True)
+        self.engines.end_call(self.conversation_id)

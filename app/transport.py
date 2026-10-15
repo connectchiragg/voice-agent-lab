@@ -33,9 +33,14 @@ class SpeechUnavailable(Exception):
 
 
 async def open_call(engines: Engines, send: Send, conversation_id: str, *,
-                    barge_in: bool) -> Call:
-    """Create a call and open its Flux and Aura sockets, whatever the transport."""
-    call = Call(engines, send, conversation_id, barge_in=barge_in)
+                    barge_in: bool, caller_id: str | None = None) -> Call:
+    """Create a call and open its Flux and Aura sockets, whatever the transport.
+
+    `caller_id` is the caller's normalized key for caller memory, from
+    `app.memory.caller_key_from_phone` or `web_caller_key`; None for an unknown
+    caller, who gets no memory.
+    """
+    call = Call(engines, send, conversation_id, barge_in=barge_in, caller_id=caller_id)
     try:
         await call.start()
     except Exception as error:

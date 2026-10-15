@@ -487,3 +487,29 @@ def test_model_marker_reaches_metrics_and_is_never_spoken():
     assert [e["text"] for e in events if e["type"] == "caption"] == ["Hi there.", "All good!"]
     (metrics,) = [e for e in events if e["type"] == "metrics"]
     assert metrics["llm_model"] == "small"  # The model behind the first token.
+
+
+def test_caller_memory_loads_beside_the_sockets_and_is_handed_off_after_close():
+    engines, _ = make_engines()
+    events = []
+    release = asyncio.Event()
+
+    class SlowListener(FakeListener):
+        async def start(self):
+            events.append("flux opening")
+            await release.wait()
+
+    async def begin_call(conversation_id, caller_id):
+        events.append(("memory", conversation_id, caller_id))
+        release.set()  # Runs while Flux is still opening: they are concurrent.
+
+    engines.new_listener = SlowListener
+    engines.begin_call = begin_call
+    engines.end_call = lambda conversation_id: events.append(("ended", conversation_id))
+
+    async def scenario():
+        call, _ = await start_call(engines, [], caller_id="tel:+919812345678")
+        assert events == ["flux opening", ("memory", "call-1", "tel:+919812345678")]
+        await call.close()
+    asyncio.run(scenario())
+    assert events[-1] == ("ended", "call-1")
