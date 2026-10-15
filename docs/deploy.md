@@ -319,6 +319,24 @@ anonymised caller hashes, never numbers.
 | Telnyx | one outbound call per job (plus retries if unanswered) | Telnyx's per-minute voice rate; recordings $0.002 a minute when on |
 | Groq | the callback conversation's replies | free tier (counts toward its daily limits) |
 
+## Interview assistant (VALR)
+
+- Private data: `/srv/valr-data` (root:1000, 0750; files 0640) holds `profile.json` and
+  `evaluation.json` from the profile import (never committed). It is mounted read-only
+  as `/data` into `voice-agent-lab` and `voice-research`
+  (`-v /srv/valr-data:/data:ro`; `deploy/research-setup.sh` adds it when the dir exists).
+- `.env`: VALR_OWNER_PHONE, VALR_OWNER_EMAILS, VALR_PROFILE_PATH=/data/profile.json,
+  VALR_EVALUATION_PATH=/data/evaluation.json, VALR_CALENDAR_ICS_URL, VALR_TOKEN_KEY (a
+  Fernet key), VALR_GMAIL_ACCOUNT, GOOGLE_OAUTH_CLIENT_ID/SECRET, VALR_CONTEXT_TOKEN.
+  `.env.research`: FATHOM_API_KEY.
+- Cloudflare Access: `valr.haciensus.com/hooks/gcal` is bypassed (Google posts there);
+  everything else on the host, including `/oauth/google/*` and `/valr/context`, stays
+  behind Access.
+- The app container now runs with the data mount:
+  `sudo docker run -d --name voice-agent-lab --restart unless-stopped --env-file .env --network voice-agent-lab -v /srv/valr-data:/data:ro -p 127.0.0.1:7860:7860 voice-agent-lab:latest`
+- Check: `sudo docker exec voice-research python -m app.research_worker blocks` (dry run)
+  or `... sync` (sync now, then the blocks and their workflows).
+
 ## Updating and rolling back
 
 Ship the source to a fresh directory, keep `.env`, rebuild only the app

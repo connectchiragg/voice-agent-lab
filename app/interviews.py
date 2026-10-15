@@ -40,7 +40,7 @@ from app.persona import ASSISTANT_NAME
 logger = logging.getLogger("uvicorn.error")
 LOAD_TIMEOUT_S = 1.5
 OWNER_REPLY_MAX_TOKENS = 700  # A 60-90 s brief is about 300 tokens of speech.
-BRIEF_PROMPT_CHARS = 7000  # About 1,900 tokens of briefs and notes in the prompt.
+BRIEF_PROMPT_CHARS = 5000  # About 1,400 tokens of briefs and notes (Groq free tier: 8,000 TPM).
 EVALUATION_CHARS_ON_BRIEFING = 900
 
 briefings: dict[str, dict[str, Any]] = {}  # Conversation id -> the loaded block.

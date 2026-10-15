@@ -555,6 +555,92 @@ The spike that chose all this is `scripts/research_spike.py`.
 
 Not yet verified: a real research callback call end to end on the phone.
 
+### VALR interview assistant (owner only)
+
+For its owner, VALR (displayed "VALR", spoken "Valor": `app/persona.py`) is a personal
+interview assistant: it knows his profile, says what is on his calendar, researches each
+upcoming interview and calls him 15 minutes before it with a briefing, answers follow-ups
+from the notes and quizzes him on likely questions. Every other caller gets the generic
+assistant with none of his data.
+
+```
+Google Calendar push (/hooks/gcal) ─┐                 6-hourly sweep (Temporal Schedule)
+   or the ICS URL if OAuth lapsed   ├─> CalendarSyncWorkflow ── diff each event vs its snapshot
+"research tomorrow's interviews" ───┘        │
+                                             ├─> InterviewSlotWorkflow per event (long-lived)
+                                             │     T-60 of its block: R1 private + R2 round
+                                             │     + R2 interviewers + R3 company (7-day cache),
+                                             │     then a 60-90 s spoken brief and cited notes
+                                             └─> BlockCallWorkflow per block (gaps < 30 min)
+                                                   calls at T-15, T-10, T-5; stops on an answer
+```
+
+**Owner gating.** Interview mode applies only to the owner's caller keys: `tel:`
+VALR_OWNER_PHONE and `email:` each VALR_OWNER_EMAILS (or VALR_OWNER_KEYS). Only then
+does the system prompt carry his profile and self-evaluation (`app/profile/briefing.py`,
+including his pay targets) and are `get_calendar` and `research_interviews` offered; the
+tools also refuse anyone else in code. Pay figures and email details are spoken only on
+those calls. Caller ID can be spoofed (see Caller memory): accepted for this lab.
+
+**Calendar.** Preferred source: Google Calendar (calendar.readonly) through the same
+one-time OAuth consent as Gmail (`/oauth/google/start` on valr.haciensus.com; the refresh
+token is Fernet-encrypted in Postgres). A push channel (`events.watch`) posts to
+`/hooks/gcal` (an Access bypass; the request must carry our channel id, its secret token
+and resource id); each notification starts one incremental sync (`syncToken`; a 410 means
+a full resync). The 6-hourly sweep renews the channel a day before it expires and is the
+safety net. Without OAuth (or when the Testing-mode token lapsed after 7 days: the
+dashboard says "reconnect needed") the ICS URL is used, with the same diffs. By hand:
+`docker exec voice-research python -m app.research_worker sync` (or `blocks`: a dry run
+that parses the calendar and starts nothing; both print titles and times only).
+
+**What a change does** (per event, from its stored snapshot; `app/interview_types.py`):
+
+| Change | Work |
+|---|---|
+| new | full research (R3 reused if the company was researched in the last 7 days) |
+| interviewer added | only the new interviewer(s); removed ones' notes dropped, brief rewritten |
+| time only | the slot's timer and its block call move; no research |
+| title or description (round) | R2's round part only |
+| company | R1, R2 round and R3 |
+| cancelled / declined | the slot ends and its block call is cancelled; the company cache stays |
+| nothing material | nothing (and inputs unchanged on a re-run: a logged cache hit) |
+
+Interviewer research never covers the owner, rooms, scheduling and ATS tools (Greenhouse,
+Lever, Ashby, GoodTime, Gem, Calendly, Workday...), `no-reply`/`recruiting`/`talent`/`hr@`
+style addresses, or people whose display name says recruiter, talent, HR, people ops,
+coordinator, sourcer or TA. The rest go to a Haiku classifier with their name, domain and
+any title or signature lines from R1's emails; only "interviewer" is researched. Being the
+organizer does not make someone a recruiter. Skips are logged as counts, never names.
+
+**Researchers** (CrewAI on Claude Haiku, `app/interview_agents.py`, same caps, budget,
+sourcing rules and claim check as topic research):
+
+- R1 private context: Gmail read-only (subject, sender name and domain, relevant lines,
+  quoted replies dropped; at most 5 threads, 700 characters each), Fathom recordings
+  (FATHOM_API_KEY), the derived history of earlier recorded rounds (the profile import's
+  one-time export, data/evaluation.json) and pushed context. Skipped if none is available.
+- R2 interview intel: experiences for this company and role (Glassdoor, LeetCode
+  Discuss, Reddit, Blind, GeeksforGeeks, engineering blogs) and, separately, the
+  interviewers' public professional info (LinkedIn snippets in search results only).
+- R3 company: employee and product reviews, news, funding, layoffs, culture, and the pay
+  range for the role and location. The owner's targets never go to Claude: the call
+  compares them live from his profile.
+
+Limits for interview mode: 30 jobs a day and $40 a month (VALR_INTERVIEW_JOBS_PER_DAY,
+VALR_INTERVIEW_MONTH_USD; $0.40 per job, VALR_INTERVIEW_JOB_USD); briefing calls have their
+own 12 dials a day (VALR_BRIEFING_DIALS_PER_DAY), so callbacks cannot starve them.
+VALR_BRIEFING_DIAL=0 keeps everything but never dials; VALR_BRIEFINGS=0 turns the sweep off.
+
+**Context push (optional).** A Mac-side job (not built) may POST per-interview email
+context to `/valr/context` (JSON {event_key?, company?, subject?, summary?, excerpt?, notes?},
+8 KB) with an Access service token plus `Authorization: Bearer VALR_CONTEXT_TOKEN`;
+it is stored encrypted and R1 reads it for that event or company.
+
+**Trade-offs.** A briefing call's prompt carries his profile (shortened) and the block's
+briefs (about 2,500 tokens in all); Groq's free tier allows 8,000 input tokens a minute,
+so long quiz sessions lean on the gpt-oss-20b hedge. ICS keys are mapped to Google's ids,
+but switching sources can make a recurring event look new once (a cache hit if unchanged).
+
 ## Run locally
 
 Create `.env` from `.env.example` and set `GROQ_API_KEY` and `DEEPGRAM_API_KEY`.
