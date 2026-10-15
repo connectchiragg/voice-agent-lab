@@ -143,3 +143,10 @@ def test_purge_removes_cache(tmp_path):
     cache.save("fathom", "x", {"a": 1})
     assert cache.purge() and not (tmp_path / "raw").exists()
     assert cache.purge() is False
+
+
+def test_export_repairs_bad_escapes_and_skips_garbage(tmp_path):
+    (tmp_path / "a.json").write_text('{"id": "1", "title": "x \\_y", "transcript": []}')
+    (tmp_path / "b.json").write_text('{not json')
+    meetings = recordings.load_export(tmp_path)
+    assert [m["title"] for m in meetings] == ["x \\_y"]

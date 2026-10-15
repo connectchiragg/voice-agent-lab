@@ -11,6 +11,7 @@ the private cache directory (see RawCache) and can be purged.
 import json
 import logging
 import os
+import re
 import shutil
 import time
 import urllib.error
@@ -263,13 +264,30 @@ def load_export(path: Path) -> list[dict]:
     files = sorted(path.glob("*.json")) if path.is_dir() else [path]
     meetings = []
     for f in files:
-        data = json.loads(f.read_text(encoding="utf-8"))
+        data = _parse_lenient(f)
+        if data is None:
+            log.warning("skipping unreadable export file %s", f.name)
+            continue
         if isinstance(data, dict) and "meetings" in data:
             items, source = data["meetings"], data.get("source")
         else:
             items, source = (data if isinstance(data, list) else [data]), None
         meetings += [normalize_export(m, source) for m in items]
     return meetings
+
+
+BAD_ESCAPE = re.compile(r'\\(?!["\\/bfnrtu])')
+
+
+def _parse_lenient(path: Path):
+    """Exports written by an LLM agent sometimes carry invalid backslash escapes; repair those."""
+    text = path.read_text(encoding="utf-8")
+    for candidate in (text, BAD_ESCAPE.sub(r"\\\\", text)):
+        try:
+            return json.loads(candidate, strict=False)
+        except ValueError:
+            continue
+    return None
 
 
 def normalize_export(item: dict, default_source: str | None = None) -> dict:
