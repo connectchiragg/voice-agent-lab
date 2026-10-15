@@ -336,8 +336,9 @@ How one callback flows:
    gets a yes, and calls `schedule_callback(when, reason)`. The tool reads the
    time ("tomorrow at 5 pm", "in 2 hours", "Friday 10:30 am", or ISO) in the
    caller's time zone (`ASSISTANT_TIMEZONE`, or a `time_zone` the caller
-   names), refuses quiet hours (9 pm to 9 am there), the past and more than two
-   weeks ahead, and starts `CallbackWorkflow` with id
+   names), refuses the past, more than two weeks ahead and, when
+   `CALLBACK_QUIET_HOURS` is set (e.g. `21-9`: 9 pm to 9 am there; off by default
+   for testing), quiet hours, and starts `CallbackWorkflow` with id
    `callback-<hash of the caller>`. The caller's number comes from the call,
    never from the model; web callers are politely declined.
 2. The workflow sleeps on a durable timer until the time. Nothing runs meanwhile.
@@ -379,7 +380,10 @@ Decisions:
   other three wait for the reply to be committed.
 
 Settings: `TEMPORAL_ADDRESS` (unset: callbacks are off and the tools say so),
-`TEMPORAL_NAMESPACE` (default `default`; the VM uses `voice-agent-lab`), and
+`TEMPORAL_NAMESPACE` (default `default`; the VM uses `voice-agent-lab`),
+`CALLBACK_QUIET_HOURS` (empty or `off`, the default: any hour; `21-9`: no calls
+from 9 pm to 9 am the caller's time; the setting at booking time travels in the
+workflow's input and also governs its reschedules and retries), and
 for the worker `TELNYX_API_KEY` plus optional `TELNYX_CONNECTION_ID` and
 `TELNYX_FROM_NUMBER`. Callbacks need caller memory on (it supplies the caller's
 key). The VM setup is in [docs/deploy.md](docs/deploy.md#callbacks-temporal).

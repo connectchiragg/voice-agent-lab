@@ -153,7 +153,7 @@ TOOLS = {tool.name: tool for tool in (
     Tool("schedule_callback",
          "Book a phone call back to this caller at a time they choose, about something they "
          "name. Phone callers only. First say the exact day and time back to them and get a "
-         "yes; then call this once. Calls are made from 9 am to 9 pm their time.",
+         "yes; then call this once. If it refuses the time, say why and offer another.",
          {"type": "object", "properties": {
              "when": {"type": "string", "description": "The time in the caller's words, e.g. "
                       "'tomorrow at 5 pm', 'in 2 hours', 'Friday 10:30 am', or local ISO "

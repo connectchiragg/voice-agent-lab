@@ -33,7 +33,8 @@ from temporalio.service import RPCError, RPCStatusCode
 from app import memory
 from app.callback_worker import TemporalSettings
 from app.callback_workflow import (MAX_REASON_CHARS, TASK_QUEUE, CallbackRequest, CallbackStatus,
-                                   CallbackWorkflow, CallResult, in_quiet_hours, validate_due,
+                                   CallbackWorkflow, CallResult, in_quiet_hours,
+                                   parse_quiet_hours, quiet_hours_phrase, validate_due,
                                    workflow_id)
 
 logger = logging.getLogger("uvicorn.error")
@@ -44,6 +45,17 @@ RPC_TIMEOUT = timedelta(seconds=3)  # Within the tools' own 5 s limit.
 
 def default_zone() -> str:
     return os.getenv("ASSISTANT_TIMEZONE", "Asia/Kolkata")
+
+
+def quiet_hours() -> str:
+    """CALLBACK_QUIET_HOURS: "21-9" (no calls 9 pm to 9 am, the caller's time); empty or
+    "off" (the default for now) allows any hour. Invalid: logged and treated as off."""
+    text = os.getenv("CALLBACK_QUIET_HOURS", "").strip().lower()
+    try:
+        return "" if parse_quiet_hours(text) is None else text
+    except ValueError as error:
+        logger.warning("CALLBACK_QUIET_HOURS ignored: %s", error)
+        return ""
 
 
 # The Temporal client: connected on first use, shared by every call.
@@ -163,7 +175,8 @@ def caller_zone(name: str | None) -> ZoneInfo:
         raise ValueError(f"unknown time zone {name!r}; use an IANA name like Europe/London") from error
 
 
-def when_error(when: str, zone: str, now: datetime) -> tuple[datetime | None, dict[str, Any] | None]:
+def when_error(when: str, zone: str, now: datetime,
+               quiet: str = "") -> tuple[datetime | None, dict[str, Any] | None]:
     """The time asked for, or an error for the model to explain to the caller."""
     due = parse_when(when, now.astimezone(ZoneInfo(zone)))
     if due is None:
@@ -173,9 +186,11 @@ def when_error(when: str, zone: str, now: datetime) -> tuple[datetime | None, di
         return None, {"error": "That is more than two weeks away; callbacks can be booked up "
                                "to two weeks ahead."}
     try:
-        validate_due(due.astimezone(timezone.utc), now, zone)
+        validate_due(due.astimezone(timezone.utc), now, zone, quiet)
     except ValueError as error:
-        hint = (" Ask for a time between 9 am and 9 pm." if in_quiet_hours(due, zone) else "")
+        start, _, end = quiet_hours_phrase(quiet).partition(" to ")
+        hint = (f" Ask for a time between {end} and {start}."
+                if in_quiet_hours(due, zone, quiet) else "")
         return None, {"error": f"Cannot call back {spoken(due, zone)}: {error}.{hint}"}
     return due, None
 
@@ -187,7 +202,8 @@ async def schedule_callback(when: str, reason: str, time_zone: str | None = None
     if phone is None or caller_key is None:
         return NOT_PHONE
     zone = caller_zone(time_zone).key
-    due, error = when_error(when, zone, datetime.now(timezone.utc))
+    quiet = quiet_hours()
+    due, error = when_error(when, zone, datetime.now(timezone.utc), quiet)
     if due is None:
         return error or UNAVAILABLE
     temporal_client = await temporal()
@@ -195,7 +211,7 @@ async def schedule_callback(when: str, reason: str, time_zone: str | None = None
         return UNAVAILABLE
     reason = " ".join(reason.split())[:MAX_REASON_CHARS] or "your question"
     request = CallbackRequest(caller_key, phone, due.astimezone(timezone.utc).isoformat(), reason,
-                              conversation_id or "", zone)
+                              conversation_id or "", zone, quiet)
     try:
         await temporal_client.start_workflow(CallbackWorkflow.run, request,
                                              id=workflow_id(caller_key), task_queue=TASK_QUEUE,
@@ -260,7 +276,8 @@ async def reschedule_callback(when: str, caller_key: str | None = None,
         return error or UNAVAILABLE
     current: CallbackStatus = await handle.query(CallbackWorkflow.status_query,
                                                  rpc_timeout=RPC_TIMEOUT)
-    due, error = when_error(when, current.timezone, datetime.now(timezone.utc))
+    # The workflow checks again with the quiet hours it was booked under.
+    due, error = when_error(when, current.timezone, datetime.now(timezone.utc), quiet_hours())
     if due is None:
         return error or UNAVAILABLE
     try:

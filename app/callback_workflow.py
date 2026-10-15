@@ -39,7 +39,6 @@ MAX_DIALS_PER_DAY = 5  # All callers together, per UTC day.
 # at most RING_TIMEOUT_S (the dial's timeout_secs); after this we count no answer.
 RING_TIMEOUT_S = 30
 RESULT_TIMEOUT = timedelta(minutes=3)
-QUIET_START_HOUR, QUIET_END_HOUR = 21, 9  # No calls from 9 pm to 9 am, caller's time.
 MAX_REASON_CHARS = 120
 
 # Call results the webhook signals; only "answered" ends the callback successfully.
@@ -55,9 +54,39 @@ def workflow_id(caller_key: str) -> str:
     return "callback-" + hashlib.sha256(caller_key.encode()).hexdigest()[:20]
 
 
-def in_quiet_hours(moment: datetime, zone: str) -> bool:
+def parse_quiet_hours(text: str) -> tuple[int, int] | None:
+    """ "21-9" -> (21, 9): no calls from 21:00 to 08:59 local; "" or "off" -> None (any hour)."""
+    text = text.strip().lower()
+    if text in ("", "off"):
+        return None
+    start, separator, end = text.partition("-")
+    if not separator or not start.isdigit() or not end.isdigit():
+        raise ValueError(f"quiet hours must look like 21-9 or be off, not {text!r}")
+    hours = int(start), int(end)
+    if not all(0 <= hour <= 23 for hour in hours) or hours[0] == hours[1]:
+        raise ValueError(f"quiet hours must be two different hours from 0 to 23, not {text!r}")
+    return hours
+
+
+def in_quiet_hours(moment: datetime, zone: str, quiet_hours: str) -> bool:
+    """Whether `moment` falls in `quiet_hours` ("21-9"; "" is never) in `zone`."""
+    hours = parse_quiet_hours(quiet_hours)
+    if hours is None:
+        return False
+    start, end = hours
     hour = moment.astimezone(ZoneInfo(zone)).hour
-    return hour >= QUIET_START_HOUR or hour < QUIET_END_HOUR
+    return hour >= start or hour < end if start > end else start <= hour < end
+
+
+def quiet_hours_phrase(quiet_hours: str) -> str:
+    """ "21-9" -> "9 pm to 9 am"."""
+    hours = parse_quiet_hours(quiet_hours)
+    if hours is None:
+        return ""
+
+    def clock(hour: int) -> str:
+        return f"{hour % 12 or 12} {'am' if hour < 12 else 'pm'}"
+    return f"{clock(hours[0])} to {clock(hours[1])}"
 
 
 def parse_utc(text: str) -> datetime:
@@ -87,6 +116,9 @@ class CallbackRequest:
     reason: str
     conversation_id: str  # The call in which the caller asked.
     timezone: str = "Asia/Kolkata"  # The caller's, for quiet hours.
+    # CALLBACK_QUIET_HOURS when it was booked ("21-9"; "" off), passed in so workflow
+    # code never reads the environment; it also governs reschedules and retries.
+    quiet_hours: str = ""
 
 
 @dataclass
@@ -128,12 +160,13 @@ class DialSlotRequest:
     attempt_id: str  # Repeats (activity retries) are counted once.
 
 
-def validate_due(due: datetime, now: datetime, zone: str) -> None:
+def validate_due(due: datetime, now: datetime, zone: str, quiet_hours: str = "") -> None:
     """ValueError naming the problem, for a time the callback cannot be placed at."""
     if due <= now:
         raise ValueError("that time has already passed")
-    if in_quiet_hours(due, zone):
-        raise ValueError("that is within quiet hours (9 pm to 9 am the caller's time)")
+    if in_quiet_hours(due, zone, quiet_hours):
+        raise ValueError(f"that is within quiet hours ({quiet_hours_phrase(quiet_hours)} "
+                         "the caller's time)")
 
 
 @workflow.defn
@@ -144,21 +177,24 @@ class CallbackWorkflow:
         self.timer_changed = False
         self.cancelled = False
         self.result: CallResult | None = None
+        self.quiet_hours = ""
 
     @workflow.run
     async def run(self, request: CallbackRequest) -> CallbackStatus:
         self.status = CallbackStatus("scheduled", request.due_at_utc,
                                      request.reason[:MAX_REASON_CHARS], request.timezone)
+        self.quiet_hours = request.quiet_hours
         try:
             self.due = parse_utc(request.due_at_utc)
-            validate_due(self.due, workflow.now(), request.timezone)
+            validate_due(self.due, workflow.now(), request.timezone, self.quiet_hours)
         except ValueError as error:
             return self.finish("rejected", str(error))
         while True:
             await self.sleep_until_due()
             if self.cancelled:
                 return self.finish("cancelled")
-            if in_quiet_hours(self.due, request.timezone):  # A retry that ran into the evening.
+            # A retry that ran into the evening.
+            if in_quiet_hours(self.due, request.timezone, self.quiet_hours):
                 return self.finish("failed", "the next attempt would fall in quiet hours")
             attempt = Attempt(len(self.status.attempts) + 1, workflow.now().isoformat())
             self.status.attempts.append(attempt)
@@ -241,7 +277,8 @@ class CallbackWorkflow:
         """Runs before the update is accepted; raising rejects it with nothing recorded."""
         if self.status.state not in ("scheduled", "retry_wait") or self.cancelled:
             raise ValueError(f"the callback cannot be moved while it is {self.status.state}")
-        validate_due(parse_utc(new_due_at_utc), workflow.now(), self.status.timezone)
+        validate_due(parse_utc(new_due_at_utc), workflow.now(), self.status.timezone,
+                     self.quiet_hours)
 
     @workflow.signal
     def cancel(self) -> None:

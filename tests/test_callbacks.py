@@ -16,7 +16,8 @@ from temporalio.service import RPCError, RPCStatusCode
 from app import callback_worker, callbacks, memory, tools
 from app.callback_worker import DialSettings, client_state, dial_body
 from app.callback_workflow import (CallbackStatus, CallbackWorkflow, CallResult, PlaceCallInput,
-                                   in_quiet_hours, validate_due, workflow_id)
+                                   in_quiet_hours, parse_quiet_hours, validate_due,
+                                   workflow_id)
 from app.callbacks import CallbackCall, parse_when
 from tests.test_telnyx import CALL_ID, STREAM_URL, board, post_event, wait_for, webhook_client  # noqa: F401
 
@@ -52,16 +53,31 @@ def test_unclear_times_are_not_guessed(phrase):
     assert parse_when(phrase, NOW) is None
 
 
-def test_quiet_hours_are_9_pm_to_9_am_local():
+def test_quiet_hours_21_9_are_9_pm_to_9_am_local_and_off_allows_any_hour():
     def at(hour, minute=0):
         return datetime(2026, 10, 15, hour, minute, tzinfo=ZONE)
-    assert [in_quiet_hours(at(hour), "Asia/Kolkata") for hour in (8, 9, 20, 21, 23)] == [
+    assert [in_quiet_hours(at(hour), "Asia/Kolkata", "21-9") for hour in (8, 9, 20, 21, 23)] == [
         True, False, False, True, True]
-    assert not in_quiet_hours(at(20, 59), "Asia/Kolkata")
+    assert not in_quiet_hours(at(20, 59), "Asia/Kolkata", "21-9")
     # 10 am in Kolkata is 9:30 pm the evening before in San Francisco.
-    assert in_quiet_hours(at(10), "America/Los_Angeles")
+    assert in_quiet_hours(at(10), "America/Los_Angeles", "21-9")
+    assert in_quiet_hours(at(13), "Asia/Kolkata", "12-14")  # A window within one day.
+    for off in ("", "off", " OFF "):
+        assert not any(in_quiet_hours(at(hour), "Asia/Kolkata", off) for hour in range(24))
+    for bad in ("21", "21-21", "25-9", "nine-five"):
+        with pytest.raises(ValueError):
+            parse_quiet_hours(bad)
     with pytest.raises(ValueError, match="passed"):
         validate_due(at(13), at(14), "Asia/Kolkata")
+    validate_due(at(23), at(14), "Asia/Kolkata")  # Off: a night time is fine.
+
+
+def test_the_quiet_hours_setting_defaults_to_off(monkeypatch):
+    monkeypatch.delenv("CALLBACK_QUIET_HOURS", raising=False)
+    assert callbacks.quiet_hours() == ""
+    for value, expected in (("off", ""), ("21-9", "21-9"), ("bogus", "")):
+        monkeypatch.setenv("CALLBACK_QUIET_HOURS", value)
+        assert callbacks.quiet_hours() == expected
 
 
 # A fake Temporal client: one workflow per id, behaving as CallbackWorkflow does.
@@ -100,7 +116,7 @@ class FakeHandle:
         assert update == CallbackWorkflow.reschedule
         try:
             validate_due(datetime.fromisoformat(due), datetime.now(timezone.utc),
-                         self.workflow.status.timezone)
+                         self.workflow.status.timezone, self.workflow.request.quiet_hours)
         except ValueError as error:
             raise WorkflowUpdateFailedError(ApplicationError(str(error))) from error
         self.workflow.status.due_at_utc = due
@@ -168,7 +184,8 @@ def test_a_second_callback_is_refused_while_one_is_pending(temporal):
     assert result["existing"]["state"] == "scheduled" and result["existing"]["reason"] == "a"
 
 
-def test_quiet_hours_past_times_and_unclear_times_are_refused(temporal):
+def test_quiet_hours_past_times_and_unclear_times_are_refused(temporal, monkeypatch):
+    monkeypatch.setenv("CALLBACK_QUIET_HOURS", "21-9")
     for when, message in ((daytime_tomorrow(22), "quiet hours"), (daytime_tomorrow(7), "9 am"),
                           ("2020-01-01T10:00", "passed"), ("whenever", "understand"),
                           ("2027-06-01T10:00", "two weeks")):
@@ -176,7 +193,20 @@ def test_quiet_hours_past_times_and_unclear_times_are_refused(temporal):
     assert temporal.workflows == {}
 
 
-def test_a_callers_time_zone_moves_quiet_hours(temporal):
+def test_without_quiet_hours_a_night_callback_is_booked_but_other_guards_stay(temporal,
+                                                                             monkeypatch):
+    monkeypatch.delenv("CALLBACK_QUIET_HOURS", raising=False)
+    assert run("schedule_callback", {"when": daytime_tomorrow(23), "reason": "x"})["scheduled"]
+    assert temporal.workflows[workflow_id(CALLER)].request.quiet_hours == ""
+    assert "already has a callback" in run("schedule_callback",
+                                           {"when": daytime_tomorrow(2), "reason": "y"})["error"]
+    for when, message in (("2020-01-01T10:00", "passed"), ("2027-06-01T10:00", "two weeks")):
+        assert message in run("schedule_callback", {"when": when, "reason": "x"},
+                              "tel:+15550002222")["error"]
+
+
+def test_a_callers_time_zone_moves_quiet_hours(temporal, monkeypatch):
+    monkeypatch.setenv("CALLBACK_QUIET_HOURS", "21-9")
     tomorrow = datetime.now(ZoneInfo("America/Los_Angeles")) + timedelta(days=1)
     when = f"{tomorrow:%Y-%m-%d}T10:00"  # 10 am in California: 10:30 pm or later in Kolkata.
     assert run("schedule_callback", {"when": when, "reason": "x",
@@ -194,7 +224,8 @@ def test_web_and_anonymous_callers_are_declined(temporal):
     assert temporal.workflows == {}
 
 
-def test_get_reschedule_and_cancel_find_the_callers_own_callback(temporal):
+def test_get_reschedule_and_cancel_find_the_callers_own_callback(temporal, monkeypatch):
+    monkeypatch.setenv("CALLBACK_QUIET_HOURS", "21-9")
     assert run("get_callback", {}) == {"state": "none"}
     assert "no callback booked" in run("cancel_callback", {})["error"]
     run("schedule_callback", {"when": daytime_tomorrow(), "reason": "the weather"})

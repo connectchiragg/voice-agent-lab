@@ -68,9 +68,10 @@ def run_with_worker(test, telnyx: FakeTelnyx | None = None):
     return telnyx
 
 
-async def start(env: WorkflowEnvironment, due: datetime, caller: str = CALLER) -> WorkflowHandle:
+async def start(env: WorkflowEnvironment, due: datetime, caller: str = CALLER,
+                quiet_hours: str = "") -> WorkflowHandle:
     request = CallbackRequest(caller, caller.removeprefix("tel:"), due.isoformat(),
-                              "the weather in Mysuru", "conversation-1", ZONE)
+                              "the weather in Mysuru", "conversation-1", ZONE, quiet_hours)
     return await env.client.start_workflow(CallbackWorkflow.run, request, id=workflow_id(caller),
                                            task_queue=TASK_QUEUE)
 
@@ -185,19 +186,35 @@ def test_cancel_while_ringing_ends_at_once():
     assert len(run_with_worker(test).dials) == 1
 
 
-def test_quiet_hours_are_refused_at_start_and_on_reschedule():
+def test_quiet_hours_when_booked_with_them_are_refused_at_start_and_on_reschedule():
     async def test(env, telnyx):
         now = await env.get_current_time()
-        night = await start(env, next_local(now, 22, 30), caller="tel:+15550000001")
+        night = await start(env, next_local(now, 22, 30), caller="tel:+15550000001",
+                            quiet_hours="21-9")
         status = await night.result()
-        assert status.state == "rejected" and "quiet hours" in status.detail
-        handle = await start(env, next_local(now, 10))
+        assert status.state == "rejected" and "quiet hours (9 pm to 9 am" in status.detail
+        handle = await start(env, next_local(now, 10), quiet_hours="21-9")
         for early in (next_local(now, 7), next_local(now, 21), now - timedelta(minutes=1)):
             with pytest.raises(WorkflowUpdateFailedError):
                 await handle.execute_update(CallbackWorkflow.reschedule, early.isoformat())
         assert (await handle.query(CallbackWorkflow.status_query)).state == "scheduled"
         await handle.signal(CallbackWorkflow.cancel)
         await handle.result()
+    assert run_with_worker(test).dials == []
+
+
+def test_without_quiet_hours_a_night_time_is_accepted_and_movable():
+    async def test(env, telnyx):
+        now = await env.get_current_time()
+        handle = await start(env, next_local(now, 22, 30))  # Quiet hours off (the default).
+        status = await handle.execute_update(CallbackWorkflow.reschedule,
+                                             next_local(now, 3).isoformat())
+        assert status.state == "scheduled"
+        with pytest.raises(WorkflowUpdateFailedError):  # The past is still refused.
+            await handle.execute_update(CallbackWorkflow.reschedule,
+                                        (now - timedelta(minutes=1)).isoformat())
+        await handle.signal(CallbackWorkflow.cancel)
+        assert (await handle.result()).state == "cancelled"
     assert run_with_worker(test).dials == []
 
 
