@@ -80,7 +80,7 @@ def test_tool_call_runs_tool_and_answers_without_filler_when_fast(graph, monkeyp
 
 
 def slow_tool(monkeypatch, seconds=0.05):
-    async def run_tool(name, arguments, caller_key=None, conversation_id=None):
+    async def run_tool(name, arguments, caller_key=None, conversation_id=None, turn=None):
         await asyncio.sleep(seconds)
         return '{"ok": true}'
     monkeypatch.setattr(agent, "run_tool", run_tool)
@@ -276,7 +276,7 @@ def test_interrupted_committed_speculation_keeps_its_completed_steps(graph, monk
 def test_side_effecting_tool_waits_for_the_commit(graph, monkeypatch):
     ran = []
 
-    async def run_tool(name, arguments, caller_key=None, conversation_id=None):
+    async def run_tool(name, arguments, caller_key=None, conversation_id=None, turn=None):
         ran.append(name)
         return '{"ok": true}'
 
@@ -300,7 +300,7 @@ def test_side_effecting_tool_waits_for_the_commit(graph, monkeypatch):
 def test_cancelling_a_turn_during_a_slow_tool_stops_the_tool(graph, monkeypatch):
     finished = []
 
-    async def run_tool(name, arguments, caller_key=None, conversation_id=None):
+    async def run_tool(name, arguments, caller_key=None, conversation_id=None, turn=None):
         await asyncio.sleep(0.2)
         finished.append(name)
         return '{"ok": true}'

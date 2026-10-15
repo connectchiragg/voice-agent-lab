@@ -195,21 +195,96 @@ def when_error(when: str, zone: str, now: datetime,
     return due, None
 
 
+# Booking and moving a callback take two steps, enforced here rather than left to the
+# prompt: a proposal the model reads back, then a confirmation that only succeeds on
+# the caller's very next turn, and only if that turn says yes.
+
+@dataclass(frozen=True)
+class TurnContext:
+    """The caller's turn a tool call answers: its text and its number in the call."""
+    user_text: str
+    user_turn: int
+
+
+@dataclass(frozen=True)
+class Proposal:
+    kind: str  # "schedule" or "reschedule"
+    due: datetime
+    zone: str
+    reason: str
+    user_turn: int  # The turn in which it was proposed; the yes must be the next one.
+
+
+proposals: dict[str, Proposal] = {}  # Conversation id -> the time awaiting the caller's yes.
+YES = frozenset("yes yeah yep yup sure correct right ok okay perfect great fine please "
+                "absolutely definitely confirm confirmed".split())
+NO = frozenset("no nope not dont don't never wrong cancel wait stop didnt didn't".split())
+
+
+def affirmative(text: str) -> bool:
+    """A clear yes ("Yes, please", "that's right"), with no no in it."""
+    words = re.sub(r"[^\w\s']", " ", text.lower()).split()
+    return any(word in YES for word in words) and not any(word in NO for word in words)
+
+
+def confirmation_error(conversation_id: str | None, turn: "TurnContext | None",
+                       kind: str) -> tuple[Proposal | None, dict[str, Any] | None]:
+    """The proposal this confirmation may book, or why it may not."""
+    proposal = proposals.get(conversation_id or "")
+    if proposal is None or proposal.kind != kind or turn is None:
+        return None, {"error": "Nothing is booked yet. First call this tool without confirmed "
+                               "to propose the time, read it back and ask the caller."}
+    if turn.user_turn != proposal.user_turn + 1:
+        proposals.pop(conversation_id or "", None)
+        return None, {"error": "Not booked: the caller must confirm on their very next reply. "
+                               "Propose the time again if they still want it."}
+    if not affirmative(turn.user_text):
+        proposals.pop(conversation_id or "", None)
+        return None, {"error": "Not booked: the caller did not say yes. Do not book it; ask "
+                               "what they would like instead."}
+    proposals.pop(conversation_id or "", None)
+    return proposal, None
+
+
+def propose(kind: str, conversation_id: str | None, turn: "TurnContext | None", due: datetime,
+            zone: str, reason: str) -> dict[str, Any]:
+    if len(proposals) >= 256:  # Calls that ended with one pending: drop the oldest.
+        proposals.pop(next(iter(proposals)))
+    proposals[conversation_id or ""] = Proposal(kind, due, zone, reason,
+                                                turn.user_turn if turn else -1)
+    return {"proposed": True, "booked": False, "when": spoken(due, zone), "timezone": zone,
+            "reason": reason,
+            "next": "Nothing is booked yet. Say this day and time back to the caller and ask "
+                    "if that is right. Only if their next reply is yes, call this tool again "
+                    "with confirmed=true."}
+
+
 async def schedule_callback(when: str, reason: str, time_zone: str | None = None,
-                            caller_key: str | None = None,
-                            conversation_id: str | None = None) -> dict[str, Any]:
+                            confirmed: bool = False, caller_key: str | None = None,
+                            conversation_id: str | None = None,
+                            turn: TurnContext | None = None) -> dict[str, Any]:
     phone = phone_of(caller_key)
     if phone is None or caller_key is None:
         return NOT_PHONE
-    zone = caller_zone(time_zone).key
     quiet = quiet_hours()
-    due, error = when_error(when, zone, datetime.now(timezone.utc), quiet)
-    if due is None:
+    if not confirmed:
+        zone = caller_zone(time_zone).key
+        due, error = when_error(when, zone, datetime.now(timezone.utc), quiet)
+        if due is None:
+            return error or UNAVAILABLE
+        reason = " ".join(reason.split())[:MAX_REASON_CHARS] or "your question"
+        return propose("schedule", conversation_id, turn, due, zone, reason)
+    proposal, error = confirmation_error(conversation_id, turn, "schedule")
+    if proposal is None:
         return error or UNAVAILABLE
+    due, zone, reason = proposal.due, proposal.zone, proposal.reason
+    try:
+        validate_due(due.astimezone(timezone.utc), datetime.now(timezone.utc), zone, quiet)
+    except ValueError as invalid:
+        return {"error": f"Cannot call back {spoken(due, zone)}: {invalid}."}
     temporal_client = await temporal()
     if temporal_client is None:
         return UNAVAILABLE
-    reason = " ".join(reason.split())[:MAX_REASON_CHARS] or "your question"
     request = CallbackRequest(caller_key, phone, due.astimezone(timezone.utc).isoformat(), reason,
                               conversation_id or "", zone, quiet)
     try:
@@ -269,17 +344,25 @@ async def describe(temporal_client: TemporalClient, caller_key: str) -> dict[str
     return {"state": state.name.lower()}
 
 
-async def reschedule_callback(when: str, caller_key: str | None = None,
-                              conversation_id: str | None = None) -> dict[str, Any]:
+async def reschedule_callback(when: str, confirmed: bool = False,
+                              caller_key: str | None = None, conversation_id: str | None = None,
+                              turn: TurnContext | None = None) -> dict[str, Any]:
     handle, error = await find(caller_key)
     if handle is None:
         return error or UNAVAILABLE
     current: CallbackStatus = await handle.query(CallbackWorkflow.status_query,
                                                  rpc_timeout=RPC_TIMEOUT)
-    # The workflow checks again with the quiet hours it was booked under.
-    due, error = when_error(when, current.timezone, datetime.now(timezone.utc), quiet_hours())
-    if due is None:
+    if not confirmed:
+        # The workflow checks again with the quiet hours it was booked under.
+        due, error = when_error(when, current.timezone, datetime.now(timezone.utc),
+                                quiet_hours())
+        if due is None:
+            return error or UNAVAILABLE
+        return propose("reschedule", conversation_id, turn, due, current.timezone, current.reason)
+    proposal, error = confirmation_error(conversation_id, turn, "reschedule")
+    if proposal is None:
         return error or UNAVAILABLE
+    due = proposal.due
     try:
         status = await handle.execute_update(CallbackWorkflow.reschedule,
                                              due.astimezone(timezone.utc).isoformat(),
@@ -365,10 +448,23 @@ calls: dict[str, CallbackCall] = {}  # Conversation id -> the callback it is, wh
 
 
 def greeting(conversation_id: str) -> str:
-    """The first words of a phone call: the callback's reason, else the usual greeting."""
+    """The first words of a phone call: the callback's reason, else the usual greeting.
+
+    For a callback the reason comes first: a callee often says "Hello?" over
+    the opening words, and a generic opening then hides why we called.
+    """
     call = calls.get(conversation_id)
     if call is None:
         return memory.greeting(conversation_id)
     name = memory.display_name(conversation_id)
-    return (f"Hi {name}, you asked me to call back about {call.reason}." if name
-            else f"Hi, this is Cadence. You asked me to call back about {call.reason}.")
+    return (f"Hi {name}, Cadence calling back about {call.reason}, as you asked." if name
+            else f"Hi, Cadence calling back about {call.reason}, as you asked.")
+
+
+def prompt_note(conversation_id: str) -> str:
+    """For the system prompt of a callback call: why we called, and not to book another."""
+    call = calls.get(conversation_id)
+    if call is None:
+        return ""
+    return (f"This call is the callback the caller asked for, about {call.reason}. Help with "
+            "that now. Do not book another callback unless the caller clearly asks for one.")

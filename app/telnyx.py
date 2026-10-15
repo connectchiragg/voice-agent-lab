@@ -677,6 +677,7 @@ async def webhook(request: Request) -> dict[str, bool]:
         # The callee is the caller who asked for the callback.
         caller_key = memory.caller_key_from_phone(payload.get("to"))
         board.spawn(callbacks.report(callback, call_control_id, "answered"))
+        board.spawn(resolve_callback_items(caller_key))
         board.spawn(board.callback_answered(call_control_id, event_id, caller_key, callback))
     elif kind == "call.hangup":
         logger.info("Phone call ended: %s", payload.get("hangup_cause"))
@@ -725,6 +726,12 @@ async def recording_saved(board: Switchboard, call_control_id: str, payload: dic
     logger.info("Phone call recording saved: id %s, %s s%s", recording_id,
                 "?" if duration_ms is None else f"{duration_ms / 1000:.1f}",
                 "" if stored else " (not stored: no Postgres)")
+
+
+async def resolve_callback_items(caller_key: str | None) -> None:
+    dropped = await memory.resolve_callback_items(caller_key)
+    if dropped:
+        logger.info("Callback answered: %d open callback item(s) cleared from caller memory", dropped)
 
 
 async def hang_up(board: Switchboard, call_control_id: str) -> None:

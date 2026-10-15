@@ -134,6 +134,7 @@ class MemoryStore(Protocol):
     # True if anything was stored.
     async def forget(self, caller_key: str) -> bool: ...
     async def delete_threads(self, thread_ids: Sequence[str]) -> None: ...
+    async def set_open_items(self, caller_key: str, open_items: list[str]) -> None: ...
 
 
 class InMemoryStore:
@@ -171,6 +172,10 @@ class InMemoryStore:
     async def delete_threads(self, thread_ids: Sequence[str]) -> None:
         for thread_id in thread_ids:
             await self.delete_thread(thread_id)
+
+    async def set_open_items(self, caller_key: str, open_items: list[str]) -> None:
+        if caller_key in self.callers:
+            self.callers[caller_key] = replace(self.callers[caller_key], open_items=open_items)
 
 
 SCHEMA = """
@@ -267,6 +272,11 @@ class PostgresStore:
             for thread_id in threads:
                 await self.delete_thread(thread_id)
         return had_memory
+
+    async def set_open_items(self, caller_key: str, open_items: list[str]) -> None:
+        async with self.pool.connection() as connection:
+            await connection.execute("UPDATE callers SET open_items = %s WHERE caller_key = %s",
+                                     (Jsonb(open_items), caller_key))
 
     async def delete_threads(self, thread_ids: Sequence[str]) -> None:
         if not self.checkpoints:
@@ -501,6 +511,28 @@ def failed_record(conversation_id: str, call: CallerCall, error: Exception) -> C
     logger.warning("Caller memory: summarizing the call failed: %s", type(error).__name__)
     return CallRecord(conversation_id, call.started_at, call.ended_at, None,
                       error=type(error).__name__)
+
+
+CALLBACK_ITEM = re.compile(r"\bcall(ed|ing)?[ -]?back\b|\bcallback\b|\bcall (me|them|him|her) "
+                           r"(back|again)\b", re.IGNORECASE)
+
+
+async def resolve_callback_items(caller_key: str | None) -> int:
+    """A callback was answered: drop the caller's "wants a callback" open items, so the
+    next call does not offer it again. Returns how many were dropped. Never raises."""
+    if store is None or caller_key is None:
+        return 0
+    try:
+        known = await store.load(caller_key)
+        if known is None:
+            return 0
+        kept = [item for item in known.open_items if not CALLBACK_ITEM.search(item)]
+        if len(kept) != len(known.open_items):
+            await store.set_open_items(caller_key, kept)
+        return len(known.open_items) - len(kept)
+    except Exception as error:
+        logger.warning("Caller memory: clearing callback items failed: %s", type(error).__name__)
+        return 0
 
 
 async def forget(caller_key: str) -> bool:

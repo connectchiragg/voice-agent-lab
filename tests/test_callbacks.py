@@ -157,8 +157,26 @@ def temporal(monkeypatch):
     return fake
 
 
+TURNS = [0]
+
+
+def call_tool(name, arguments, caller_key=CALLER, said="Call me back then.", conversation="conv-1"):
+    """One tool call on the caller's next turn, which said `said`."""
+    TURNS[0] += 1
+    turn = callbacks.TurnContext(said, TURNS[0])
+    return json.loads(asyncio.run(tools.run_tool(name, json.dumps(arguments), caller_key,
+                                                 conversation, turn)))
+
+
 def run(name, arguments, caller_key=CALLER):
-    return json.loads(asyncio.run(tools.run_tool(name, json.dumps(arguments), caller_key, "conv-1")))
+    """Booking and moving as the model should: propose, read back, the caller says yes."""
+    if name not in ("schedule_callback", "reschedule_callback"):
+        return call_tool(name, arguments, caller_key)
+    proposed = call_tool(name, arguments, caller_key)
+    if not proposed.get("proposed"):
+        return proposed
+    assert proposed["booked"] is False and "say this day and time back" in proposed["next"].lower()
+    return call_tool(name, {**arguments, "confirmed": True}, caller_key, said="Yes, please.")
 
 
 def daytime_tomorrow(hour=11):
@@ -334,10 +352,14 @@ def test_report_signals_the_workflow(temporal):
 def test_a_callback_opens_with_its_reason_and_the_callers_name(monkeypatch):
     monkeypatch.setattr(memory, "calls", {})
     monkeypatch.setitem(callbacks.calls, "conv-cb", CallbackCall("callback-abc", 1, "the weather"))
-    assert callbacks.greeting("conv-cb") == (
-        "Hi, this is Cadence. You asked me to call back about the weather.")
+    # The reason comes first: a callee's "Hello?" often covers the opening words.
+    assert callbacks.greeting("conv-cb") == "Hi, Cadence calling back about the weather, as you asked."
     monkeypatch.setattr(memory, "display_name", lambda conversation_id: "Chirag")
-    assert callbacks.greeting("conv-cb") == "Hi Chirag, you asked me to call back about the weather."
+    assert callbacks.greeting("conv-cb") == (
+        "Hi Chirag, Cadence calling back about the weather, as you asked.")
+    assert "callback the caller asked for, about the weather" in callbacks.prompt_note("conv-cb")
+    assert "Do not book another callback" in callbacks.prompt_note("conv-cb")
+    assert callbacks.prompt_note("conv-other") == ""
     assert callbacks.greeting("conv-other") == memory.greeting("conv-other")
 
 
@@ -357,3 +379,67 @@ def test_startup_logs_whether_callbacks_are_on(monkeypatch, caplog):
     with caplog.at_level(logging.INFO, logger="uvicorn.error"):
         asyncio.run(module.announce())
     assert "Callbacks enabled: Temporal at temporal:7233, namespace voice-agent-lab" in caplog.text
+
+
+
+# Booking needs the caller's yes, in code: the incident where "Hello?" got a callback booked.
+
+def test_a_proposal_books_nothing_and_a_confirmation_needs_a_yes_on_the_next_turn(temporal):
+    when = {"when": daytime_tomorrow(), "reason": "Chicago weather"}
+    # Confirming with no proposal (the model skipped the read-back): refused.
+    assert "Nothing is booked" in call_tool("schedule_callback", {**when, "confirmed": True},
+                                            said="Hello?")["error"]
+    proposed = call_tool("schedule_callback", when, said="Hello?")
+    assert proposed["proposed"] and proposed["when"].endswith("11:00 AM")
+    assert temporal.workflows == {}
+    # The caller did not ask: "No, I did not say that." Refused, and the proposal is gone.
+    refused = call_tool("schedule_callback", {**when, "confirmed": True},
+                        said="No, I did not say that.")
+    assert "did not say yes" in refused["error"] and temporal.workflows == {}
+    assert "Nothing is booked" in call_tool("schedule_callback", {**when, "confirmed": True},
+                                            said="Yes")["error"]
+
+
+def test_a_confirmation_in_the_same_turn_or_a_later_one_is_refused(temporal):
+    when = {"when": daytime_tomorrow(), "reason": "x"}
+    TURNS[0] += 1
+    same = callbacks.TurnContext("Call me back tomorrow at eleven.", TURNS[0])
+
+    def tool(arguments, turn):
+        return json.loads(asyncio.run(tools.run_tool("schedule_callback", json.dumps(arguments),
+                                                     CALLER, "conv-1", turn)))
+    assert tool(when, same)["proposed"]
+    assert "very next reply" in tool({**when, "confirmed": True}, same)["error"]
+    assert tool(when, same)["proposed"]
+    later = callbacks.TurnContext("yes", TURNS[0] + 2)
+    assert "very next reply" in tool({**when, "confirmed": True}, later)["error"]
+    assert temporal.workflows == {}
+
+
+def test_the_confirmation_books_the_proposed_time_not_a_new_reading(temporal):
+    proposed = call_tool("schedule_callback", {"when": daytime_tomorrow(), "reason": "the weather"})
+    booked = call_tool("schedule_callback", {"when": daytime_tomorrow(15), "reason": "other",
+                                             "confirmed": True}, said="Yes, that's right.")
+    assert booked["scheduled"] and booked["when"] == proposed["when"]
+    assert temporal.workflows[workflow_id(CALLER)].request.reason == "the weather"
+
+
+@pytest.mark.parametrize("text, yes", [("Yes, please.", True), ("yeah sure", True),
+                                       ("That's right", True), ("Okay", True),
+                                       ("No, I did not say that.", False), ("Hello?", False),
+                                       ("yes, no, wait", False), ("", False)])
+def test_what_counts_as_a_yes(text, yes):
+    assert callbacks.affirmative(text) is yes
+
+
+def test_an_answered_callback_clears_the_callers_callback_items(monkeypatch):
+    store = memory.InMemoryStore()
+    monkeypatch.setattr(memory, "store", store)
+    key = "tel:+15550007777"
+    store.callers[key] = memory.CallerMemory(
+        key, None, datetime.now(timezone.utc), datetime.now(timezone.utc), 1, "",
+        ["wants a callback about Chicago weather", "asked about Mysore weather",
+         "Call me back tomorrow"], None)
+    assert asyncio.run(memory.resolve_callback_items(key)) == 2
+    assert store.callers[key].open_items == ["asked about Mysore weather"]
+    assert asyncio.run(memory.resolve_callback_items(None)) == 0

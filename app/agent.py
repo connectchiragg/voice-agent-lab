@@ -20,7 +20,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from psycopg.conninfo import make_conninfo
 
-from app import memory
+from app import callbacks, memory
 from app.llm import ModelUsed, ToolCallRequest, stream_model, to_chat_messages
 from app.tools import SCHEMAS, has_side_effects, run_tool
 
@@ -118,7 +118,9 @@ async def agent(state: Conversation, config: RunnableConfig) -> Conversation:
     writer = get_stream_writer()
     allow_tools = tool_rounds(messages) < MAX_TOOL_ROUNDS  # Then the model must answer.
     # Looked up per step, so a forget_me earlier in the turn already removes it.
-    caller_memory = memory.prompt_block(config["configurable"]["thread_id"])
+    thread_id = config["configurable"]["thread_id"]
+    caller_memory = "\n\n".join(note for note in (callbacks.prompt_note(thread_id),
+                                                   memory.prompt_block(thread_id)) if note)
     text, calls = "", []
     try:
         for tool_choice in (None, "required"):
@@ -155,6 +157,12 @@ async def agent(state: Conversation, config: RunnableConfig) -> Conversation:
     return {"messages": messages, "updated_at": now()}
 
 
+def caller_turn(messages: list[Message]) -> callbacks.TurnContext:
+    """The caller's latest words and how many turns they have taken (for confirmations)."""
+    said = [message for message in messages if message["role"] == "user"]
+    return callbacks.TurnContext(said[-1]["parts"][0]["text"] if said else "", len(said))
+
+
 async def tools(state: Conversation, config: RunnableConfig) -> Conversation:
     """Run the requested tools concurrently and append their results.
 
@@ -169,8 +177,10 @@ async def tools(state: Conversation, config: RunnableConfig) -> Conversation:
         await committed.wait()
     conversation_id = config["configurable"]["thread_id"]
     caller_key = memory.caller_of(conversation_id)
+    turn = caller_turn(messages)
     running = asyncio.ensure_future(asyncio.gather(
-        *(run_tool(call["name"], call["arguments"], caller_key, conversation_id) for call in calls)))
+        *(run_tool(call["name"], call["arguments"], caller_key, conversation_id, turn)
+          for call in calls)))
     try:  # Cancelled at any point (barge-in, a cancelled speculation): stop the tools too.
         done, _ = await asyncio.wait({running}, timeout=FILLER_AFTER_S)
         if not done and not request["parts"][0]["text"].strip():

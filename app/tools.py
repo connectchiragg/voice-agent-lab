@@ -52,6 +52,8 @@ class Tool:
     # True for tools about the caller: `run` also gets `caller_key` (None: unknown caller),
     # which the model can neither see nor set.
     takes_caller: bool = False
+    # True for tools that need the caller's turn (callbacks.TurnContext), as `turn`.
+    takes_turn: bool = False
     # True for tools about this call: `run` also gets `caller_key` and `conversation_id`.
     takes_call: bool = False
 
@@ -131,6 +133,10 @@ async def forget_me(caller_key: str | None = None) -> dict[str, Any]:
     return {"forgotten": True, "had_memory": had_memory}
 
 
+CONFIRMED = {"type": "boolean", "description": "true only on the second call, after the caller "
+             "said yes to the time you read back"}
+
+
 TOOLS = {tool.name: tool for tool in (
     Tool("get_weather",
          "Current weather and a three-day forecast (today first) for a city or town.",
@@ -151,9 +157,11 @@ TOOLS = {tool.name: tool for tool in (
          {"type": "object", "properties": {}},
          forget_me, side_effects=True, takes_caller=True),
     Tool("schedule_callback",
-         "Book a phone call back to this caller at a time they choose, about something they "
-         "name. Phone callers only. First say the exact day and time back to them and get a "
-         "yes; then call this once. If it refuses the time, say why and offer another.",
+         "Book a phone call back to this caller, only when they ask for one, at a time they "
+         "choose, about something they name. Phone callers only. Two steps: call it without "
+         "confirmed to propose the time, and say the day and time it returns back to them; "
+         "only if their next reply is yes, call it again with confirmed=true. If it refuses "
+         "the time, say why and offer another.",
          {"type": "object", "properties": {
              "when": {"type": "string", "description": "The time in the caller's words, e.g. "
                       "'tomorrow at 5 pm', 'in 2 hours', 'Friday 10:30 am', or local ISO "
@@ -161,16 +169,19 @@ TOOLS = {tool.name: tool for tool in (
              "reason": {"type": "string", "description": "What to call back about, a few words, "
                         "e.g. 'the weekend weather in Mysuru'"},
              "time_zone": {"type": "string", "description": "IANA zone, only if the caller says "
-                           "they are somewhere other than your local time zone"}},
+                           "they are somewhere other than your local time zone"},
+             "confirmed": CONFIRMED},
           "required": ["when", "reason"]},
-         callbacks.schedule_callback, side_effects=True, takes_call=True),
+         callbacks.schedule_callback, side_effects=True, takes_call=True, takes_turn=True),
     Tool("reschedule_callback",
-         "Move this caller's booked callback to another time, after confirming the new time "
-         "with them.",
-         {"type": "object", "properties": {"when": {
-             "type": "string", "description": "The new time, as for schedule_callback"}},
+         "Move this caller's booked callback to another time. Two steps, as for "
+         "schedule_callback: propose, read the new time back, then confirmed=true only after "
+         "their yes.",
+         {"type": "object", "properties": {
+             "when": {"type": "string", "description": "The new time, as for schedule_callback"},
+             "confirmed": CONFIRMED},
           "required": ["when"]},
-         callbacks.reschedule_callback, side_effects=True, takes_call=True),
+         callbacks.reschedule_callback, side_effects=True, takes_call=True, takes_turn=True),
     Tool("cancel_callback", "Cancel this caller's booked callback, when they ask to.",
          {"type": "object", "properties": {}},
          callbacks.cancel_callback, side_effects=True, takes_call=True),
@@ -188,7 +199,8 @@ def has_side_effects(name: str) -> bool:
 
 
 async def run_tool(name: str, arguments: str, caller_key: str | None = None,
-                   conversation_id: str | None = None) -> str:
+                   conversation_id: str | None = None,
+                   turn: callbacks.TurnContext | None = None) -> str:
     """Run one tool call from the model and return its JSON result text."""
     started = time.perf_counter()
     try:
@@ -200,6 +212,8 @@ async def run_tool(name: str, arguments: str, caller_key: str | None = None,
             args = {**args, "caller_key": caller_key}  # Overrides anything the model sent.
         if tool.takes_call:
             args = {**args, "caller_key": caller_key, "conversation_id": conversation_id}
+        if tool.takes_turn:
+            args = {**args, "turn": turn}
         result = await asyncio.wait_for(tool.run(**args), TOOL_TIMEOUT_S)
     except KeyError:
         result = {"error": f"There is no tool called {name!r}."}
