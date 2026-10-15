@@ -30,7 +30,7 @@ from pydantic import BaseModel, Field
 
 from app import private_sources
 from app.interview_types import Person, SlotEvent, domain_of
-from app.research_agents import (CAPS, SEARCH_FOCUS, SPEECH_BAD, ClaudeLLM, Ctx, Findings, Meter,
+from app.research_agents import (CAPS, SEARCH_FOCUS, SENTENCE, SPEECH_BAD, ClaudeLLM, Ctx, Findings, Meter,
                                  PartOutcome, anthropic_client, check_claims, clip,
                                  findings_guardrail, first_words, norm_url, read_page, web_search)
 
@@ -355,20 +355,33 @@ def synthesize_slot(event: SlotEvent, interviewers: list[Person], parts: dict[st
                    + f"\nCandidate profile (data):\n{clip(profile_text, 1500)}"
                    + f"\nHis self-evaluation (data):\n{clip(evaluation_text, 1500)}"
                    + "\nResearch:\n" + research_block(parts))
-    task = Task(description=description, expected_output="SlotSynthesis JSON.", agent=agent,
-                output_pydantic=SlotSynthesis, guardrail=slot_guardrail(known_urls, meter),
-                guardrail_max_retries=2)
-    result = Crew(agents=[agent], tasks=[task], verbose=False).kickoff().pydantic
-    if result is None:
-        raise ValueError("the briefing writer returned no structured output")
     evidence_parts = [{"findings": p.get("findings"), "evidence": p.get("evidence")}
                       for name, p in parts.items() if name != "interviewers_by_email"]
     evidence_parts += [{"findings": p.get("findings"), "evidence": p.get("evidence")}
                        for p in (parts.get("interviewers_by_email") or {}).values()]
     evidence_parts.append({"findings": None, "evidence": f"Candidate profile: {profile_text}\n"
                                                          f"Self-evaluation: {evaluation_text}"})
-    spoken = check_claims(result.spoken, [p for p in evidence_parts if p.get("findings") or p.get("evidence")],
-                          meter)
+    evidence_parts = [p for p in evidence_parts if p.get("findings") or p.get("evidence")]
+    result, spoken = None, ""
+    feedback = ""
+    for _ in range(2):  # A second pass when the claim check cut the brief to pieces.
+        task = Task(description=description + feedback, expected_output="SlotSynthesis JSON.",
+                    agent=agent, output_pydantic=SlotSynthesis,
+                    guardrail=slot_guardrail(known_urls, meter), guardrail_max_retries=2)
+        attempt = Crew(agents=[agent], tasks=[task], verbose=False).kickoff().pydantic
+        if attempt is None:
+            continue
+        checked = check_claims(attempt.spoken, evidence_parts, meter)
+        if result is None or len(checked.split()) > len(spoken.split()):
+            result, spoken = attempt, checked
+        dropped = [s for s in SENTENCE.split(attempt.spoken.strip()) if s and s not in checked]
+        if len(dropped) < 3:
+            break
+        feedback = ("\nA fact check removed these sentences because the research does not support "
+                    "them; leave them out and write the brief again so it still flows: "
+                    + " | ".join(dropped[:8]))
+    if result is None:
+        raise ValueError("the briefing writer returned no structured output")
     spoken, _ = first_words(spoken, SPOKEN_MAX)
     sources: dict[str, str] = {}
     notes = []
