@@ -512,7 +512,7 @@ def test_the_caller_key_reaches_open_call_and_the_greeting_plays_first(board, ph
     async def record_greeting(conversation_id, text, status):
         stored.append((text, status))
     engines.begin_call = begin_call
-    engines.greeting = lambda conversation_id: "Hi Asha, this is Cadence. How can I help?"
+    engines.greeting = lambda conversation_id: "Hi Asha, this is VALR. How can I help?"
     engines.record_greeting = record_greeting
     board.pending["tok"] = PendingCall(CALL_ID, time.monotonic() + 5, "tel:+15550001111")
     with caplog.at_level("INFO", logger="uvicorn.error"):
@@ -528,9 +528,9 @@ def test_the_caller_key_reaches_open_call_and_the_greeting_plays_first(board, ph
                     socket.send_json({"event": "mark", "mark": {"name": message["mark"]["name"]}})
             socket.send_json({"event": "stop", "stop": {"call_control_id": CALL_ID}})
     assert callers == ["tel:+15550001111"]
-    assert phone_engines["speakers"][0].segments == ["Hi Asha, this is Cadence. How can I help?"]
+    assert phone_engines["speakers"][0].segments == ["Hi Asha, this is VALR. How can I help?"]
     assert phone_engines["replies"] == []  # No LLM for the greeting.
-    assert len(audio) > 0 and stored == [("Hi Asha, this is Cadence. How can I help?", "completed")]
+    assert len(audio) > 0 and stored == [("Hi Asha, this is VALR. How can I help?", "completed")]
     assert "15550001111" not in caplog.text and "identified caller" in caplog.text
 
 

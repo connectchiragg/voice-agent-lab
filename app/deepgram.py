@@ -33,6 +33,8 @@ import websockets
 from numpy.typing import NDArray
 from websockets.exceptions import ConnectionClosed
 
+from app import persona
+
 logger = logging.getLogger("uvicorn.error")
 Samples = NDArray[np.float32]
 INPUT_SAMPLE_RATE = 16000  # linear16 from the browser's 16 kHz float32.
@@ -272,7 +274,7 @@ class FluxListener:
 
 
 def speakable(text: str) -> str:
-    return re.sub(r"\s+", " ", UNSPOKEN.sub("", text)).strip()
+    return persona.spoken(re.sub(r"\s+", " ", UNSPOKEN.sub("", text)).strip())
 
 
 CLOSED = object()  # Queued when the Aura socket stops delivering messages.

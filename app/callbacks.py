@@ -30,6 +30,7 @@ from temporalio.client import (Client, WorkflowExecutionStatus, WorkflowFailureE
 from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.service import RPCError, RPCStatusCode
 
+from app.persona import ASSISTANT_NAME
 from app import memory
 from app.callback_worker import TemporalSettings
 from app.callback_workflow import (MAX_REASON_CHARS, TASK_QUEUE, CallbackRequest, CallbackStatus,
@@ -462,8 +463,8 @@ def greeting(conversation_id: str) -> str:
         from app import research  # Imports this module; loaded late to avoid a cycle.
         return research.greeting(conversation_id, call.reason)
     name = memory.display_name(conversation_id)
-    return (f"Hi {name}, Cadence calling back about {call.reason}, as you asked." if name
-            else f"Hi, Cadence calling back about {call.reason}, as you asked.")
+    return (f"Hi {name}, {ASSISTANT_NAME} calling back about {call.reason}, as you asked." if name
+            else f"Hi, {ASSISTANT_NAME} calling back about {call.reason}, as you asked.")
 
 
 def prompt_note(conversation_id: str) -> str:

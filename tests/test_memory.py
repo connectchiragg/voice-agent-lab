@@ -162,7 +162,7 @@ def test_a_call_with_nothing_said_is_not_remembered(store, monkeypatch):
 def test_a_greeting_alone_is_no_visit_and_its_conversation_is_deleted(store, monkeypatch):
     requests = fake_llm(monkeypatch)
     cid = asyncio.run(one_call(PHONE, [{"role": "model", "parts": [{"text": "Hi Asha, this is "
-                                        "Cadence. How can I help?"}], "status": "completed"}]))
+                                        "VALR. How can I help?"}], "status": "completed"}]))
     assert requests == [] and store.callers == {} and store.deleted == [cid]
 
 
@@ -417,8 +417,8 @@ def test_the_greeting_names_a_known_caller_only(store):
     asyncio.run(memory.begin_call("unknown", None))
     store.callers["tel:+14155550100"] = remembered(caller_key="tel:+14155550100", display_name=None)
     asyncio.run(memory.begin_call("nameless", "tel:+14155550100"))
-    assert memory.greeting("known") == "Hi Asha, this is Cadence. How can I help?"
-    assert memory.greeting("unknown") == memory.GREETING == "Hi, this is Cadence. How can I help?"
+    assert memory.greeting("known") == "Hi Asha, this is VALR. How can I help?"
+    assert memory.greeting("unknown") == memory.GREETING == "Hi, this is VALR. How can I help?"
     assert memory.greeting("nameless") == memory.GREETING
     memory.calls["known"].forgotten = True
     assert memory.greeting("known") == memory.GREETING
@@ -525,14 +525,14 @@ def test_the_greeting_is_history_the_model_sees_and_the_summary_reads(store, gra
     cid = str(uuid4())
 
     async def scenario():
-        await agent.record_greeting(cid, "Hi, this is Cadence. How can I help?", "completed")
+        await agent.record_greeting(cid, "Hi, this is VALR. How can I help?", "completed")
         return await agent.load_history(cid)
     assert [m["role"] for m in asyncio.run(scenario())] == ["model"]
     agent_turn(cid, "Weather in Mysore?")
     assert [(m["role"], m["content"]) for m in seen[0][1:]] == [
-        ("assistant", "Hi, this is Cadence. How can I help?"), ("user", "Weather in Mysore?")]
+        ("assistant", "Hi, this is VALR. How can I help?"), ("user", "Weather in Mysore?")]
     history = asyncio.run(agent.load_history(cid))
-    assert memory.dialogue_text(history).startswith("Assistant: Hi, this is Cadence.")
+    assert memory.dialogue_text(history).startswith("Assistant: Hi, this is VALR.")
 
 
 
@@ -541,7 +541,7 @@ def test_the_greeting_is_history_the_model_sees_and_the_summary_reads(store, gra
 @pytest.mark.parametrize("bad", ["name", "Name", "caller", "the caller", "User", "unknown", "n/a",
                                  "", "  ", None, "null", "Not provided", "A", "Asha 2", "asha@x.com",
                                  "call me at 98123", "Hi there", "One Two Three Four", "you",
-                                 "Cadence", 42])
+                                 "VALR", 42])
 def test_placeholders_and_non_names_are_not_names(bad):
     assert memory.plausible_name(bad) is None
 
@@ -573,5 +573,5 @@ def test_the_summarizer_name_must_be_in_what_the_caller_said(store, monkeypatch)
 def test_a_stored_placeholder_is_never_spoken_or_prompted(store):
     store.callers[PHONE] = remembered(display_name="name")
     asyncio.run(memory.begin_call("c", PHONE))
-    assert memory.greeting("c") == memory.GREETING == "Hi, this is Cadence. How can I help?"
+    assert memory.greeting("c") == memory.GREETING == "Hi, this is VALR. How can I help?"
     assert "Name:" not in memory.prompt_block("c")

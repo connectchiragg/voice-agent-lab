@@ -522,7 +522,7 @@ def greeting_engines():
     async def record_greeting(conversation_id, text, status):
         stored.append((conversation_id, text, status))
 
-    engines.greeting = lambda conversation_id: "Hi Asha, this is Cadence. How can I help?"
+    engines.greeting = lambda conversation_id: "Hi Asha, this is VALR. How can I help?"
     engines.record_greeting = record_greeting
     return engines, seen, stored
 
@@ -546,8 +546,8 @@ def test_the_greeting_is_spoken_first_without_the_llm_and_stored():
     assert seen["replies"] == ["what's the weather"]  # The greeting itself asked no LLM.
     # One segment: the whole greeting is known, so it is synthesized at once.
     assert [e["text"] for e in events if e["type"] == "caption"][0] == (
-        "Hi Asha, this is Cadence. How can I help?")
-    assert stored == [("call-1", "Hi Asha, this is Cadence. How can I help?", "completed")]
+        "Hi Asha, this is VALR. How can I help?")
+    assert stored == [("call-1", "Hi Asha, this is VALR. How can I help?", "completed")]
     assert events.index({"type": "reply_end"}) < [e["type"] for e in events].index("transcript")
     assert not any(e["type"] == "metrics" for e in events[:events.index({"type": "reply_end"})])
 
@@ -565,7 +565,7 @@ def test_barge_in_cuts_the_greeting_and_stores_only_what_was_heard():
         greeting = call.reply_task
         await flux.emit("StartOfTurn", "sorry")  # Barge-in during the greeting.
         assert greeting.cancelled() and call.speaker.abandoned == [
-            "Hi Asha, this is Cadence. How can I help?"]
+            "Hi Asha, this is VALR. How can I help?"]
         call.speaker.hold = None
         call.report_played(0.06)  # 0.06 of the 0.125 s received: five of nine words.
         await flux.emit("EndOfTurn", "sorry, who is this")
@@ -574,7 +574,7 @@ def test_barge_in_cuts_the_greeting_and_stores_only_what_was_heard():
 
     events = events_of(asyncio.run(scenario()))
     assert {"type": "interrupt"} in events
-    assert stored == [("call-1", "Hi Asha, this is Cadence....", "interrupted")]
+    assert stored == [("call-1", "Hi Asha, this is VALR....", "interrupted")]
     assert seen["replies"] == ["sorry, who is this"]
 
 

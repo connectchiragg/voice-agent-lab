@@ -149,7 +149,7 @@ def test_the_callback_call_greets_with_the_topic_and_quotes_findings_as_data():
                   {"fact": "An incident was reported.", "source_ids": ["S2"], "sensitive": True}],
         "sources": []}
     try:
-        assert callbacks.greeting(conversation) == ("Hi, it's Cadence, calling back with what I found "
+        assert callbacks.greeting(conversation) == ("Hi, it's VALR, calling back with what I found "
                                                     "about Coorg. Is now a good time?")
         note = callbacks.prompt_note(conversation)
         assert "relay the prepared answer" in note and "only from the notes" in note

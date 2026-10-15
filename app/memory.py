@@ -44,6 +44,7 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 from pydantic import BaseModel, ConfigDict, ValidationError
 
+from app.persona import ASSISTANT_NAME
 from app import access, groq_api
 from app.groq_api import ProviderError
 from app.llm import stream_model
@@ -357,7 +358,7 @@ def prompt_block(conversation_id: str) -> str:
     return render_block(call.memory)
 
 
-GREETING = "Hi, this is Cadence. How can I help?"
+GREETING = f"Hi, this is {ASSISTANT_NAME}. How can I help?"
 
 
 def display_name(conversation_id: str) -> str | None:
@@ -375,7 +376,7 @@ def display_name(conversation_id: str) -> str | None:
 NOT_NAMES = frozenset("""
     name names caller callers user users unknown none null nil na n/a anonymous anon customer
     client guest person someone somebody anyone people sir madam maam ma'am mr mrs ms miss dear
-    friend there me myself you your yourself assistant agent cadence bot hello hi hey yes no okay
+    friend there me myself you your yourself assistant agent cadence valr valor bot hello hi hey yes no okay
     ok test testing not provided given stated specified mentioned shared their his her them they
     the a an caller's
     """.split())
@@ -411,7 +412,7 @@ def greeting(conversation_id: str) -> str:
     Fixed text, so it is spoken at once without asking the LLM.
     """
     name = display_name(conversation_id)
-    return f"Hi {name}, this is Cadence. How can I help?" if name else GREETING
+    return f"Hi {name}, this is {ASSISTANT_NAME}. How can I help?" if name else GREETING
 
 
 Dialogue = Sequence[Mapping[str, Any]]

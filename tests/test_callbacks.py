@@ -353,10 +353,10 @@ def test_a_callback_opens_with_its_reason_and_the_callers_name(monkeypatch):
     monkeypatch.setattr(memory, "calls", {})
     monkeypatch.setitem(callbacks.calls, "conv-cb", CallbackCall("callback-abc", 1, "the weather"))
     # The reason comes first: a callee's "Hello?" often covers the opening words.
-    assert callbacks.greeting("conv-cb") == "Hi, Cadence calling back about the weather, as you asked."
+    assert callbacks.greeting("conv-cb") == "Hi, VALR calling back about the weather, as you asked."
     monkeypatch.setattr(memory, "display_name", lambda conversation_id: "Chirag")
     assert callbacks.greeting("conv-cb") == (
-        "Hi Chirag, Cadence calling back about the weather, as you asked.")
+        "Hi Chirag, VALR calling back about the weather, as you asked.")
     assert "callback the caller asked for, about the weather" in callbacks.prompt_note("conv-cb")
     assert "Do not book another callback" in callbacks.prompt_note("conv-cb")
     assert callbacks.prompt_note("conv-other") == ""

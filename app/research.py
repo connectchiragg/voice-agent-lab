@@ -32,6 +32,7 @@ from psycopg_pool import AsyncConnectionPool
 from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.service import RPCError
 
+from app.persona import ASSISTANT_NAME
 from app import callbacks, memory, research_jobs
 from app.callback_workflow import MAX_DIALS_PER_DAY, DialBudgetWorkflow
 from app.research_workflow import (MAX_TOPIC_CHARS, TASK_QUEUE, ResearchCallbackWorkflow,
@@ -210,7 +211,7 @@ def greeting(conversation_id: str, topic: str) -> str:
     job = findings.get(conversation_id)
     subject = job["topic"] if job else topic.removeprefix("what I found about ")
     name = memory.display_name(conversation_id)
-    hello = f"Hi {name}, it's Cadence" if name else "Hi, it's Cadence"
+    hello = f"Hi {name}, it's {ASSISTANT_NAME}" if name else f"Hi, it's {ASSISTANT_NAME}"
     return f"{hello}, calling back with what I found about {subject}. Is now a good time?"
 
 
