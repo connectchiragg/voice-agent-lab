@@ -1,5 +1,8 @@
 """Per-stage latency benchmark for the local models: STT finalization and TTS first piece.
 
+It also reports how often the live transcript at the turn end already matches
+the final one (the speculative LLM reply's commit rate).
+
 Runs the real pipeline code (TurnDetector, StreamingTranscriber, SpeechChunker,
 KokoroVoice) without the network or Groq, and prints p50/p90 per stage. Run it
 where the app runs, for example inside the image on the VM:
@@ -31,7 +34,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from app.pipeline import SpeechChunker, TurnDetector  # noqa: E402
+from app.pipeline import SpeechChunker, TurnDetector, same_words  # noqa: E402
 from app.stt import MODEL_DIR, StreamingTranscriber, load_recognizer  # noqa: E402
 from app.tts import OUTPUT_SAMPLE_RATE, KokoroVoice  # noqa: E402
 from app.turn import SmartTurn  # noqa: E402
@@ -135,15 +138,22 @@ def bench_stt(found: list[tuple[str, str, Samples]], recognizer, sessions) -> di
     lock = threading.Lock()
     stats: dict[str, list[float]] = {"endpoint_ms": [], "stt_ms": [], "feed_rtf": []}
     errors = reference_words = 0
+    live_matches: list[bool] = []  # Live text at the turn end == final transcript?
     for name, reference, audio in found:
         transcriber = StreamingTranscriber(recognizer, lock)
         detector = TurnDetector(SileroVad(vad_session), turn, listener=transcriber)
+        live: list[str] = []
+        detector.on_decided = live.append
         stream = np.concatenate((np.zeros(8000, np.float32), audio, np.zeros(32000, np.float32)))
         finished, busy, busy_to_end, heard_to_end = [], 0.0, 0.0, 0.0
         for start in range(0, len(stream), PACKET):
             started = time.perf_counter()
             turns = detector.feed(stream[start:start + PACKET])
             busy += time.perf_counter() - started
+            for utterance, live_text in zip(turns, live[-len(turns):] if turns else []):
+                if not same_words(live_text, utterance.text):
+                    print(f"  {name}: live {live_text!r} final {utterance.text!r}", file=sys.stderr)
+                live_matches.append(same_words(live_text, utterance.text))
             for utterance in turns:
                 busy -= utterance.stt_ms / 1000  # Finalization is reported on its own.
                 stats["endpoint_ms"].append(utterance.pause_ms)
@@ -165,6 +175,8 @@ def bench_stt(found: list[tuple[str, str, Samples]], recognizer, sessions) -> di
         if distance or len(finished) > 1:
             print(f"  {name}: {len(finished)} turn(s) {text!r} vs {reference!r}", file=sys.stderr)
     stats["wer_pct"] = [100 * errors / max(1, reference_words)]
+    # Share of turns where a speculative LLM reply would be committed.
+    stats["live_match_pct"] = [100 * sum(live_matches) / max(1, len(live_matches))]
     return stats
 
 
