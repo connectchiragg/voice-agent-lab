@@ -113,8 +113,9 @@ INIT_SCRIPT = r"""
   // WebRTC: tap the remote track and the data channel.
   const NativePC = window.RTCPeerConnection;
   window.RTCPeerConnection = class extends NativePC {
-    constructor(...args) {
-      super(...args);
+    constructor(config = {}, ...rest) {
+      // --relay: only TURN-relayed candidates, as behind a UDP-hostile network.
+      super(window.__forceRelay ? {...config, iceTransportPolicy: "relay"} : config, ...rest);
       h.pcs.push(this);
       this.addEventListener("track", async event => {
         await workletReady;
@@ -169,8 +170,15 @@ INIT_SCRIPT = r"""
         out.rttMs = report.roundTripTime ? 1000 * report.roundTripTime : null;
       } else if (report.type === "candidate-pair" && report.nominated && report.state === "succeeded") {
         out.pairRttMs = report.currentRoundTripTime ? 1000 * report.currentRoundTripTime : null;
+        out.localCandidateId = report.localCandidateId;
       }
     });
+    if (out.localCandidateId) {
+      const stats = await pc.getStats();
+      out.localCandidateType = stats.get(out.localCandidateId)?.candidateType;
+      out.relayProtocol = stats.get(out.localCandidateId)?.relayProtocol;
+      delete out.localCandidateId;
+    }
     return out;
   };
 })();
@@ -321,8 +329,10 @@ async def first_after(page, key: str, after: float, timeout_s: float = 30) -> fl
 
 
 async def run_transport(browser, base: str, transport: str, turns: int,
-                        utterances: list[Utterance], barge_in: bool) -> list[dict]:
+                        utterances: list[Utterance], barge_in: bool, relay: bool = False) -> list[dict]:
     page = await browser.new_page()
+    if relay:
+        await page.add_init_script("window.__forceRelay = true;")
     await page.add_init_script(INIT_SCRIPT)
     query = "?transport=ws" if transport == "ws" else ""
     await page.goto(base + "/" + query, wait_until="networkidle")  # The client module is loaded.
@@ -399,6 +409,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--clips", help="Directory of mono 16-bit WAV utterances "
                                         "(default: a 1 s tone; real speech recognition needs words)")
     parser.add_argument("--barge-in", action="store_true", help="Speak over each reply")
+    parser.add_argument("--relay", action="store_true", help="WebRTC through TURN only (iceTransportPolicy relay)")
     parser.add_argument("--transport", choices=["webrtc", "ws", "both"], default="both")
     parser.add_argument("--turns", type=int, default=10)
     parser.add_argument("--loss", type=float, default=0.0, help="Local server only: RTP loss share")
@@ -430,7 +441,7 @@ async def main(args: argparse.Namespace) -> None:
                 browser = await playwright.chromium.launch(**launch)
             for transport in transports:
                 results = await run_transport(browser, base, transport, args.turns, utterances,
-                                              args.barge_in)
+                                              args.barge_in, args.relay)
                 print(summary(f"{transport} end of speech -> reply heard",
                               [r["total_ms"] for r in results]))
                 if args.barge_in:

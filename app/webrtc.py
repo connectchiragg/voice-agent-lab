@@ -401,6 +401,31 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                              return_exceptions=True)
 
 
+class RateLimit:
+    """At most `limit` requests per client IP in any `window_s`; in memory, per process."""
+
+    def __init__(self, limit: int, window_s: float = 60) -> None:
+        self.limit, self.window_s = limit, window_s
+        self.seen: dict[str, deque[float]] = {}
+
+    def allow(self, client: str, now: float) -> bool:
+        times = self.seen.setdefault(client, deque())
+        while times and now - times[0] >= self.window_s:
+            times.popleft()
+        if len(times) >= self.limit:
+            return False
+        times.append(now)
+        if len(self.seen) > 10000:  # Forget idle clients so memory stays bounded.
+            self.seen = {key: value for key, value in self.seen.items()
+                         if value and now - value[-1] < self.window_s}
+        return True
+
+
+# Each request mints TURN credentials; behind the tunnel uvicorn's proxy
+# headers make request.client the browser's address.
+ice_limit = RateLimit(int(os.getenv("WEBRTC_ICE_PER_MINUTE", "10")))
+
+
 async def call_ice_servers() -> list[ice.IceServer]:
     try:
         return await ice.mint_ice_servers(MAX_CALL_S + 60)
@@ -410,8 +435,11 @@ async def call_ice_servers() -> list[ice.IceServer]:
 
 
 @router.get("/ice-servers")
-async def ice_servers() -> dict[str, object]:
+async def ice_servers(request: Request) -> dict[str, object]:
     """For the browser, before it creates its offer."""
+    client = request.client.host if request.client else "unknown"
+    if not ice_limit.allow(client, asyncio.get_running_loop().time()):
+        raise HTTPException(429, "Too many calls started. Wait a minute and try again.")
     return {"ice_servers": await call_ice_servers()}
 
 

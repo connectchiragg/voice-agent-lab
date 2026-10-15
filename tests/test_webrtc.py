@@ -531,3 +531,18 @@ def test_refused_speech_service_closes_the_peer_with_a_clear_503(engines):
     response = run(scenario())
     assert response.status_code == 503 and "speech service" in response.json()["detail"]
     assert main.app.state.webrtc_peers == set()
+
+
+def test_rate_limit_allows_a_burst_per_client_then_recovers():
+    limit = webrtc.RateLimit(2, window_s=60)
+    assert [limit.allow("a", t) for t in (0, 1, 2)] == [True, True, False]
+    assert limit.allow("b", 2)  # Other clients are counted separately.
+    assert limit.allow("a", 60.5)  # The first request has left the window.
+
+
+def test_ice_servers_are_rate_limited_per_client(monkeypatch):
+    monkeypatch.delenv("CF_TURN_KEY_ID", raising=False)
+    monkeypatch.setattr(webrtc, "ice_limit", webrtc.RateLimit(2))
+    client = TestClient(main.app)
+    codes = [client.get("/webrtc/ice-servers").status_code for _ in range(3)]
+    assert codes == [200, 200, 429]
