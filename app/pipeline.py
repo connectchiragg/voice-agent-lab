@@ -128,6 +128,47 @@ async def forget_greeting(conversation_id: str, text: str, status: str) -> None:
     """Default for engines without history: nothing to record."""
 
 
+DEFAULT_BACKCHANNEL = ("okay, ok, sure, yeah, yes, yep, uh huh, mm, mhm, mm hmm, hmm, right, "
+                       "alright, got it, i see, cool, great, nice, oh, ah")
+
+
+def normal_words(text: str) -> list[str]:
+    """ "Mm-hmm, OK." -> ["mm", "hmm", "ok"]."""
+    return re.sub(r"[^\w\s]", "", re.sub(r"[-–—]", " ", text.lower())).split()
+
+
+@dataclass(frozen=True)
+class Backchannel:
+    """Short words a listener says while someone talks ("sure", "uh huh"): not a barge-in.
+
+    While the assistant speaks, a StartOfTurn is held until Flux's first words
+    (or `hold_s` of speech with no words yet, which then interrupts). Words
+    that are only backchannel phrases, at most `max_words` of them, are
+    ignored; anything else interrupts at once. When the assistant is silent
+    they are an ordinary turn ("okay" as an answer).
+    """
+    phrases: frozenset[tuple[str, ...]]
+    hold_s: float = 0.35
+    max_words: int = 3
+
+    @classmethod
+    def from_words(cls, words: str = DEFAULT_BACKCHANNEL, hold_s: float = 0.35) -> "Backchannel":
+        phrases = frozenset(tuple(normal_words(phrase)) for phrase in words.split(","))
+        return cls(frozenset(phrase for phrase in phrases if phrase), hold_s)
+
+    def only(self, text: str) -> bool:
+        """Whether `text` is nothing but backchannel phrases (False for no words)."""
+        words = normal_words(text)
+        if not words or len(words) > self.max_words:
+            return False
+        ends = {0}  # Word positions reachable by whole phrases.
+        for start in range(len(words)):
+            if start in ends:
+                ends |= {start + len(phrase) for phrase in self.phrases
+                         if tuple(words[start:start + len(phrase)]) == phrase}
+        return len(words) in ends
+
+
 @dataclass
 class Engines:
     """Everything a call needs, injected so tests can replace any stage."""
@@ -154,6 +195,8 @@ class Engines:
     greeting: Callable[[str], str] | None = None
     record_greeting: Callable[[str, str, Literal["completed", "interrupted"]],
                               Awaitable[None]] = forget_greeting
+    # Ignore backchannel words while the assistant speaks; None: any turn barges in.
+    backchannel: Backchannel | None = None
 
 
 def heard_text(spoken: list[tuple[str, float]], played_s: float) -> str:
@@ -345,6 +388,11 @@ class Call:
         self.speculation: Speculation | None = None
         self.speculations = 0  # Started during the current turn.
         self.greeting: str | None = None  # Being spoken; not yet stored.
+        # A StartOfTurn during our speech, held until its words show it is more
+        # than backchannel (see Backchannel).
+        self.holding = False
+        self.held_text = ""
+        self.hold_timer: asyncio.Task[None] | None = None
 
     async def start(self) -> None:
         """Open the Deepgram sockets, and load the caller's memory meanwhile.
@@ -404,7 +452,9 @@ class Call:
     async def on_turn_event(self, event: TurnEvent) -> None:
         """Flux events for this call, in order."""
         if event.event == "StartOfTurn":
-            await self.turn_started()
+            await self.turn_started(event.transcript)
+        elif self.holding and event.event in ("Update", "EagerEndOfTurn", "TurnResumed"):
+            await self.judge_held(event.transcript)
         if event.event in ("StartOfTurn", "Update", "EagerEndOfTurn", "TurnResumed"):
             await self.show_partial(event.transcript)
         if event.event == "EagerEndOfTurn":
@@ -414,27 +464,54 @@ class Call:
         elif event.event == "EndOfTurn":
             await self.turn_ended(event)
         elif event.event == "Reset":
+            self.stop_holding()
             self.drop_speculation("the speech socket reconnected")
             self.overlapped = False
             await self.show_partial("")
 
-    async def turn_started(self) -> None:
+    async def turn_started(self, text: str = "") -> None:
         if not self.assistant_busy:
             return
-        if self.barge_in:
-            logger.info("Barge-in: the user started a turn while the assistant was speaking")
-            await self.interrupt()
-        else:
+        if not self.barge_in:
             self.overlapped = True
+        elif self.engines.backchannel is None:
+            await self.barge_in_now("the user started a turn while the assistant was speaking")
+        else:
+            self.holding, self.held_text = True, ""
+            self.hold_timer = asyncio.create_task(self.hold_expired(self.engines.backchannel.hold_s))
+            await self.judge_held(text)
+
+    async def judge_held(self, text: str) -> None:
+        """A held turn's words so far: interrupt unless they are only backchannel."""
+        self.held_text = text
+        backchannel = self.engines.backchannel
+        if self.holding and text.strip() and backchannel and not backchannel.only(text):
+            await self.barge_in_now("the user's words while the assistant was speaking")
+
+    async def hold_expired(self, hold_s: float) -> None:
+        await asyncio.sleep(hold_s)
+        if self.holding and not self.held_text.strip():
+            await self.barge_in_now(f"the user kept speaking for {hold_s * 1000:.0f} ms")
+
+    async def barge_in_now(self, reason: str) -> None:
+        self.stop_holding()
+        logger.info("Barge-in: %s", reason)
+        await self.interrupt()
+
+    def stop_holding(self) -> None:
+        self.holding = False
+        timer, self.hold_timer = self.hold_timer, None
+        if timer is not None and timer is not asyncio.current_task():
+            timer.cancel()
 
     async def show_partial(self, text: str) -> None:
         """Live words, shown only once the user holds the floor (never echo under our voice)."""
-        if not self.overlapped and text != self.partial:
+        if not self.overlapped and not self.holding and text != self.partial:
             self.partial = text
             await self.send({"type": "partial", "text": text})
 
     def start_speculation(self, text: str) -> None:
-        if self.engines.speculate is None or self.overlapped:
+        if self.engines.speculate is None or self.overlapped or self.holding:
             return
         self.drop_speculation("a newer eager end of turn")  # At most one in flight.
         history_pending = self.history_task is not None and not self.history_task.done()
@@ -456,6 +533,15 @@ class Call:
         speculation, self.speculation = self.speculation, None
         speculations, self.speculations = self.speculations, 0
         self.partial = ""
+        if self.holding:
+            backchannel = self.engines.backchannel
+            if not event.transcript.strip() or (backchannel and backchannel.only(event.transcript)):
+                self.stop_holding()
+                logger.info("Ignored a backchannel while the assistant was speaking")
+                if speculation is not None:
+                    speculation.cancel("the turn was a backchannel")
+                return
+            await self.barge_in_now("the user's words while the assistant was speaking")
         if self.overlapped:
             self.overlapped = False
             logger.info("Ignored a turn that began while the assistant was speaking")
@@ -625,6 +711,7 @@ class Call:
             logger.info("Estimated playback gaps: %.0f ms over %d segments", gaps_s * 1000, len(self.spoken))
 
     async def close(self) -> None:
+        self.stop_holding()
         self.drop_speculation("the call ended")
         for task in (self.reply_task, self.history_task):
             if task is not None and not task.done():

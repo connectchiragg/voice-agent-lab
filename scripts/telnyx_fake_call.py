@@ -238,10 +238,11 @@ async def call(stream_url: str, speech: np.ndarray, args: argparse.Namespace) ->
             await asyncio.sleep(1.0)
             speaking.cancel()
             interrupt_sends: list[float] = []
-            speaking = asyncio.create_task(line.speak(np.concatenate([speech, tail]), interrupt_sends))
+            over = load(args.barge_in_clip) if args.barge_in_clip else speech
+            speaking = asyncio.create_task(line.speak(np.concatenate([over, tail]), interrupt_sends))
             while line.cleared is None and not speaking.done():
                 await asyncio.sleep(0.01)
-            voiced = int(np.nonzero(np.abs(speech) > SILENT)[0][0])
+            voiced = int(np.nonzero(np.abs(over) > SILENT)[0][0])
             if line.cleared is None:
                 print("Barge-in: no clear received.")
             else:
@@ -270,6 +271,8 @@ def main() -> None:
     parser.add_argument("--listen-s", type=int, default=8, help="Silence streamed after speech.")
     parser.add_argument("--out", type=Path, help="Write the reply audio here (never commit it).")
     parser.add_argument("--barge-in", action="store_true")
+    parser.add_argument("--barge-in-clip", type=Path,
+                        help="Speak this over the reply instead of the clip (e.g. a backchannel)")
     parser.add_argument("--byte-order", choices=("little", "big"), default="little")
     parser.add_argument("--record", action="store_true", help="Expect a record_start command.")
     asyncio.run(run(parser.parse_args()))

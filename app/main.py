@@ -17,7 +17,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 
 from app import access, agent, callbacks, groq_api, memory, recordings, telnyx, webrtc
 from app.deepgram import AuraSpeaker, DeepgramSettings, FluxListener
-from app.pipeline import Call, Engines, ReplyEvent, ReplyModel
+from app.pipeline import DEFAULT_BACKCHANNEL, Backchannel, Call, Engines, ReplyEvent, ReplyModel
 from app.transport import SpeechUnavailable, apply_player_event, open_call
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -61,7 +61,18 @@ def load_engines(sample_rate: int | None = None) -> Engines | None:
                    begin_call=memory.begin_call,
                    end_call=lambda conversation_id: memory.end_call(conversation_id,
                                                                     agent.load_history),
-                   greeting=callbacks.greeting, record_greeting=agent.record_greeting)
+                   greeting=callbacks.greeting, record_greeting=agent.record_greeting,
+                   backchannel=backchannel_from_env())
+
+
+def backchannel_from_env() -> Backchannel | None:
+    """BACKCHANNEL_IGNORE=1 (default): "sure", "uh huh" and the like while the assistant
+    speaks do not barge in. BACKCHANNEL_WORDS: comma-separated phrases; BACKCHANNEL_HOLD_MS:
+    how long speech with no words yet is held before it interrupts anyway."""
+    if os.getenv("BACKCHANNEL_IGNORE", "1") != "1":
+        return None
+    return Backchannel.from_words(os.getenv("BACKCHANNEL_WORDS") or DEFAULT_BACKCHANNEL,
+                                  float(os.getenv("BACKCHANNEL_HOLD_MS", "350")) / 1000)
 
 
 async def watch_event_loop(interval_s: float = 0.1, threshold_s: float = 0.25) -> None:

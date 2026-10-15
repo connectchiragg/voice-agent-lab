@@ -300,6 +300,7 @@ To roll back, run the same `docker rm -f` and `docker run` with the rollback tag
 | `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_PASSWORD` | `127.0.0.1`, `5432`, unset | History and caller memory (database and role `voice_agent`); on the VM `voice-postgres`. In memory when unset or unreachable |
 | `CF_ACCESS_AUD`, `CF_ACCESS_TEAM_DOMAIN` | unset, `https://small-brook-8402.cloudflareaccess.com` | Browser caller identity: the Access app's AUD tag; unset, every browser caller is anonymous |
 | `CALLER_MEMORY`, `CALLER_MEMORY_LOAD_TIMEOUT_MS`, `CALLER_MEMORY_SUMMARY_WAIT_S` | `1`, `150`, `600` | Caller memory on/off, its load limit at call start, and how long a summary may wait for quiet |
+| `BACKCHANNEL_IGNORE`, `BACKCHANNEL_WORDS`, `BACKCHANNEL_HOLD_MS` | `1`, see `.env.example`, `350` | While the assistant speaks, a turn of at most 3 backchannel words ("sure", "uh huh") does not barge in; speech with no words yet interrupts after the hold |
 | `CALLBACK_QUIET_HOURS` | off | Callbacks refused in these hours of the caller's day, e.g. `21-9` (9 pm to 9 am); empty or `off`: any hour |
 | `TEMPORAL_ADDRESS`, `TEMPORAL_NAMESPACE` | unset, `default` | Callbacks: the Temporal server (`temporal:7233` on the VM, no TLS) and namespace (`voice-agent-lab`). Unset: callbacks are off |
 | `TEMPORAL_DB_PASSWORD` | set by `deploy/temporal-setup.sh` | Postgres password of the `temporal` role; used only by the setup script |

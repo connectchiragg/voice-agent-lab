@@ -589,3 +589,129 @@ def test_without_a_greeting_the_caller_speaks_first():
         await call.close()
         return sent
     assert asyncio.run(scenario()) == []
+
+
+# Backchannel: "sure" while the assistant speaks is not a barge-in.
+
+def test_backchannel_phrases_are_recognized():
+    from app.pipeline import Backchannel
+    backchannel = Backchannel.from_words()
+    for text in ("Sure.", "uh-huh", "Mm-hmm, okay", "OK", "got it", "Yeah, right.", "I see"):
+        assert backchannel.only(text), text
+    for text in ("", "stop", "sure, but wait", "okay what about Chennai", "yes yes yes yes",
+                 "no", "got"):
+        assert not backchannel.only(text), text
+    custom = Backchannel.from_words("achha, theek hai")
+    assert custom.only("Theek hai") and not custom.only("okay")
+
+
+def speaking_call(engines, sent):
+    """A call whose reply is mid-segment and playing, with backchannel filtering on."""
+    from app.pipeline import Backchannel
+    engines.backchannel = Backchannel.from_words(hold_s=0.05)
+
+    async def setup():
+        call, flux = await start_call(engines, sent)
+        call.speaker.hold = asyncio.Event()
+        await flux.emit("StartOfTurn", "what's")
+        await flux.emit("EndOfTurn", "what's up")
+        await wait_until(lambda: call.current is not None and call.current[1] > 0)
+        call.set_playing(True)
+        return call, flux
+    return setup()
+
+
+def test_a_backchannel_while_speaking_is_ignored():
+    engines, seen = make_engines(reply=("I can hear you loud and clear. ", "What would you like? "))
+
+    async def scenario():
+        sent = []
+        call, flux = await speaking_call(engines, sent)
+        reply = call.reply_task
+        await flux.emit("StartOfTurn", "")
+        await flux.emit("Update", "Sure.")
+        await asyncio.sleep(0.1)  # Past the hold: words were heard, and they were backchannel.
+        await flux.emit("EndOfTurn", "Sure.")
+        assert not reply.done() and not call.holding
+        call.speaker.hold.set()
+        call.set_playing(False)
+        await finish(call)
+        return sent
+    events = events_of(asyncio.run(scenario()))
+    assert {"type": "interrupt"} not in events
+    assert seen["replies"] == ["what's up"]  # "Sure." got no reply of its own.
+
+
+def test_a_real_interruption_still_clears():
+    engines, seen = make_engines(reply=("I can hear you loud and clear. ", "What would you like? "))
+
+    async def scenario():
+        sent = []
+        call, flux = await speaking_call(engines, sent)
+        reply = call.reply_task
+        await flux.emit("StartOfTurn", "")
+        assert not reply.done()  # Held: no words yet.
+        await flux.emit("Update", "Wait, stop")
+        assert reply.cancelled()
+        call.speaker.hold = None
+        call.report_played(0.05)
+        await flux.emit("EndOfTurn", "Wait, stop.")
+        await finish(call)
+        return sent
+    events = events_of(asyncio.run(scenario()))
+    assert {"type": "interrupt"} in events
+    assert seen["replies"] == ["what's up", "Wait, stop."]
+
+
+def test_speech_with_no_words_yet_interrupts_after_the_hold():
+    engines, _ = make_engines(reply=("I can hear you loud and clear. ", "What would you like? "))
+
+    async def scenario():
+        sent = []
+        call, flux = await speaking_call(engines, sent)
+        reply = call.reply_task
+        await flux.emit("StartOfTurn", "")
+        await asyncio.sleep(0.1)  # hold_s is 50 ms here.
+        assert reply.cancelled()
+        call.speaker.hold = None
+        await call.close()
+        return sent
+    assert {"type": "interrupt"} in events_of(asyncio.run(scenario()))
+
+
+def test_a_backchannel_then_real_words_interrupts():
+    engines, seen = make_engines(reply=("I can hear you loud and clear. ", "What would you like? "))
+
+    async def scenario():
+        sent = []
+        call, flux = await speaking_call(engines, sent)
+        reply = call.reply_task
+        await flux.emit("StartOfTurn", "Okay")
+        await flux.emit("Update", "Okay")
+        await asyncio.sleep(0.1)
+        assert not reply.done()
+        await flux.emit("Update", "Okay so what about Chennai")
+        assert reply.cancelled()
+        call.speaker.hold = None
+        call.report_played(0.05)
+        await flux.emit("EndOfTurn", "Okay, so what about Chennai?")
+        await finish(call)
+        return sent
+    asyncio.run(scenario())
+    assert seen["replies"] == ["what's up", "Okay, so what about Chennai?"]
+
+
+def test_okay_is_a_normal_answer_when_the_assistant_is_silent():
+    from app.pipeline import Backchannel
+    engines, seen = make_engines()
+    engines.backchannel = Backchannel.from_words(hold_s=0.05)
+
+    async def scenario():
+        sent = []
+        call, flux = await start_call(engines, sent)
+        await flux.emit("StartOfTurn", "Okay")
+        await flux.emit("EndOfTurn", "Okay.")
+        await finish(call)
+        return sent
+    events = events_of(asyncio.run(scenario()))
+    assert seen["replies"] == ["Okay."] and {"type": "transcript", "text": "Okay."} in events

@@ -163,6 +163,15 @@ same `Call` through `app/transport.py`, with the same events.
   from it the server works out the playing state, the seconds heard after an
   interrupt, and when each caption starts.
 - Barge-in follows browser echo cancellation, which is requested on.
+- Backchannels do not barge in: a turn that starts while the assistant speaks is
+  held until Flux's first words (or 350 ms of speech with none, which then
+  interrupts). If they are only words like "sure", "okay" or "uh huh" (at most
+  three), the reply goes on and the turn is not answered; anything else
+  interrupts at once. When the assistant is silent, "okay" is an ordinary turn.
+  Measured with the fake Telnyx harness and real Deepgram, two runs each:
+  speech start to `clear` 363 and 438 ms with the hold, 477 and 549 ms without
+  (no slower: Flux's StartOfTurn usually carries the first word already); a
+  spoken "Sure." over a reply was ignored.
 - Media relay: Cloudflare Realtime TURN credentials are minted per call when
   `CF_TURN_KEY_ID`/`CF_TURN_KEY_API_TOKEN` are set; until then calls use STUN
   only (see docs/deploy.md).
