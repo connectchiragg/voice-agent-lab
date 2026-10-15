@@ -631,6 +631,23 @@ VALR_INTERVIEW_MONTH_USD; $0.40 per job, VALR_INTERVIEW_JOB_USD); briefing calls
 own 12 dials a day (VALR_BRIEFING_DIALS_PER_DAY), so callbacks cannot starve them.
 VALR_BRIEFING_DIAL=0 keeps everything but never dials; VALR_BRIEFINGS=0 turns the sweep off.
 
+**The cockpit** (valr.haciensus.com, `/valr`, behind Cloudflare Access; `app/valr_view.py`
+gathers, `app/valr_page.py` renders, `static/valr.js` adds the live parts). It shows the
+next briefing call with a countdown; upcoming interviews grouped into their briefing blocks,
+each with its status (scheduled, researching, ready, calling, done), cache hits, cost, the
+interviewers by name (researched, or skipped as HR/recruiting or as not an interviewer), and
+the brief: the spoken text, the notes with sources, and what R1, R2 and R3 each found; the
+performance trend from `interview_scores.json` and the evaluation highlights; spend against
+the caps and today's dials against their budgets; Gmail/Calendar, the push channel and
+Fathom; and the recent research runs. Attendee emails and phone numbers are never shown:
+people appear by name, and any text that looks like an address or a number is masked.
+`GET /valr/api/state` returns the same view as JSON. Three owner actions (POST, same-origin
+JSON with the page's CSRF token, owner's Access login): **Sync calendar now**, **Refresh
+research** for one interview (caches bypassed), and **Automatic calls on/paused**, a
+`valr_flags` row the block workflows read before every scheduled dial (a paused attempt is
+skipped, so resuming before T-5 still gets a call; on-demand callbacks still ring;
+VALR_BRIEFING_DIAL=0 stays the hard off).
+
 **Context push (optional).** A Mac-side job (not built) may POST per-interview email
 context to `/valr/context` (JSON {event_key?, company?, subject?, summary?, excerpt?, notes?},
 8 KB) with an Access service token plus `Authorization: Bearer VALR_CONTEXT_TOKEN`;

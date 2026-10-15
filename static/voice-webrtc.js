@@ -3,10 +3,7 @@
 // The server paces reply audio and works out what was heard from the playout
 // delay this page reports, so the page only plays the remote track.
 import {playoutDelay} from "./playout-delay.js";
-const button = document.querySelector("#call");
-const status = document.querySelector("#status");
-const messages = document.querySelector("#messages");
-const metrics = document.querySelector("#metrics");
+import * as ui from "./call-ui.js";
 const PLAYOUT_REPORT_MS = 500;
 const GATHER_TIMEOUT_MS = 2000;
 let assistantLine = null;
@@ -14,14 +11,7 @@ let userLine = null;  // The live transcript line while the user is speaking.
 const captionTimers = new Set();
 let call = null;
 
-function addLine(role, text) {
-  const line = document.createElement("p");
-  line.className = role;
-  line.textContent = text;
-  messages.append(line);
-  messages.scrollTop = messages.scrollHeight;
-  return line;
-}
+const addLine = ui.addLine;
 
 // Reveal a spoken segment word by word across its audio. The caption follows
 // its audio; the server says when that audio's first sample is (or was) heard
@@ -29,12 +19,12 @@ function addLine(role, text) {
 function scheduleCaption(caption) {
   const line = assistantLine ??= addLine("assistant", "");
   const words = caption.text.split(/\s+/).filter(Boolean);
+  ui.replyAudio(caption.starts_in_s, caption.seconds);
   words.forEach((word, index) => {
     const due = caption.starts_in_s + (caption.seconds * index) / words.length;
     const timer = setTimeout(() => {
       captionTimers.delete(timer);
-      line.textContent += (line.textContent ? " " : "") + word;
-      messages.scrollTop = messages.scrollHeight;
+      ui.appendWord(line, word);
     }, Math.max(0, due * 1000));
     captionTimers.add(timer);
   });
@@ -80,19 +70,20 @@ function endCall(expected = call) {
   expected.channel?.close();
   expected.pc?.close();
   if (expected.audio) expected.audio.srcObject = null;
-  button.textContent = "Start call";
-  status.textContent = "Call ended.";
+  expected.meters?.close().catch(() => {});
+  ui.ended("Call ended.");
 }
 
 function handleEvent(current, message) {
   if (message.type === "ready") {
-    status.textContent = "Connected. Microphone stays live while the assistant speaks.";
+    ui.ready("Connected. Microphone stays live while VALR speaks.");
     current.statsTimer = setInterval(() => reportPlayout(current).catch(() => {}), PLAYOUT_REPORT_MS);
   } else if (message.type === "partial") {
     if (message.text) {
       userLine ??= addLine("user partial", "");
       userLine.textContent = message.text;
-      messages.scrollTop = messages.scrollHeight;
+      ui.scrollToEnd();
+      ui.heardWords();
     } else {
       userLine?.remove();  // Noise, not words: drop the live line.
       userLine = null;
@@ -107,12 +98,14 @@ function handleEvent(current, message) {
     userLine = null;
     assistantLine = null;
     current.audio.muted = false;  // A new reply: unmute after an interrupt.
+    ui.turnEnded();
   } else if (message.type === "interrupt") {
     // The server stopped sending; mute what is still in the jitter buffer.
     current.audio.muted = true;
     cancelCaptions();  // The screen keeps only what was heard.
     assistantLine?.classList.add("interrupted");
     assistantLine = null;
+    ui.interrupted();
   } else if (message.type === "caption") {
     scheduleCaption(message);
   } else if (message.type === "reply_end") {
@@ -120,23 +113,25 @@ function handleEvent(current, message) {
   } else if (message.type === "notice") {
     addLine("notice", message.text);
   } else if (message.type === "metrics") {
-    // LLM first token counts from Flux's end of turn: negative when a
-    // speculative reply (started at the eager end of turn) was committed.
-    metrics.textContent = `Response ${message.response_ms} ms = end of turn ${message.endpoint_ms} + LLM first token ${message.llm_first_token_ms} (${message.llm_model}) + TTS ${message.tts_first_audio_ms} (+ overhead); speculative ${message.speculative}${message.eager_lead_ms === null ? "" : `, eager lead ${message.eager_lead_ms} ms`}`;
+    ui.showMetrics(message);
   } else if (message.type === "error") {
     endCall(current);
-    status.textContent = message.error;
+    ui.setStatus(message.error);
   }
 }
 
 async function startCall() {
-  const current = {pc: null, channel: null, microphone: null, audio: null, statsTimer: null, stats: {}};
+  const current = {pc: null, channel: null, microphone: null, audio: null, statsTimer: null, stats: {},
+    meters: null};
   call = current;
-  button.textContent = "End call";
-  status.textContent = "Starting call…";
+  ui.started();
+  ui.setStatus("Starting call…");
   // Created inside the click, so the browser lets it play.
   const audio = current.audio = new Audio();
   audio.autoplay = true;
+  // Level meters only (never played): the visualizer's rings.
+  const meters = current.meters = new AudioContext();
+  meters.resume().catch(() => {});
   try {
     current.microphone = await navigator.mediaDevices.getUserMedia({
       audio: {channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true}
@@ -145,6 +140,7 @@ async function startCall() {
       current.microphone.getTracks().forEach(track => track.stop());
       return;
     }
+    ui.attachMicrophone(analyser(meters, current.microphone));
     const {ice_servers} = await jsonOrError(await fetch("/webrtc/ice-servers"));
     if (call !== current) return;
     const pc = current.pc = new RTCPeerConnection({iceServers: ice_servers});
@@ -153,8 +149,9 @@ async function startCall() {
     pc.ontrack = event => {
       audio.srcObject = event.streams[0] ?? new MediaStream([event.track]);
       audio.play().catch(() => {
-        status.textContent = "Audio playback is blocked. Allow sound for this site.";
+        ui.setStatus("Audio playback is blocked. Allow sound for this site.");
       });
+      ui.attachVoice(analyser(meters, new MediaStream([event.track])));
     };
     const channel = current.channel = pc.createDataChannel("control");
     channel.onmessage = event => {
@@ -163,16 +160,17 @@ async function startCall() {
         handleEvent(current, JSON.parse(event.data));
       } catch {
         endCall(current);
-        status.textContent = "Invalid call event. Call ended.";
+        ui.setStatus("Invalid call event. Call ended.");
       }
     };
     channel.onclose = () => endCall(current);
     pc.onconnectionstatechange = () => {
       if (pc.connectionState === "failed") {
         endCall(current);
-        status.textContent = "Call connection failed.";
+        ui.setStatus("Call connection failed.");
       }
     };
+    ui.watchPeer(pc);
     await pc.setLocalDescription(await pc.createOffer());
     await gatheringComplete(pc);
     if (call !== current) return;
@@ -186,9 +184,16 @@ async function startCall() {
     await pc.setRemoteDescription(answer);
   } catch (error) {
     endCall(current);
-    status.textContent = error.message ||
-      "Could not start call. Check microphone permission and browser support.";
+    ui.setStatus(error.message ||
+      "Could not start call. Check microphone permission and browser support.");
   }
 }
-button.addEventListener("click", () => call ? endCall() : startCall());
+
+function analyser(context, stream) {
+  const node = context.createAnalyser();
+  node.fftSize = 1024;
+  context.createMediaStreamSource(stream).connect(node);
+  return node;
+}
+ui.onClick(() => call ? endCall() : startCall());
 window.addEventListener("pagehide", () => endCall());
