@@ -295,3 +295,25 @@ def test_side_effecting_tool_waits_for_the_commit(graph, monkeypatch):
 
     assert asyncio.run(scenario()) == ["Booked."]
     assert ran == ["book_table"]
+
+
+def test_cancelling_a_turn_during_a_slow_tool_stops_the_tool(graph, monkeypatch):
+    finished = []
+
+    async def run_tool(name, arguments):
+        await asyncio.sleep(0.2)
+        finished.append(name)
+        return '{"ok": true}'
+
+    monkeypatch.setattr(agent, "run_tool", run_tool)
+    scripted(monkeypatch, [[ToolCallRequest("c", "get_weather", "{}")]], ["Sunny."])
+
+    async def scenario():
+        task = asyncio.create_task(speculate_turn(str(uuid4()), "weather?", asyncio.Event()))
+        await asyncio.sleep(0.05)  # Inside the filler wait.
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        await asyncio.sleep(0.3)
+
+    asyncio.run(scenario())
+    assert finished == []

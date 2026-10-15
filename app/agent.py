@@ -161,12 +161,12 @@ async def tools(state: Conversation, config: RunnableConfig) -> Conversation:
         await committed.wait()
     running = asyncio.ensure_future(
         asyncio.gather(*(run_tool(call["name"], call["arguments"]) for call in calls)))
-    done, _ = await asyncio.wait({running}, timeout=FILLER_AFTER_S)
-    if not done and not request["parts"][0]["text"].strip():
-        get_stream_writer()({"type": "delta", "text": TOOL_FILLER + " "})
-        # Stored with the tool call: the user heard it as part of this turn.
-        messages[-1] = {**request, "parts": [{"text": TOOL_FILLER}]}
-    try:
+    try:  # Cancelled at any point (barge-in, a cancelled speculation): stop the tools too.
+        done, _ = await asyncio.wait({running}, timeout=FILLER_AFTER_S)
+        if not done and not request["parts"][0]["text"].strip():
+            get_stream_writer()({"type": "delta", "text": TOOL_FILLER + " "})
+            # Stored with the tool call: the user heard it as part of this turn.
+            messages[-1] = {**request, "parts": [{"text": TOOL_FILLER}]}
         results = await running
     finally:
         running.cancel()
