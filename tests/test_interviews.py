@@ -171,11 +171,104 @@ def test_research_interviews_needs_a_yes_on_the_next_turn(monkeypatch):
     assert stranger == interviews.NOT_OWNER
 
 
-def test_calendar_tool_names_people_but_not_recruiters_or_emails():
+def test_calendar_labels_are_speakable_and_never_invented():
     zone = interviews.owner_zone()
-    described = interviews.describe(events_for(datetime(2026, 10, 20).date())[0], zone)
-    assert described == {"time": "4:00 PM", "title": "Interview with Acme", "company": "Acme",
-                         "people": ["Dev One"]}
+    event = events_for(datetime(2026, 10, 20).date())[0]  # 10:30 UTC = 4 PM IST.
+    assert interviews.describe(event, zone) == {
+        "label": "Acme, with Dev, at four p.m.", "calendar_title": "Interview with Acme"}
+    start = datetime(2026, 10, 16, 6, 0, tzinfo=timezone.utc)  # 11:30 AM IST.
+    rohan = SlotEvent("s", "Chirag Goel and Rohan Mehta", start.isoformat(),
+                        (start + timedelta(minutes=30)).isoformat(), company="Brightline",
+                        company_domain="brightline.example",
+                        attendees=[Person("rohan@brightline.example", "Rohan Mehta"),
+                                   Person("owner@example.com", "Chirag Goel", is_self=True)])
+    assert interviews.spoken_label(rohan, zone) == "Brightline, with Rohan, at eleven thirty a.m."
+    northwind = SlotEvent("z", "Chirag -In Person Post offer connect at Northwind Bengaluru [In-person]",
+                       "2026-10-16T07:15:00+00:00", "2026-10-16T08:15:00+00:00", company="Northwind")
+    assert interviews.spoken_label(northwind, zone) == "Northwind, post-offer connect, at twelve forty-five p.m."
+    nameless = SlotEvent("n", "Sync", "2026-10-16T03:35:00+00:00", "2026-10-16T04:00:00+00:00",
+                         company_domain="acme-labs.io")
+    assert interviews.spoken_label(nameless, zone) == "Acme Labs, at nine oh five a.m."
+
+
+def test_time_words():
+    def at(h, m):
+        return datetime(2026, 1, 1, h, m)
+    assert interviews.time_words(at(0, 0)) == "twelve a.m."
+    assert interviews.time_words(at(12, 15)) == "twelve fifteen p.m."
+    assert interviews.time_words(at(18, 30)) == "six thirty p.m."
+    assert interviews.time_words(at(9, 47)) == "nine forty-seven a.m."
+
+
+def test_the_promise_is_at_most_five_minutes_and_explainable():
+    one = interviews.estimate(1)
+    assert one.minutes <= 5 and not one.capped and "four researchers" in one.why
+    three = interviews.estimate(3)
+    assert three.minutes == 5 and not three.capped  # Two rounds of researchers in parallel.
+    six = interviews.estimate(6)
+    assert six.minutes == 5 and six.capped and "earliest interview goes first" in six.why
+    cached = interviews.estimate(2, already_done=2)
+    assert cached.minutes == 2 and "already researched" in cached.why
+    assert all(interviews.estimate(n).research_s >= 90 for n in range(1, 7))
+
+
+def test_proposal_says_the_labels_verbatim_with_the_capped_promise(monkeypatch):
+    async def day_events(day):
+        start = datetime(day.year, day.month, day.day, 6, 0, tzinfo=timezone.utc)
+        return [SlotEvent(f"e{i}", f"Interview with Co{i}", (start + timedelta(hours=i)).isoformat(),
+                          (start + timedelta(hours=i, minutes=30)).isoformat(), company=f"Co{i}")
+                for i in range(6)]
+
+    async def researched(keys):
+        return 0
+
+    async def temporal():
+        return object()
+    monkeypatch.setattr(interviews, "day_events", day_events)
+    monkeypatch.setattr(interviews, "researched", researched)
+    monkeypatch.setattr(callbacks, "temporal", temporal)
+    monkeypatch.setattr(interviews.research, "pool", object())
+    result = asyncio.run(interviews.research_interviews(
+        "today", caller_key=OWNER, conversation_id="c9", turn=TurnContext("research today", 1)))
+    assert result["say"].startswith("I see 6 interviews today: Co0, at eleven thirty a.m.; Co1, at "
+                                    "twelve thirty p.m.;")
+    assert "within five minutes, starting with the earliest one. Okay?" in result["say"]
+    assert result["minutes"] == 5 and "why_minutes" in result
+    assert interviews.proposals["c9"].estimate.capped
+    interviews.proposals.clear()
+
+
+def test_owner_greeting_uses_his_name():
+    as_caller("g", OWNER)
+    assert callbacks.greeting("g") == f"Hi Chirag, it's {ASSISTANT_NAME}. What can I help you prepare?"
+    as_caller("h", STRANGER)
+    assert callbacks.greeting("h") == f"Hi, this is {ASSISTANT_NAME}. How can I help?"
+
+
+def test_a_failed_turn_is_continued_not_repeated():
+    def msg(role, text="", **extra):
+        return {"role": role, "parts": [{"text": text}], "status": "completed", **extra}
+    asked = [msg("model", "Proposal. Okay?"), msg("user", "How did you get five?")]
+    assert agent.unanswered(asked, "How did you get five?")
+    after_tools = asked + [msg("model", "", tool_calls=[{"id": "1", "name": "x", "arguments": "{}"}]),
+                           msg("tool", "{}", tool_call_id="1")]
+    assert agent.unanswered(after_tools, "How did you get five?")
+    answered = asked + [msg("model", "Four researchers in parallel.")]
+    assert not agent.unanswered(answered, "How did you get five?")
+    assert not agent.unanswered(asked, "Something else")
+
+
+def test_owner_prompt_is_compact_on_normal_calls(monkeypatch):
+    long_eval = "x" * 3000
+    monkeypatch.setattr(interviews, "profile_block",
+                        lambda: "Private:\n## Profile\nChirag.\n\n## Self-evaluation\n" + long_eval)
+    as_caller("n", OWNER)
+    normal = interviews.prompt_note("n")
+    interviews.briefings["n"] = block()
+    briefing = interviews.prompt_note("n")
+    assert normal.count("x") <= interviews.EVALUATION_CHARS_ON_CALLS + 10  # + "x"s in the rules
+    assert "<briefing>\n" not in normal and "<briefing>\n" in briefing
+    assert briefing.count("x") <= interviews.EVALUATION_CHARS_ON_BRIEFING + 50
 
 
 class FakePool:

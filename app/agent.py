@@ -283,6 +283,17 @@ async def record_greeting(conversation_id: str, text: str, status: MessageStatus
     await save_history(conversation_id, messages)
 
 
+def unanswered(messages: list[Message], text: str) -> bool:
+    """The same words as the latest user message, which got no spoken answer (its reply
+    failed, perhaps after tools ran): a retry continues that turn instead of repeating it."""
+    for index in range(len(messages) - 1, -1, -1):
+        message = messages[index]
+        if message["role"] == "user":
+            return message["parts"][0]["text"] == text and all(
+                later["role"] == "tool" or later.get("tool_calls") for later in messages[index + 1:])
+    return False
+
+
 async def stream_conversation(conversation_id: str, message: str,
                               committed: asyncio.Event | None = None) -> AsyncIterator[ChatEvent]:
     """Supply a new turn to the graph and forward its custom streaming events.
@@ -293,7 +304,8 @@ async def stream_conversation(conversation_id: str, message: str,
     if graph is None:
         raise RuntimeError("Conversation storage has not started.")
     messages = await load_history(conversation_id)
-    messages.append({"role": "user", "parts": [{"text": message}], "status": "completed"})
+    if not unanswered(messages, message):
+        messages.append({"role": "user", "parts": [{"text": message}], "status": "completed"})
     state: Conversation = {"messages": messages, "updated_at": now()}
     if committed is not None:
         async with aclosing(speculate(conversation_id, state, committed)) as events:

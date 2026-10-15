@@ -46,7 +46,8 @@ CALL_LEADS = (timedelta(minutes=15), timedelta(minutes=10), timedelta(minutes=5)
 LINGER_AFTER_END = timedelta(minutes=30)
 CALL_END_WAIT = timedelta(minutes=11)
 READY_WAIT = timedelta(minutes=12)  # On-demand: longest wait for research before calling.
-READY_POLL = timedelta(seconds=20)
+READY_POLL = timedelta(seconds=15)
+DIAL_LEAD = timedelta(seconds=60)  # Dial this long before the promised time.
 BRIEFING_DIALS_PER_DAY = 12
 PART_SECONDS = 240
 SYNTH_SECONDS = 150
@@ -61,6 +62,13 @@ class SlotInput:
     research_due_utc: str
     job_usd: float = 0.40
     part_seconds: int = PART_SECONDS
+
+
+@dataclass
+class ResearchNow:
+    """On demand: research at once, each researcher within `seconds` (the promise)."""
+    seconds: int
+    refresh: bool = False
 
 
 @dataclass
@@ -173,6 +181,7 @@ class InterviewSlotWorkflow:
         self.changed = False
         self.status = SlotStatus("waiting", "")
         self.due = datetime.max.replace(tzinfo=timezone.utc)
+        self.part_limit: int | None = None  # On demand: the promise's researcher limit.
 
     @workflow.run
     async def run(self, slot: SlotInput) -> SlotStatus:
@@ -229,7 +238,8 @@ class InterviewSlotWorkflow:
             self.status.state, self.status.last_detail = "ready", "cache: " + ", ".join(plan.cache_hits)
             return
         until_start = (parse(self.event.start_utc) - workflow.now()).total_seconds()
-        part_s = max(min(slot.part_seconds, until_start - 16 * 60), 60)
+        part_s = max(min(self.part_limit or slot.part_seconds, until_start - 16 * 60), 60)
+        self.part_limit = None
         part_usd = slot.job_usd * 0.75 / max(len(plan.parts), 1)
         results = []
         for part in plan.parts:  # Started together, awaited together.
@@ -307,6 +317,15 @@ class InterviewSlotWorkflow:
         self.changed = True
 
     @workflow.signal
+    def research_within(self, request: ResearchNow) -> None:
+        if request.refresh:
+            self.pending |= set(FULL)
+            self.refresh = True
+        self.part_limit = request.seconds
+        self.due = workflow.now()
+        self.changed = True
+
+    @workflow.signal
     def refresh_research(self) -> None:
         """The owner asked to refresh: everything again, caches bypassed."""
         self.pending |= set(FULL)
@@ -338,6 +357,8 @@ class BlockInput:
     on_demand: bool = False
     dial: bool = True
     dials_per_day: int = BRIEFING_DIALS_PER_DAY
+    call_by_utc: str = ""  # On demand: the promised time; dial by then, ready or not.
+    ready_keys: list[str] = field(default_factory=list)  # Wait for these (empty: all).
 
 
 @dataclass
@@ -390,11 +411,12 @@ class BlockCallWorkflow:
             except TimeoutError:
                 pass
             self.status.state = "waiting_for_research"
-            deadline = workflow.now() + READY_WAIT
+            deadline = (parse(block.call_by_utc) - DIAL_LEAD) if block.call_by_utc \
+                else workflow.now() + READY_WAIT
             while not self.cancelled and workflow.now() < deadline:
-                if await self.ready():
+                if await self.ready(block.ready_keys or self.slot_keys):
                     break
-                await self.sleep(READY_POLL)
+                await self.sleep(min(READY_POLL, max(deadline - workflow.now(), timedelta(seconds=1))))
             first = workflow.now()
             times = [first + timedelta(minutes=5) * index for index in range(len(CALL_LEADS))]
         else:
@@ -436,9 +458,9 @@ class BlockCallWorkflow:
             await self.sleep(remaining)
         return not self.cancelled
 
-    async def ready(self) -> bool:
+    async def ready(self, keys: list[str]) -> bool:
         return await workflow.execute_activity(
-            "slots_ready", list(self.slot_keys), result_type=bool,
+            "slots_ready", list(keys), result_type=bool,
             start_to_close_timeout=timedelta(seconds=20), retry_policy=RetryPolicy(maximum_attempts=3))
 
     async def record(self, block: BlockInput, state: str) -> None:

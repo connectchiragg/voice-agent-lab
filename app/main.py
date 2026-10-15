@@ -65,7 +65,14 @@ def load_engines(sample_rate: int | None = None) -> Engines | None:
                                                      research.call_ended(conversation_id),
                                                      interviews.call_ended(conversation_id)),
                    greeting=callbacks.greeting, record_greeting=agent.record_greeting,
-                   backchannel=backchannel_from_env())
+                   backchannel=backchannel_from_env(),
+                   awaiting_answer=awaiting_answer)
+
+
+def awaiting_answer(conversation_id: str) -> bool:
+    """A callback, research or briefing proposal waits for this caller's yes."""
+    return (conversation_id in callbacks.proposals or conversation_id in research.proposals
+            or conversation_id in interviews.proposals)
 
 
 def backchannel_from_env() -> Backchannel | None:
