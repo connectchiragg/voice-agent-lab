@@ -167,6 +167,9 @@ def comp_figures(comp: dict | None) -> set[str]:
     return {_lpa(float(v)) for v in values}
 
 
+EQUITY = r"ESOPs?|RSUs?|options|stock options|shares|equity|stock"
+
+
 def redact_compensation(text: str, comp: dict | None) -> str:
     """Mask the owner's own comp figures when they appear as amounts (e.g. 'N LPA', 'N-M L',
     'N ESOP units') in text stored outside profile.json or printed."""
@@ -176,9 +179,13 @@ def redact_compensation(text: str, comp: dict | None) -> str:
     number = "|".join(sorted((re.escape(f) for f in figures), key=len, reverse=True))
     amount = re.compile(
         rf"(?<![\d.])(?:₹\s*|INR\s*|Rs\.?\s*)?({number})(?:\s*(?:-|–|to)\s*({number}))?"
-        rf"(?=\s*(?:LPA|L\b|lakhs?|lacs?|LPA|ESOP|units|options|k\b|K\b|CTC|fixed|variable))",
+        rf"(?=\s*(?:LPA|L\b|lakhs?|lacs?|{EQUITY}|units|k\b|CTC|fixed|variable))",
         re.I)
-    return amount.sub(REDACTED, text)
+    # Unit-less equity forms where the word comes first: "ESOPs: N", "ESOP grant of N".
+    equity_first = re.compile(
+        rf"(\b(?:{EQUITY})\b(?:\s+(?:grant|pool|allocation|count))?\s*(?:of|:|=|-|–|is|was)?\s*)"
+        rf"(?<![\d.])(?:{number})(?![\d.])", re.I)
+    return equity_first.sub(lambda m: m.group(1) + REDACTED, amount.sub(REDACTED, text))
 
 
 def save_profile(profile: dict, path: Path) -> None:

@@ -113,3 +113,18 @@ def test_build_profile_script_never_prints_or_logs_comp(tmp_path, monkeypatch, c
     assert "compensation present" in printed
     assert not COMP_NUMBERS.search(printed.split("Brief")[1])
     assert json.loads(out.read_text())["compensation"]["current"]["fixed_lpa"] == 31.0
+
+
+@pytest.mark.parametrize("text", [
+    "He mentioned 120 ESOPs per year", "ESOP: 120 a year", "ESOPs of 120", "120 ESOP",
+    "esop grant of 120", "RSUs 120", "120 stock options", "120 shares vest yearly"])
+def test_redact_compensation_unitless_equity_forms(text):
+    comp = profiles.validate_compensation(COMP)
+    out = profiles.redact_compensation(text, comp)
+    assert "120" not in out and profiles.REDACTED in out
+
+
+def test_redact_compensation_leaves_unrelated_counts():
+    comp = profiles.validate_compensation(COMP)
+    text = "120 turns; ESOP policy discussed; 120 words per minute"
+    assert profiles.redact_compensation(text, comp) == text
