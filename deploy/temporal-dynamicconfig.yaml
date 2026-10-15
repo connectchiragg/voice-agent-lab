@@ -1,0 +1,3 @@
+# Temporal's dynamic config: every setting at its default. The server refuses to start
+# without this file; deploy/temporal-setup.sh mounts it read-only.
+{}

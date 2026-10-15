@@ -231,6 +231,8 @@ at most three tool rounds per turn, each step checkpointed. Tools
 - `get_time`: any other time zone, as 12-hour time. The user's own date and
   time are in the system prompt on every call, so the model never invents them.
 - `forget_me`: deletes what is remembered about the caller (see Caller memory).
+- `schedule_callback`, `reschedule_callback`, `cancel_callback`, `get_callback`:
+  phone callbacks (see Callbacks).
 
 Voice-specific behaviour:
 
@@ -313,7 +315,102 @@ call_summaries (call_id text PRIMARY KEY,  -- the conversation (LangGraph thread
 Not yet verified on a live call: the summarizer's output with the real model
 (tests use a fake LLM).
 
-Next: Temporal workflows.
+### Callbacks (Temporal)
+
+A phone caller can say "call me back tomorrow at 5 pm about the weekend
+weather", and the assistant calls them back then. The waiting is done by
+[Temporal](https://temporal.io), self-hosted on the VM: a server that keeps
+timers and state in Postgres, so a callback survives restarts of the app, the
+worker or the whole VM.
+
+Temporal's words: a **workflow** is a function whose progress
+Temporal records, so it can sleep for days and resume where it was; an
+**activity** is the workflow's one step that touches the outside world (here,
+asking Telnyx to dial), retried on failure; a **worker** is our process that
+runs both; a **signal** pokes a running workflow with news; a **query** reads
+its state; an **update** is a signal that answers yes or no.
+
+How one callback flows:
+
+1. During a phone call the caller asks. The model says the day and time back,
+   gets a yes, and calls `schedule_callback(when, reason)`. The tool reads the
+   time ("tomorrow at 5 pm", "in 2 hours", "Friday 10:30 am", or ISO) in the
+   caller's time zone (`ASSISTANT_TIMEZONE`, or a `time_zone` the caller
+   names), refuses quiet hours (9 pm to 9 am there), the past and more than two
+   weeks ahead, and starts `CallbackWorkflow` with id
+   `callback-<hash of the caller>`. The caller's number comes from the call,
+   never from the model; web callers are politely declined.
+2. The workflow sleeps on a durable timer until the time. Nothing runs meanwhile.
+3. When it wakes it takes one of the day's 5 dial slots (`DialBudgetWorkflow`,
+   one per UTC day, for all callers together), then runs the `place_call`
+   activity: Telnyx Dial from +1 228 888 8007 through the voice-agent-lab
+   Call Control app, with `client_state` naming the workflow, attempt and reason.
+4. Telnyx's webhooks come to the app as usual. `call.answered`: the app signals
+   "answered" and starts the media stream (`streaming_start`, same codec and
+   one-time token as an inbound answer); the call then runs like any inbound
+   one, opening with "Hi Asha, you asked me to call back about the weekend
+   weather." (the name from caller memory, if known). `call.hangup` before an
+   answer: `timeout`/`no_answer` is no answer, `user_busy`/`call_rejected` busy.
+5. Not answered (or no webhook within 3 minutes): it waits 15 minutes and tries
+   again, at most 3 attempts in all, then ends as failed. Each attempt and the
+   outcome are kept in the workflow's result.
+
+While it waits, `reschedule_callback` moves the timer (an update, so a
+quiet-hours time is refused on the spot), `cancel_callback` ends it (a signal;
+a call already ringing is left to ring out) and `get_callback` reads it (a query,
+or the result of the last finished one).
+
+Decisions:
+
+- One workflow id per caller, so Temporal itself guarantees at most one pending
+  callback per caller with no table or lock of ours; a finished callback frees
+  the id. The id is a hash, so phone numbers are not the workflow list's names
+  (they are in the workflow's input, visible in the UI).
+- Separate worker container (same image, `python -m app.callback_worker`) rather
+  than a task inside the app: the realtime audio path stays free of it, app
+  redeploys do not stop it (and the reverse), and it can restart on its own.
+  It used about 57 MB of RAM.
+- The dial cap lives in Temporal too (an update on the day's budget workflow,
+  processed one at a time), so two callbacks due at once cannot both take the
+  last slot. Activity retries are counted once.
+- Answering-machine detection is off: it is a paid add-on ($0.002 a call). A
+  voicemail that picks up therefore counts as answered.
+- `get_callback` has no side effects, so a speculative reply may run it; the
+  other three wait for the reply to be committed.
+
+Settings: `TEMPORAL_ADDRESS` (unset: callbacks are off and the tools say so),
+`TEMPORAL_NAMESPACE` (default `default`; the VM uses `voice-agent-lab`), and
+for the worker `TELNYX_API_KEY` plus optional `TELNYX_CONNECTION_ID` and
+`TELNYX_FROM_NUMBER`. Callbacks need caller memory on (it supplies the caller's
+key). The VM setup is in [docs/deploy.md](docs/deploy.md#callbacks-temporal).
+
+Locally:
+
+```sh
+brew install temporal
+temporal server start-dev --namespace voice-agent-lab   # UI: http://localhost:8233
+TEMPORAL_ADDRESS=localhost:7233 TEMPORAL_NAMESPACE=voice-agent-lab python -m app.callback_worker
+```
+
+Set the same two variables for the app. Without `TELNYX_API_KEY` a due
+callback fails without dialling; `TELNYX_API_URL` can point the worker at a
+local stand-in. The Temporal UI lists workflows (filter by type
+`CallbackWorkflow`); open one to see its timer, attempts, signals and result.
+From the CLI: `temporal workflow list`, `temporal workflow describe -w <id>`,
+`temporal workflow query -w <id> --type status_query`, and
+`temporal workflow signal -w <id> --name cancel`.
+
+Tests run in Temporal's time-skipping test server (hours pass in milliseconds;
+the SDK downloads it on first use): the timer firing the call, no-answer
+retries, the unreported call, reschedule, cancel (waiting and ringing), quiet
+hours, one per caller, refused dials and the daily cap. Tool tests use a fake
+Temporal client. Checked by hand against a real server with a local stand-in for
+Telnyx: a callback scheduled a minute ahead dialled on time, including after
+stopping and restarting both the server and the worker while it waited.
+
+Not yet verified: a real outbound call (the voice-agent-lab app needs an
+Outbound Voice Profile first), and Telnyx's actual `hangup_cause` for an
+unanswered call to the verified number.
 
 ## Run locally
 

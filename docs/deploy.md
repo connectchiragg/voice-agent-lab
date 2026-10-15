@@ -179,6 +179,82 @@ The app creates its tables at startup (LangGraph's checkpoints, `callers`,
 If Postgres is down when the app starts, the app logs "Postgres unavailable"
 and keeps history and memory in RAM until its next restart.
 
+## Callbacks (Temporal)
+
+Scheduled callbacks (README, Callbacks) need three more containers on the
+`voice-agent-lab` network, all from `deploy/temporal-setup.sh`:
+
+| Container | Image | Port (VM loopback only) | RAM measured |
+|---|---|---|---|
+| `temporal` | `temporalio/server:1.32.1`, all services in one process | `127.0.0.1:7233` (gRPC, for the CLI) | about 100 MB |
+| `temporal-ui` | `temporalio/ui:2.55.0` | `127.0.0.1:8233` | about 15 MB |
+| `voice-callbacks` | the app's image, `python -m app.callback_worker` | none | about 58 MB |
+
+Measured in Docker on a Mac with the same images and Postgres 17.11; Postgres
+itself grew from about 27 MB to 78 MB with Temporal's connections. The idle
+Temporal server used 3 to 6% of one core there. All of it fits the VM's free
+3 GB with room to spare.
+
+Temporal keeps its state in the existing `voice-postgres`, as a role `temporal`
+owning two databases, `temporal` and `temporal_visibility`, so the
+`voice-agent-lab-postgres` volume holds everything and is the one thing to back
+up (`pg_dumpall`, or a snapshot of the VM disk). Considered instead:
+
+- `temporal server start-dev` with a SQLite file on a volume: one container
+  (about 115 MB measured, UI included) that also survived restarts with a
+  timer pending, but Temporal supports it only for development, and backups
+  would be a second store to copy. A fine fallback for a lab if Postgres is
+  ever removed.
+- `temporalio/auto-setup`: deprecated; its last tag is server 1.23.
+
+Setup, after the app image is built and Postgres is running (it is safe to run
+again, for example to upgrade Temporal by changing the versions at its top):
+
+```sh
+cd ~/voice-agent-lab && sh deploy/temporal-setup.sh
+```
+
+It:
+
+1. adds `TEMPORAL_DB_PASSWORD` (random), `TEMPORAL_ADDRESS=temporal:7233` and
+   `TEMPORAL_NAMESPACE=voice-agent-lab` to `.env` if missing;
+2. creates the role and databases (the password goes through stdin) and runs
+   Temporal's schema setup and migrations (`temporalio/admin-tools`);
+3. starts the server (`DB=postgres12`, 4 history shards, at most 10 Postgres
+   connections, `deploy/temporal-dynamicconfig.yaml` mounted read-only) and
+   creates the namespace with 30 days' retention of finished workflows;
+4. starts the UI and the worker.
+
+Then restart the app container (see Updating) so it reads `TEMPORAL_ADDRESS`.
+The worker uses the same `.env`: its `TELNYX_API_KEY` dials, so it calls real
+numbers once the Outbound Voice Profile below is assigned. On a trial account
+Telnyx only dials verified numbers anyway.
+
+The app and worker reach the server by container name (`temporal:7233`, no
+TLS); nothing is published beyond the VM's loopback, and the tunnel does not
+route to it.
+
+**Viewing workflows.** Forward the UI over SSH and open http://localhost:8233:
+
+```sh
+ssh -N -L 8233:127.0.0.1:8233 ubuntu@<vm-ip>
+```
+
+Pick the `voice-agent-lab` namespace. Or on the VM:
+`sudo docker run --rm --network voice-agent-lab temporalio/admin-tools:1.32.1 temporal --address temporal:7233 -n voice-agent-lab workflow list`.
+Worker logs: `sudo docker logs -f voice-callbacks`.
+
+**Updating the worker** with the app: after rebuilding the image,
+`sudo docker rm -f voice-callbacks` and run its `docker run` line from the
+script again. Pending callbacks just wait while it is down. Changing the
+workflow's code while callbacks are pending can break their replay; for such
+a change, let them finish (or cancel them) first.
+
+**Telnyx outbound.** Dialling needs an Outbound Voice Profile on the
+voice-agent-lab Call Control app (portal: Programmable Voice > the app >
+Outbound > Outbound Voice Profile > `Default` > Save). Until then every dial is
+refused (HTTP 4xx, not retried) and the callback ends as failed.
+
 ## Updating and rolling back
 
 Ship the source to a fresh directory, keep `.env`, rebuild only the app
@@ -224,6 +300,9 @@ To roll back, run the same `docker rm -f` and `docker run` with the rollback tag
 | `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_PASSWORD` | `127.0.0.1`, `5432`, unset | History and caller memory (database and role `voice_agent`); on the VM `voice-postgres`. In memory when unset or unreachable |
 | `CF_ACCESS_AUD`, `CF_ACCESS_TEAM_DOMAIN` | unset, `https://small-brook-8402.cloudflareaccess.com` | Browser caller identity: the Access app's AUD tag; unset, every browser caller is anonymous |
 | `CALLER_MEMORY`, `CALLER_MEMORY_LOAD_TIMEOUT_MS`, `CALLER_MEMORY_SUMMARY_WAIT_S` | `1`, `150`, `600` | Caller memory on/off, its load limit at call start, and how long a summary may wait for quiet |
+| `TEMPORAL_ADDRESS`, `TEMPORAL_NAMESPACE` | unset, `default` | Callbacks: the Temporal server (`temporal:7233` on the VM, no TLS) and namespace (`voice-agent-lab`). Unset: callbacks are off |
+| `TEMPORAL_DB_PASSWORD` | set by `deploy/temporal-setup.sh` | Postgres password of the `temporal` role; used only by the setup script |
+| `TELNYX_CONNECTION_ID`, `TELNYX_FROM_NUMBER` | `3071391970178893742`, `+12288888007` | Callback dials: the Call Control app and the caller ID |
 | `CF_TURN_KEY_ID`, `CF_TURN_KEY_API_TOKEN` | unset | Cloudflare Realtime TURN key for WebRTC media; run time only. Unset: public STUN only (see below) |
 | `WEBRTC_MAX_CALL_S`, `WEBRTC_MAX_CALLS` | `900`, `4` | WebRTC call time limit (TURN credentials expire 60 s later) and concurrent WebRTC calls |
 
