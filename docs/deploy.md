@@ -103,6 +103,10 @@ which was too small for the local models and may now suffice (untested).
    (`speech` is false when `DEEPGRAM_API_KEY` is missing).
 4. Latency and accuracy over many turns: `scripts/live_latency.py` (see its
    docstring); add `--barge-in` to time interruptions.
+5. WebRTC against WebSocket in headless Chrome, timed where the listener hears
+   the reply: `scripts/webrtc_latency.py --url https://<host> --clips <dir>`
+   (`--barge-in` to time interruptions; without `--url` it measures the
+   transport alone against a local stub pipeline).
 
 ## Updating and rolling back
 
@@ -137,6 +141,16 @@ To roll back, run the same `docker rm -f` and `docker run` with the rollback tag
 | `HOST`, `PORT` | `0.0.0.0`, `7860` in the image | Address uvicorn binds |
 | `SPECULATIVE_LLM` | `1` | Start the LLM at Flux's EagerEndOfTurn; `0` turns it off |
 | `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_PASSWORD` | `127.0.0.1`, `5432`, unset | Optional history store; in memory when unset |
+| `CF_TURN_KEY_ID`, `CF_TURN_KEY_API_TOKEN` | unset | Cloudflare Realtime TURN key for WebRTC media; run time only. Unset: public STUN only (see below) |
+| `WEBRTC_MAX_CALL_S`, `WEBRTC_MAX_CALLS` | `900`, `4` | WebRTC call time limit (TURN credentials expire 60 s later) and concurrent WebRTC calls |
+
+WebRTC media is UDP between the browser and the container's aiortc. With a
+TURN key, each call mints its own credentials and both sides can relay through
+Cloudflare, so the VM needs no inbound UDP rule. Without one, calls use STUN
+only: that worked from a home network to the Mumbai VM (the security group is
+stateful and the container's outbound checks open the path), but fails behind
+symmetric NAT or UDP-blocking networks. `?transport=ws` keeps the WebSocket
+client for comparison.
 
 The image runs as non-root UID 1000. Dependency versions come from
 `requirements.lock`, the set tested locally on Python 3.14. Linux wheels exist

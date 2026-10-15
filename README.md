@@ -46,7 +46,8 @@ answered 17 of 64 turns.
 
 How a call flows (`app/pipeline.py`, `app/deepgram.py`):
 
-1. The browser streams 100 ms packets of 16 kHz float32 PCM over `/ws/voice`.
+1. The browser streams the microphone over WebRTC (Opus, decoded to 16 kHz on
+   the server) or, with `?transport=ws`, 100 ms packets of float32 PCM over `/ws/voice`.
    The server opens one Flux and one Aura socket when the call starts and
    forwards the microphone to Flux continuously, as linear16.
 2. Flux sends turn events: `Update` (live words, shown as `partial`),
@@ -143,6 +144,51 @@ that is cancelled.
 - Every request logs the winning model, its first-token time and the running
   hedge rate; the turn metrics carry `llm_model`. A watchdog logs any event-loop
   block over 250 ms.
+
+### Transport: WebRTC (default) and WebSocket
+
+The page calls over WebRTC by default (`static/voice-webrtc.js`, `app/webrtc.py`);
+`/?transport=ws` keeps the WebSocket client for one release. Both drive the
+same `Call` through `app/transport.py`, with the same events.
+
+- Signalling is one `POST /webrtc/offer` through the tunnel, after
+  `GET /webrtc/ice-servers`. Media is Opus over UDP between the browser and
+  aiortc in the container; events use a data channel.
+- Microphone: decoded, downsampled 48 -> 16 kHz and sent to Flux in 40 ms
+  packets. aiortc's own audio jitter buffer (80 ms hold, 320 ms stall per lost
+  packet) is replaced by one that passes packets on at once.
+- Reply: TTS audio is paced out in 20 ms frames; an interrupt drops the queue
+  at once and the page mutes what is still in its jitter buffer. The browser
+  reports its playout delay (half RTT + jitter buffer + output) every 500 ms;
+  from it the server works out the playing state, the seconds heard after an
+  interrupt, and when each caption starts.
+- Barge-in follows browser echo cancellation, which is requested on.
+- Media relay: Cloudflare Realtime TURN credentials are minted per call when
+  `CF_TURN_KEY_ID`/`CF_TURN_KEY_API_TOKEN` are set; until then calls use STUN
+  only (see docs/deploy.md).
+
+Measured on 2026-10-15 with `scripts/webrtc_latency.py`: headless Chrome on
+this Mac (home broadband, 25 ms RTT to the Mumbai VM, direct UDP path),
+synthetic microphone, reply timed at its first audible sample where the page
+plays it (Aura's audio starts with near-silence, which neither side counts).
+24 turns per transport, interleaved in rounds of 8, same 8 clips:
+
+| From the true end of speech | WebRTC | WebSocket |
+|---|---|---|
+| First reply audio heard, p50 / p90 | 1,796 / 2,053 ms | 1,822 / 2,432 ms |
+| Of which server (Flux end of turn to first audio sent), p50 / p90 | 1,468 / 1,641 ms | 1,436 / 2,082 ms |
+| Barge-in: speech start -> `interrupt` on the page, p50 / p90 (9-10 turns) | 595 / 785 ms | 618 / 697 ms |
+
+On this clean network the transports tie: the turn is dominated by Flux and
+the LLM, and the p90 gap is server variance, not transport. Against a local
+stub pipeline (`scripts/webrtc_latency.py` without `--url`) the transport
+alone adds a median 93 ms over WebRTC and 141 ms over the WebSocket (whose
+100 ms packets add up to 100 ms), and WebRTC stays near that at 1% and 3%
+simulated packet loss (108 and 106 ms). WebRTC should matter more on lossy or
+jittery networks, where TCP holds back every later packet; that is not yet
+measured on a real one. These numbers are not comparable with the Status table
+above, which times the first audio bytes received, silence included, on a
+fresh call per turn.
 
 ### Speech: Deepgram
 
