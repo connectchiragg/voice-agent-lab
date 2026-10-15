@@ -2,7 +2,13 @@
 
     python scripts/webrtc_latency.py                       # Local stub pipeline, both transports.
     python scripts/webrtc_latency.py --loss 0.02           # Drop 2% of RTP packets each way.
-    python scripts/webrtc_latency.py --url https://x.trycloudflare.com --wav speech.wav --turns 20
+    python scripts/webrtc_latency.py --url https://x.trycloudflare.com --clips CLIPS_DIR --turns 20
+    python scripts/webrtc_latency.py --url ... --clips CLIPS_DIR --barge-in
+
+--clips takes 16-bit mono WAVs (see scripts/live_latency.py for making them);
+turns cycle through them on one call per transport. --barge-in speaks the
+next clip over each reply, one second after its audio is first heard, and
+times speech start -> the server's `interrupt` event on the page.
 
 Chrome runs the real page (static/voice-webrtc.js or ?transport=ws) with a
 synthetic microphone: the harness plays an utterance into a WebAudio stream
@@ -28,6 +34,7 @@ import random
 import socket
 import statistics
 import sys
+import time
 import wave
 from pathlib import Path
 
@@ -59,19 +66,21 @@ INIT_SCRIPT = r"""
   const settings = micTrack.getSettings.bind(micTrack);
   micTrack.getSettings = () => ({...settings(), echoCancellation: true});
   navigator.mediaDevices.getUserMedia = async () => { await ctx.resume(); return mic.stream; };
-  // Load the utterance once (samples at 48 kHz), then play it on each turn.
+  // Load each utterance once (samples at 48 kHz), then play them by index.
+  h.utterances = [];
   h.load = samples => {
-    h.utterance = ctx.createBuffer(1, samples.length, 48000);
-    h.utterance.copyToChannel(Float32Array.from(samples), 0);
+    const buffer = ctx.createBuffer(1, samples.length, 48000);
+    buffer.copyToChannel(Float32Array.from(samples), 0);
+    h.utterances.push(buffer);
   };
-  // Returns the performance time speech ends.
-  h.speak = voicedEndS => {
+  // Returns the performance times speech starts and ends.
+  h.speak = (index, voicedStartS, voicedEndS) => {
     const source = ctx.createBufferSource();
-    source.buffer = h.utterance;
+    source.buffer = h.utterances[index];
     source.connect(mic);
     const start = ctx.currentTime + 0.05;
     source.start(start);
-    return perfAt(start + voicedEndS);
+    return [perfAt(start + voicedStartS), perfAt(start + voicedEndS)];
   };
   const detector = `
     class Onset extends AudioWorkletProcessor {
@@ -160,13 +169,16 @@ INIT_SCRIPT = r"""
 """
 
 
-def tone() -> tuple[np.ndarray, float]:
+Utterance = tuple[np.ndarray, float, float]  # 48 kHz samples, voiced start and end (s).
+
+
+def tone() -> Utterance:
     times = np.arange(round(BROWSER_RATE * TONE_S)) / BROWSER_RATE
-    return (TONE_LEVEL * np.sin(2 * np.pi * TONE_HZ * times)).astype(np.float32), TONE_S
+    return (TONE_LEVEL * np.sin(2 * np.pi * TONE_HZ * times)).astype(np.float32), 0.0, TONE_S
 
 
-def load_wav(path: str) -> tuple[np.ndarray, float]:
-    """A 16-bit mono WAV, resampled to 48 kHz; speech ends at its last loud sample."""
+def load_wav(path: str | Path) -> Utterance:
+    """A 16-bit mono WAV, resampled to 48 kHz; speech spans its first to last loud sample."""
     with wave.open(path) as audio:
         if (audio.getnchannels(), audio.getsampwidth()) != (1, 2):
             raise SystemExit("Expected mono 16-bit PCM WAV.")
@@ -175,52 +187,61 @@ def load_wav(path: str) -> tuple[np.ndarray, float]:
     times = np.arange(round(len(pcm) * BROWSER_RATE / rate)) / BROWSER_RATE
     samples = np.interp(times, np.arange(len(pcm)) / rate, pcm).astype(np.float32)
     loud = np.flatnonzero(np.abs(samples) > 0.02)
-    return samples, (loud[-1] + 1) / BROWSER_RATE if len(loud) else len(samples) / BROWSER_RATE
+    if not len(loud):
+        raise SystemExit(f"{path}: no speech.")
+    return samples, loud[0] / BROWSER_RATE, (loud[-1] + 1) / BROWSER_RATE
 
 
 def stub_engines():
-    """The real Call and TurnDetector around instant fakes: no models, no LLM."""
-    from app.pipeline import Engines, TurnDetector
+    """The real Call around instant stand-ins for Flux, the LLM and Aura: no Deepgram, no LLM.
 
-    class EnergyVad:
-        def probability(self, chunk):
-            return 1.0 if np.abs(chunk).max() > 0.05 else 0.0
+    The turn ends 200 ms after the audio goes quiet, standing in for Flux's
+    end-of-turn decision, so `transport_ms` (total - server response) is the
+    transport alone.
+    """
+    from app.deepgram import TurnEvent
+    from app.pipeline import Engines
 
-        def reset(self):
+    class EnergyListener:
+        def __init__(self, on_event):
+            self.on_event, self.speaking, self.quiet = on_event, False, 0
+
+        async def start(self):
             pass
 
-    class Complete:
-        def completion_probability(self, samples):
-            return 1.0
+        async def send(self, pcm, arrived=None):
+            loud = np.abs(np.frombuffer(pcm, "<i2")).max() > 1600
+            arrived = arrived or time.perf_counter()
+            if loud:
+                self.quiet, self.last_loud = 0, arrived
+                if not self.speaking:
+                    self.speaking = True
+                    await self.on_event(TurnEvent("StartOfTurn", "hello", arrived))
+            elif self.speaking:
+                self.quiet += len(pcm) // 2
+                if self.quiet >= 3200:
+                    self.speaking = False
+                    await self.on_event(TurnEvent("EndOfTurn", "hello there", time.perf_counter(),
+                                                  self.last_loud))
 
-    class Transcriber:
-        text, final_ms = "", 0.0
-
-        def on_speech_start(self, preroll):
-            self.text = "hello"
-
-        def on_speech(self, samples):
+        async def close(self):
             pass
 
-        def on_speech_end(self, silence_s):
-            return "hello there"
-
-        def on_discard(self):
+    class ToneSpeaker:
+        async def start(self):
             pass
 
-        def take_partial(self):
-            return None
+        async def synthesize(self, text):
+            times = np.arange(48000) / 24000  # Two seconds of tone, long enough to talk over.
+            yield (0.3 * np.sin(2 * np.pi * 330 * times)).astype(np.float32)
+
+        async def close(self):
+            pass
 
     async def reply(conversation_id, text, committed=None):
         yield "Sure, here you go."
 
-    async def synthesize(text):
-        times = np.arange(12000) / 24000  # Half a second of tone.
-        return (0.3 * np.sin(2 * np.pi * 330 * times)).astype(np.float32)
-
-    return Engines(new_transcriber=Transcriber,
-                   new_detector=lambda listener: TurnDetector(EnergyVad(), Complete(), listener=listener),
-                   reply=reply, synthesize=synthesize)
+    return Engines(new_listener=EnergyListener, new_speaker=ToneSpeaker, reply=reply)
 
 
 def drop_rtp(loss: float) -> None:
@@ -275,9 +296,24 @@ def free_port() -> int:
         return probe.getsockname()[1]
 
 
+async def speak(page, utterances: list[Utterance], index: int) -> tuple[float, float]:
+    _, voiced_start, voiced_end = utterances[index % len(utterances)]
+    return tuple(await page.evaluate("([i, a, b]) => window.__harness.speak(i, a, b)",
+                                     [index % len(utterances), voiced_start, voiced_end]))
+
+
+async def first_after(page, key: str, after: float, timeout_s: float = 30) -> float | None:
+    try:
+        found = await page.wait_for_function(
+            f"(t) => window.__harness.{key}.find(x => x > t) ?? false", arg=after,
+            timeout=timeout_s * 1000)
+    except Exception:
+        return None
+    return await found.json_value()
+
+
 async def run_transport(browser, base: str, transport: str, turns: int,
-                        utterance: tuple[np.ndarray, float]) -> list[dict]:
-    samples, voiced_s = utterance
+                        utterances: list[Utterance], barge_in: bool) -> list[dict]:
     page = await browser.new_page()
     await page.add_init_script(INIT_SCRIPT)
     query = "?transport=ws" if transport == "ws" else ""
@@ -286,35 +322,52 @@ async def run_transport(browser, base: str, transport: str, turns: int,
     await page.wait_for_function(
         "window.__harness.events.some(e => e.type === 'ready')", timeout=20000)
     await asyncio.sleep(1.0)  # Let the jitter buffer and playout reports settle.
-    await page.evaluate("(s) => window.__harness.load(s)", samples.tolist())
+    for samples, _, _ in utterances:
+        await page.evaluate("(s) => window.__harness.load(s)", samples.tolist())
+    heard_key = "onsets" if transport == "webrtc" else "scheduled"
     results = []
+    clip = 0
     for turn in range(turns):
-        ended = await page.evaluate("(v) => window.__harness.speak(v)", voiced_s)
-        heard_key = "onsets" if transport == "webrtc" else "scheduled"
-        try:
-            heard = await page.wait_for_function(
-                f"(t) => window.__harness.{heard_key}.find(x => x > t) ?? false", arg=ended,
-                timeout=30000)
-            heard_at = await heard.json_value()
-        except Exception:
+        _, ended = await speak(page, utterances, clip)
+        clip += 1
+        heard_at = await first_after(page, heard_key, ended)
+        if heard_at is None:
             print(f"{transport} turn {turn + 1}: no reply audio", file=sys.stderr)
             continue
-        await page.wait_for_function(
-            "(t) => window.__harness.events.some(e => e.type === 'reply_end' && e.at > t)",
-            arg=ended, timeout=30000)
+        result: dict[str, float | None] = {"total_ms": heard_at - ended}
+        if barge_in:
+            await asyncio.sleep(1.0)  # Talk over the reply.
+            started, ended = await speak(page, utterances, clip)
+            clip += 1
+            interrupted = await first_after(
+                page, "events.filter(e => e.type === 'interrupt').map(e => e.at)", started, 10)
+            result["barge_in_ms"] = interrupted - started if interrupted is not None else None
+            # The interrupting speech is the next turn: let its reply play out below.
+        try:
+            await page.wait_for_function(
+                "(t) => window.__harness.events.some(e => e.type === 'reply_end' && e.at > t)",
+                arg=ended, timeout=30000)
+        except Exception:
+            print(f"{transport} turn {turn + 1}: no reply_end", file=sys.stderr)
         events = await page.evaluate("(t) => window.__harness.events.filter(e => e.at > t)", ended)
         metrics = next((e for e in events if e["type"] == "metrics"), {})
         transcript_at = next((e["at"] for e in events if e["type"] == "transcript"), None)
-        total = heard_at - ended
-        results.append({"total_ms": total, "server_ms": metrics.get("response_ms"),
-                        "transport_ms": total - metrics["response_ms"] if metrics else None,
-                        # Uplink + end-of-turn wait, then reply start -> heard (downlink).
-                        "to_transcript_ms": transcript_at - ended if transcript_at else None,
-                        "after_transcript_ms": heard_at - transcript_at if transcript_at else None})
-        print(f"{transport} turn {turn + 1}: {total:.0f} ms heard after end of speech "
-              f"(server {metrics.get('response_ms')} ms, transcript at "
-              f"{results[-1]['to_transcript_ms'] or 0:.0f} ms)", file=sys.stderr)
-        await asyncio.sleep(1.2)  # The half-second reply finishes playing.
+        if not barge_in:
+            result["server_ms"] = metrics.get("response_ms")
+            result["transport_ms"] = (result["total_ms"] - metrics["response_ms"]
+                                      if metrics.get("response_ms") is not None else None)
+            # Uplink + end-of-turn wait, then reply start -> heard (downlink + TTS).
+            result["to_transcript_ms"] = transcript_at - ended if transcript_at else None
+            result["after_transcript_ms"] = heard_at - transcript_at if transcript_at else None
+        results.append(result)
+        print(f"{transport} turn {turn + 1}: " + ", ".join(
+            f"{key} {value:.0f}" for key, value in result.items() if value is not None),
+            file=sys.stderr)
+        # Let the reply finish playing: its captions say how long its audio is.
+        audio_s = sum(e.get("seconds", 0) for e in events if e["type"] == "caption")
+        now = await page.evaluate("performance.now()")
+        reply_heard = (transcript_at or now) + audio_s * 1000
+        await asyncio.sleep(max(0.0, (reply_heard - now) / 1000) + 1.0)
     stats = await page.evaluate("window.__harness.stats()")
     await page.click("#call")
     await page.close()
@@ -335,7 +388,9 @@ def summary(name: str, values: list[float]) -> str:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--url", help="A running server; default: a local stub server")
-    parser.add_argument("--wav", help="Mono 16-bit utterance (default: a 1 s tone; real STT needs words)")
+    parser.add_argument("--clips", help="Directory of mono 16-bit WAV utterances "
+                                        "(default: a 1 s tone; real speech recognition needs words)")
+    parser.add_argument("--barge-in", action="store_true", help="Speak over each reply")
     parser.add_argument("--transport", choices=["webrtc", "ws", "both"], default="both")
     parser.add_argument("--turns", type=int, default=10)
     parser.add_argument("--loss", type=float, default=0.0, help="Local server only: RTP loss share")
@@ -353,7 +408,8 @@ async def main(args: argparse.Namespace) -> None:
         port = free_port()
         server = await start_stub(port, args.loss)
         base = f"http://127.0.0.1:{port}"
-    utterance = load_wav(args.wav) if args.wav else tone()
+    utterances = ([load_wav(path) for path in sorted(Path(args.clips).glob("*.wav"))]
+                  if args.clips else [tone()])
     transports = ["webrtc", "ws"] if args.transport == "both" else [args.transport]
     try:
         async with async_playwright() as playwright:
@@ -365,14 +421,19 @@ async def main(args: argparse.Namespace) -> None:
             except Exception:
                 browser = await playwright.chromium.launch(**launch)
             for transport in transports:
-                results = await run_transport(browser, base, transport, args.turns, utterance)
+                results = await run_transport(browser, base, transport, args.turns, utterances,
+                                              args.barge_in)
                 print(summary(f"{transport} end of speech -> reply heard",
                               [r["total_ms"] for r in results]))
+                if args.barge_in:
+                    print(summary(f"{transport} barge-in: speech start -> interrupt on the page",
+                                  [r["barge_in_ms"] for r in results if r.get("barge_in_ms") is not None]))
+                    continue
+                print(summary(f"{transport} server response (from its own end of speech)",
+                              [r["server_ms"] for r in results if r["server_ms"] is not None]))
                 if not args.url:
                     print(summary(f"{transport} transport only (total - server response)",
                                   [r["transport_ms"] for r in results if r["transport_ms"] is not None]))
-                    print(summary(f"{transport} server response (incl. end-of-turn wait)",
-                                  [r["server_ms"] for r in results if r["server_ms"] is not None]))
                 for key in ("to_transcript_ms", "after_transcript_ms"):
                     print(summary(f"{transport} {key}", [r[key] for r in results if r[key] is not None]))
             await browser.close()

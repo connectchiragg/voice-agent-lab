@@ -14,7 +14,7 @@ from fastapi.testclient import TestClient
 
 from app import ice, main, webrtc
 from app.webrtc import FRAME_S, Downsampler, LowDelayAudioBuffer, Peer, SpeechTrack
-from tests.test_pipeline import fake_engines
+from tests.test_pipeline import FakeListener, FakeSpeaker, make_engines
 
 RATE = 24000
 FRAME = RATE // 50
@@ -378,9 +378,37 @@ def test_turn_failure_is_a_clear_503(monkeypatch):
     assert response.status_code == 503 and "relay" in response.json()["detail"]
 
 
+class EnergyListener(FakeListener):
+    """Flux stand-in: a turn starts on loud audio and ends after 200 ms of quiet."""
+    speaking, quiet = False, 0
+
+    async def send(self, pcm, arrived=None):
+        await super().send(pcm, arrived)
+        loud = np.abs(np.frombuffer(pcm, "<i2")).max() > 3000
+        if loud:
+            self.quiet = 0
+            if not self.speaking:
+                self.speaking = True
+                await self.emit("StartOfTurn", "what's")
+        elif self.speaking:
+            self.quiet += len(pcm) // 2
+            if self.quiet >= 3200:
+                self.speaking = False
+                await self.emit("EndOfTurn", "what's up", speech_ended=arrived)
+
+
+class ToneSpeaker(FakeSpeaker):
+    """Aura stand-in with a tone: Opus does not carry the fake's constant level."""
+    async def synthesize(self, text):
+        self.segments.append(text)
+        times = np.arange(6000) / RATE
+        yield (0.25 * np.sin(2 * np.pi * 300 * times)).astype(np.float32)
+
+
 @pytest.fixture
 def engines(monkeypatch):
-    engines, seen = fake_engines()
+    engines, seen = make_engines()
+    engines.new_listener, engines.new_speaker = EnergyListener, ToneSpeaker
     monkeypatch.setattr(main.app.state, "engines", engines, raising=False)
     monkeypatch.setattr(main.app.state, "webrtc_peers", set(), raising=False)
 
@@ -435,11 +463,6 @@ class ToneTrack(MediaStreamTrack):
 
 def test_a_real_peer_connection_hears_a_turn_and_receives_the_reply(engines):
     """End to end on localhost: aiortc as the browser, the real route, fake models."""
-    async def tone(text):
-        return (0.25 * np.sin(2 * np.pi * 300 * np.arange(6000) / RATE)).astype(np.float32)
-
-    main.app.state.engines.synthesize = tone
-
     async def scenario():
         browser = RTCPeerConnection()
         browser.addTrack(ToneTrack())
@@ -482,5 +505,29 @@ def test_a_real_peer_connection_hears_a_turn_and_receives_the_reply(engines):
     types, peer = run(scenario())
     assert types[:3] == ["ready", "partial", "transcript"]
     assert "caption" in types and "metrics" in types and types[-1] == "reply_end"
-    assert engines["replies"] and engines["replies"][0][1] == "what's up"
+    assert engines["replies"] == ["what's up"]
     assert peer.close_reason in ("data channel closed", "connection closed")
+
+
+def test_refused_speech_service_closes_the_peer_with_a_clear_503(engines):
+    class RefusedListener(FakeListener):
+        async def start(self):
+            raise ConnectionError("402")
+
+    main.app.state.engines.new_listener = RefusedListener
+
+    async def scenario():
+        browser = RTCPeerConnection()
+        browser.addTransceiver("audio")
+        browser.createDataChannel("control")
+        await browser.setLocalDescription(await browser.createOffer())
+        transport = httpx.ASGITransport(app=main.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post("/webrtc/offer", json={
+                "type": "offer", "sdp": browser.localDescription.sdp, "echo_cancelled": True})
+        await browser.close()
+        return response
+
+    response = run(scenario())
+    assert response.status_code == 503 and "speech service" in response.json()["detail"]
+    assert main.app.state.webrtc_peers == set()

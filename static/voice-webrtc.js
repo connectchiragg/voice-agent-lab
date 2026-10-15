@@ -23,8 +23,9 @@ function addLine(role, text) {
   return line;
 }
 
-// Reveal a spoken piece word by word across its audio. The server says when
-// its first sample will be heard here; words already due appear at once.
+// Reveal a spoken segment word by word across its audio. The caption follows
+// its audio; the server says when that audio's first sample is (or was) heard
+// here, so words already due appear at once.
 function scheduleCaption(caption) {
   const line = assistantLine ??= addLine("assistant", "");
   const words = caption.text.split(/\s+/).filter(Boolean);
@@ -119,7 +120,9 @@ function handleEvent(current, message) {
   } else if (message.type === "notice") {
     addLine("notice", message.text);
   } else if (message.type === "metrics") {
-    metrics.textContent = `Response ${message.response_ms} ms = end of turn ${message.endpoint_ms} + STT ${message.stt_ms} + LLM first token ${message.llm_first_token_ms} (${message.llm_model}) + TTS ${message.tts_first_audio_ms} (+ overhead); speech to turn end ${message.heard_to_decided_ms} ms; speculative ${message.speculative}`;
+    // LLM first token counts from Flux's end of turn: negative when a
+    // speculative reply (started at the eager end of turn) was committed.
+    metrics.textContent = `Response ${message.response_ms} ms = end of turn ${message.endpoint_ms} + LLM first token ${message.llm_first_token_ms} (${message.llm_model}) + TTS ${message.tts_first_audio_ms} (+ overhead); speculative ${message.speculative}${message.eager_lead_ms === null ? "" : `, eager lead ${message.eager_lead_ms} ms`}`;
   } else if (message.type === "error") {
     endCall(current);
     status.textContent = message.error;
