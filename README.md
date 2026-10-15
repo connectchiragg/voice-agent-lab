@@ -10,7 +10,7 @@ mic (16 kHz PCM) -> Deepgram Flux (STT + turn detection) -> LLM -> Deepgram Aura
 |---|---|---|
 | STT and turn detection | Deepgram Flux (`flux-general-en`), streaming WebSocket | Deepgram, India region |
 | LLM | gpt-oss-120b, low reasoning (open weights); gpt-oss-20b hedge | Groq free tier |
-| TTS | Deepgram Aura-2 (`aura-2-thalia-en`), streaming WebSocket | Deepgram, India region |
+| TTS | Deepgram Aura-2 (`aura-2-odysseus-en`), streaming WebSocket | Deepgram, India region |
 
 English only. Speech moved from local open-weight models (Silero VAD, Smart Turn,
 Nemotron streaming STT, Kokoro TTS) to Deepgram on 2026-10-15; that stack and

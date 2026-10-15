@@ -85,7 +85,7 @@ def test_urls_carry_the_documented_parameters_and_never_the_key():
     assert "eot_threshold=0.7" in flux and "eager_eot_threshold=0.4" in flux
     assert "eot_timeout_ms=3000" in flux
     aura = SETTINGS.aura_url()
-    assert aura == ("wss://api.example.test/v1/speak?model=aura-2-thalia-en&encoding=linear16"
+    assert aura == ("wss://api.example.test/v1/speak?model=aura-2-odysseus-en&encoding=linear16"
                     "&sample_rate=24000")
     assert "test-key" not in flux + aura
     assert SETTINGS.headers == {"Authorization": "Token test-key"}
@@ -249,7 +249,7 @@ def test_aura_streams_a_segment_until_flushed():
     async def scenario():
         speaker = AuraSpeaker(SETTINGS, connect)
         await speaker.start()
-        socket.push({"type": "Metadata", "request_id": "r", "model_name": "aura-2-thalia-en"})
+        socket.push({"type": "Metadata", "request_id": "r", "model_name": "aura-2-odysseus-en"})
         audio = await collect(speaker, "**Hello** there.")
         second = await collect(speaker, "Again.")
         await speaker.close()

@@ -76,7 +76,7 @@ class DeepgramSettings:
     # Deepgram's India region. From the Mumbai VM (2026-10-15): Aura first byte
     # 71 ms vs 290 ms and Flux EndOfTurn ~200 ms sooner than api.deepgram.com.
     host: str = "api.in.deepgram.com"
-    voice: str = "aura-2-thalia-en"
+    voice: str = "aura-2-odysseus-en"
     eot_threshold: float = 0.7
     eager_eot_threshold: float | None = 0.4  # None: no EagerEndOfTurn, no speculation.
     eot_timeout_ms: int = 3000

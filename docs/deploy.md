@@ -285,7 +285,7 @@ To roll back, run the same `docker rm -f` and `docker run` with the rollback tag
 | `GROQ_API_KEY` | (required) | LLM; set it only at run time, never in the image |
 | `DEEPGRAM_API_KEY` | (required) | Speech (Flux and Aura-2); run time only |
 | `DEEPGRAM_HOST` | `api.in.deepgram.com` | Deepgram region; `api.deepgram.com` (US) or `api.eu.deepgram.com` elsewhere |
-| `DEEPGRAM_VOICE` | `aura-2-thalia-en` | Any English Aura-2 voice |
+| `DEEPGRAM_VOICE` | `aura-2-odysseus-en` | Any English Aura-2 voice |
 | `FLUX_EOT_THRESHOLD`, `FLUX_EAGER_EOT_THRESHOLD`, `FLUX_EOT_TIMEOUT_MS` | `0.7`, `0.4`, `3000` | Flux end of turn: confidence for EndOfTurn, for EagerEndOfTurn (empty disables it and speculation), and the silence that forces EndOfTurn |
 | `GROQ_LLM_MODEL`, `GROQ_LLM_REASONING` | see `.env.example` | LLM choice |
 | `LLM_FALLBACK_MODEL` | `openai/gpt-oss-20b` | Hedge for a stalled or rate-limited LLM request; empty disables it |
