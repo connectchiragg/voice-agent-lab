@@ -55,7 +55,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from fastapi import APIRouter, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from app import g711
+from app import g711, memory
 from app.pipeline import Call, Engines, Samples
 from app.transport import SpeechUnavailable, open_call
 
@@ -373,12 +373,20 @@ class PhoneSession:
         await self.drained()
 
 
+@dataclass(frozen=True)
+class PendingCall:
+    """An answered call whose media stream has not connected yet."""
+    call_control_id: str
+    deadline: float  # monotonic
+    caller_key: str | None = None  # memory.caller_key_from_phone of `from`; never logged.
+
+
 @dataclass
 class Switchboard:
     """Phone calls on this server: answered calls awaiting their stream, and live ones."""
     settings: TelnyxSettings
     control: CallControl
-    pending: dict[str, tuple[str, float]] = field(default_factory=dict)  # token -> (call, deadline)
+    pending: dict[str, PendingCall] = field(default_factory=dict)  # By one-time stream token.
     live: set[str] = field(default_factory=set)
     seen: deque[str] = field(default_factory=lambda: deque(maxlen=1000))  # Webhook ids handled.
     tasks: set[asyncio.Task[None]] = field(default_factory=set)
@@ -397,15 +405,17 @@ class Switchboard:
     @property
     def calls(self) -> int:
         now = time.monotonic()
-        return len(self.live) + sum(1 for _, deadline in self.pending.values() if deadline > now)
+        return len(self.live) + sum(1 for call in self.pending.values() if call.deadline > now)
 
-    async def incoming(self, call_control_id: str, event_id: str) -> None:
+    async def incoming(self, call_control_id: str, event_id: str,
+                       caller_key: str | None = None) -> None:
         if self.calls >= self.settings.max_calls:
             logger.info("Phone call rejected: %d calls in progress", self.calls)
             await self.control.reject(call_control_id, event_id)
             return
         token = secrets.token_urlsafe(24)
-        self.pending[token] = (call_control_id, time.monotonic() + CONNECT_TIMEOUT_S)
+        self.pending[token] = PendingCall(call_control_id, time.monotonic() + CONNECT_TIMEOUT_S,
+                                          caller_key)
         if not await self.control.answer(call_control_id, f"{self.settings.stream_url}?token={token}",
                                          event_id):
             self.pending.pop(token, None)
@@ -416,13 +426,13 @@ class Switchboard:
             logger.warning("Phone call media stream never connected; hanging up")
             await self.control.hangup(call_control_id)
 
-    def claim(self, token: str) -> str | None:
+    def claim(self, token: str) -> PendingCall | None:
         """The call this one-time stream token was issued for, if still valid."""
-        call_control_id, deadline = self.pending.pop(token, ("", 0.0))
-        if not call_control_id or deadline < time.monotonic():
+        call = self.pending.pop(token, None)
+        if call is None or call.deadline < time.monotonic():
             return None
-        self.live.add(call_control_id)
-        return call_control_id
+        self.live.add(call.call_control_id)
+        return call
 
 
 router = APIRouter()
@@ -470,7 +480,9 @@ async def webhook(request: Request) -> dict[str, bool]:
         return {"ok": True}  # A retry of something already handled.
     call_control_id = str(payload.get("call_control_id", ""))
     if kind == "call.initiated" and payload.get("direction") == "incoming" and call_control_id:
-        board.spawn(board.incoming(call_control_id, event_id))
+        # The caller's number becomes their memory key here and is never logged.
+        caller_key = memory.caller_key_from_phone(payload.get("from"))
+        board.spawn(board.incoming(call_control_id, event_id, caller_key))
     elif kind == "streaming.failed" and call_control_id:
         logger.warning("Telnyx media stream failed: %s", payload.get("failure_reason"))
         board.spawn(hang_up(board, call_control_id))
@@ -500,10 +512,11 @@ async def wait_for_start(socket: WebSocket) -> StartMessage:
 @router.websocket("/ws/telnyx")
 async def media_stream(socket: WebSocket, token: str = "") -> None:
     board = board_of(socket.app)
-    call_control_id = board.claim(token) if board is not None else None
-    if board is None or call_control_id is None:
+    pending = board.claim(token) if board is not None else None
+    if board is None or pending is None:
         await socket.close(code=1008)  # Refused before accepting: HTTP 403.
         return
+    call_control_id = pending.call_control_id
     await socket.accept()
     engines: Engines | None = getattr(socket.app.state, "phone_engines", None)
     send_lock = asyncio.Lock()
@@ -529,8 +542,11 @@ async def media_stream(socket: WebSocket, token: str = "") -> None:
             return
         # Echo: the carrier cancels line echo, and only the caller's track is
         # streamed to us, so barge-in stays on (unlike a browser without AEC).
-        session.call = await open_call(engines, session.send, str(uuid4()), barge_in=True)
-        logger.info("Phone call connected")
+        session.call = await open_call(engines, session.send, str(uuid4()), barge_in=True,
+                                       caller_id=pending.caller_key)
+        logger.info("Phone call connected (%s caller)",
+                    "identified" if pending.caller_key else "anonymous")
+        session.call.greet()  # The assistant speaks first; barge-in can cut it.
         time_limit = asyncio.create_task(end_at_time_limit(session, board.settings.max_call_s))
         reader = asyncio.create_task(read_stream(socket, session))
         tasks += [asyncio.create_task(session.pump()), time_limit, reader]

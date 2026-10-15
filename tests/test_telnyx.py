@@ -19,8 +19,8 @@ from starlette.websockets import WebSocketDisconnect
 
 from app import g711, main, telnyx
 from app.deepgram import DeepgramSettings
-from app.telnyx import (CallControl, PhoneSession, Playout, Switchboard, TelnyxSettings,
-                        signature_valid)
+from app.telnyx import (CallControl, PendingCall, PhoneSession, Playout, Switchboard,
+                        TelnyxSettings, signature_valid)
 from tests.test_app import TalkingListener
 from tests.test_pipeline import make_engines
 
@@ -150,6 +150,8 @@ def test_incoming_call_is_answered_with_a_bidirectional_pcmu_stream(board):
         assert path == f"/v2/calls/{CALL_ID}/actions/answer" and auth == "Bearer test-key"
         token = body.pop("stream_url").removeprefix(STREAM_URL + "?token=")
         assert len(token) >= 32 and token in board.pending
+        # The caller's number travels with the token as their memory key.
+        assert board.pending[token].caller_key == "tel:+15550001111"
         assert body == {"stream_track": "inbound_track", "stream_codec": "PCMU",
                         "stream_bidirectional_mode": "rtp", "stream_bidirectional_codec": "PCMU",
                         "command_id": "evt-1"}
@@ -339,7 +341,7 @@ def test_stream_needs_a_valid_one_time_token(board, phone_engines):
 
 
 def test_phone_call_hears_a_turn_and_replies_in_mulaw_with_marks(board, phone_engines):
-    board.pending["tok"] = (CALL_ID, time.monotonic() + 5)
+    board.pending["tok"] = PendingCall(CALL_ID, time.monotonic() + 5)
     with TestClient(main.app).websocket_connect("/ws/telnyx?token=tok") as socket:
         socket.send_json({"event": "connected", "version": "1.0.0"})
         socket.send_json(start_message())
@@ -368,7 +370,7 @@ def test_stream_for_another_call_or_codec_is_refused_and_hung_up(board, phone_en
     client = TestClient(main.app)
     for token, start in (("a", start_message("v3:someone-else")),
                          ("b", start_message(encoding="L16", rate=16000))):
-        board.pending[token] = (CALL_ID, time.monotonic() + 5)
+        board.pending[token] = PendingCall(CALL_ID, time.monotonic() + 5)
         with client.websocket_connect(f"/ws/telnyx?token={token}") as socket:
             socket.send_json(start)
             with pytest.raises(WebSocketDisconnect) as error:
@@ -381,7 +383,7 @@ def test_stream_for_another_call_or_codec_is_refused_and_hung_up(board, phone_en
 def test_time_limit_says_goodbye_then_hangs_up(board, phone_engines, monkeypatch):
     board.settings = TelnyxSettings(api_key="test-key", public_key=board.settings.public_key,
                                     stream_url=STREAM_URL, max_call_s=0, max_calls=1)
-    board.pending["tok"] = (CALL_ID, time.monotonic() + 5)
+    board.pending["tok"] = PendingCall(CALL_ID, time.monotonic() + 5)
     with TestClient(main.app).websocket_connect("/ws/telnyx?token=tok") as socket:
         socket.send_json(start_message())
         audio = b""
@@ -397,3 +399,45 @@ def test_time_limit_says_goodbye_then_hangs_up(board, phone_engines, monkeypatch
     assert phone_engines["replies"] == []  # Nothing heard after the limit is answered.
     wait_for(lambda: len(board.requests) == 1)
     assert board.requests[0][0] == f"/v2/calls/{CALL_ID}/actions/hangup"
+
+
+def test_the_caller_key_reaches_open_call_and_the_greeting_plays_first(board, phone_engines,
+                                                                       monkeypatch, caplog):
+    engines = main.app.state.phone_engines
+    callers, stored = [], []
+
+    async def begin_call(conversation_id, caller_id):
+        callers.append(caller_id)
+
+    async def record_greeting(conversation_id, text, status):
+        stored.append((text, status))
+    engines.begin_call = begin_call
+    engines.greeting = lambda conversation_id: "Hi Asha, this is Cadence. How can I help?"
+    engines.record_greeting = record_greeting
+    board.pending["tok"] = PendingCall(CALL_ID, time.monotonic() + 5, "tel:+15550001111")
+    with caplog.at_level("INFO", logger="uvicorn.error"):
+        with TestClient(main.app).websocket_connect("/ws/telnyx?token=tok") as socket:
+            socket.send_json(start_message())
+            audio, marks = b"", 0
+            while marks < 8:  # The greeting: one fake Aura segment, before the caller speaks.
+                message = socket.receive_json()
+                if message["event"] == "media":
+                    audio += base64.b64decode(message["media"]["payload"])
+                elif message["event"] == "mark":
+                    marks += 1
+                    socket.send_json({"event": "mark", "mark": {"name": message["mark"]["name"]}})
+            socket.send_json({"event": "stop", "stop": {"call_control_id": CALL_ID}})
+    assert callers == ["tel:+15550001111"]
+    assert phone_engines["speakers"][0].segments == ["Hi Asha, this is Cadence. How can I help?"]
+    assert phone_engines["replies"] == []  # No LLM for the greeting.
+    assert len(audio) > 0 and stored == [("Hi Asha, this is Cadence. How can I help?", "completed")]
+    assert "15550001111" not in caplog.text and "identified caller" in caplog.text
+
+
+def test_an_anonymous_or_withheld_number_has_no_caller_key(board):
+    with webhook_client(board) as client:
+        event = call_initiated("evt-9")
+        event["data"]["payload"]["from"] = "anonymous"
+        post_event(client, event)
+        wait_for(lambda: len(board.pending) == 1)
+        assert next(iter(board.pending.values())).caller_key is None

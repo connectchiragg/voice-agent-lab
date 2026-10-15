@@ -12,7 +12,7 @@ import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import aclosing
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Literal, Protocol
 
 import numpy as np
 from numpy.typing import NDArray
@@ -124,6 +124,10 @@ def nothing_to_remember(conversation_id: str) -> None:
     """Default for engines without caller memory: nothing to store."""
 
 
+async def forget_greeting(conversation_id: str, text: str, status: str) -> None:
+    """Default for engines without history: nothing to record."""
+
+
 @dataclass
 class Engines:
     """Everything a call needs, injected so tests can replace any stage."""
@@ -144,6 +148,12 @@ class Engines:
     # and must return at once (it hands any work to a background task).
     begin_call: Callable[[str, str | None], Awaitable[None]] = no_caller_memory
     end_call: Callable[[str], None] = nothing_to_remember
+    # Speaking first (phone calls, see Call.greet): the fixed greeting for a call
+    # (conversation_id), and how to store what of it was heard (conversation_id,
+    # text, "completed" or "interrupted"). None: the caller speaks first.
+    greeting: Callable[[str], str] | None = None
+    record_greeting: Callable[[str, str, Literal["completed", "interrupted"]],
+                              Awaitable[None]] = forget_greeting
 
 
 def heard_text(spoken: list[tuple[str, float]], played_s: float) -> str:
@@ -334,6 +344,7 @@ class Call:
         self.partial = ""  # Live text last shown to the browser.
         self.speculation: Speculation | None = None
         self.speculations = 0  # Started during the current turn.
+        self.greeting: str | None = None  # Being spoken; not yet stored.
 
     async def start(self) -> None:
         """Open the Deepgram sockets, and load the caller's memory meanwhile.
@@ -342,6 +353,38 @@ class Call:
         """
         await asyncio.gather(self.listener.start(), self.speaker.start(),
                              self.engines.begin_call(self.conversation_id, self.caller_id))
+
+    def greet(self) -> None:
+        """Speak the engines' greeting before the caller says anything.
+
+        Fixed text (no LLM), spoken through the same speaker as any reply, so
+        barge-in interrupts it the same way. It is stored as an assistant
+        message: whole once synthesized, or only what was heard if interrupted.
+        """
+        if self.engines.greeting is None or self.assistant_busy:
+            return
+        text = self.engines.greeting(self.conversation_id)
+        self.greeting, self.spoken, self.current = text, [], None
+        self.reply_task = asyncio.create_task(self.say_greeting(text))
+
+    async def say_greeting(self, text: str) -> None:
+        reply_text = ReplyText()
+        reply_text.push(text)
+        reply_text.finish()
+        await self.speak(reply_text)
+        self.greeting = None
+        self.history_task = asyncio.create_task(
+            self.engines.record_greeting(self.conversation_id, text, "completed"))
+        await self.send({"type": "reply_end"})
+
+    async def record_heard_greeting(self, spoken: list[tuple[str, float]]) -> None:
+        assert self.played is not None
+        try:
+            played_s = await asyncio.wait_for(asyncio.shield(self.played), self.played_report_timeout_s)
+        except TimeoutError:
+            played_s = 0.0
+        if heard := heard_text(spoken, played_s):
+            await self.engines.record_greeting(self.conversation_id, heard, "interrupted")
 
     @property
     def assistant_busy(self) -> bool:
@@ -433,11 +476,14 @@ class Call:
             await asyncio.gather(self.reply_task, return_exceptions=True)
         self.playing = False
         user_text, spoken = self.user_text, self.spoken + ([self.current] if self.current else [])
-        self.user_text, self.spoken, self.current = None, [], None
+        greeting = self.greeting
+        self.user_text, self.spoken, self.current, self.greeting = None, [], None, None
         self.played = asyncio.get_running_loop().create_future()
         await self.send({"type": "interrupt"})
         if user_text is not None:
             self.history_task = asyncio.create_task(self.record_heard(user_text, spoken))
+        elif greeting is not None:
+            self.history_task = asyncio.create_task(self.record_heard_greeting(spoken))
 
     async def record_heard(self, user_text: str, spoken: list[tuple[str, float]]) -> None:
         assert self.played is not None
@@ -530,7 +576,7 @@ class Call:
             metrics.first_token(first_at or time.perf_counter())
             reply_text.push(delta)
 
-    async def speak(self, reply_text: ReplyText, metrics: TurnMetrics) -> None:
+    async def speak(self, reply_text: ReplyText, metrics: TurnMetrics | None = None) -> None:
         """Stream each segment's audio to the browser as Aura produces it.
 
         A segment's caption (text and exact audio length) follows its audio;
@@ -552,7 +598,8 @@ class Call:
                             continue
                         now = time.perf_counter()
                         if first:
-                            metrics.tts_first_audio_ms = (now - started) * 1000
+                            if metrics is not None:
+                                metrics.tts_first_audio_ms = (now - started) * 1000
                         elif playhead is not None and now > playhead:
                             gaps_s += now - playhead
                         playhead = max(playhead or now, now) + len(audio) / rate
@@ -561,9 +608,13 @@ class Call:
                         await self.send(audio.astype("<f4").tobytes())
                         if first:
                             first = False
-                            payload = metrics.to_payload(time.perf_counter())
-                            logger.info("Turn latency: %s", payload)
-                            await self.send(payload)
+                            if metrics is None:  # The greeting: no user turn to time.
+                                logger.info("Greeting: first audio after %.0f ms",
+                                            (now - started) * 1000)
+                            else:
+                                payload = metrics.to_payload(time.perf_counter())
+                                logger.info("Turn latency: %s", payload)
+                                await self.send(payload)
             except Exception as error:
                 logger.warning("Speech synthesis failed: %s", type(error).__name__)
             self.current = None

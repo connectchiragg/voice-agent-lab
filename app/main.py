@@ -60,7 +60,8 @@ def load_engines(sample_rate: int | None = None) -> Engines | None:
                    may_speculate=lambda: not groq_api.near_rate_limit(),
                    begin_call=memory.begin_call,
                    end_call=lambda conversation_id: memory.end_call(conversation_id,
-                                                                    agent.load_history))
+                                                                    agent.load_history),
+                   greeting=memory.greeting, record_greeting=agent.record_greeting)
 
 
 async def watch_event_loop(interval_s: float = 0.1, threshold_s: float = 0.25) -> None:

@@ -513,3 +513,79 @@ def test_caller_memory_loads_beside_the_sockets_and_is_handed_off_after_close():
         await call.close()
     asyncio.run(scenario())
     assert events[-1] == ("ended", "call-1")
+
+
+def greeting_engines():
+    engines, seen = make_engines()
+    stored = []
+
+    async def record_greeting(conversation_id, text, status):
+        stored.append((conversation_id, text, status))
+
+    engines.greeting = lambda conversation_id: "Hi Asha, this is Cadence. How can I help?"
+    engines.record_greeting = record_greeting
+    return engines, seen, stored
+
+
+def test_the_greeting_is_spoken_first_without_the_llm_and_stored():
+    engines, seen, stored = greeting_engines()
+
+    async def scenario():
+        sent = []
+        call, flux = await start_call(engines, sent)
+        call.greet()
+        await call.reply_task
+        await call.history_task
+        # The caller's first turn is answered after it, with the greeting in history.
+        await flux.emit("StartOfTurn", "hi")
+        await flux.emit("EndOfTurn", "what's the weather")
+        await finish(call)
+        return sent
+
+    events = events_of(asyncio.run(scenario()))
+    assert seen["replies"] == ["what's the weather"]  # The greeting itself asked no LLM.
+    # One segment: the whole greeting is known, so it is synthesized at once.
+    assert [e["text"] for e in events if e["type"] == "caption"][0] == (
+        "Hi Asha, this is Cadence. How can I help?")
+    assert stored == [("call-1", "Hi Asha, this is Cadence. How can I help?", "completed")]
+    assert events.index({"type": "reply_end"}) < [e["type"] for e in events].index("transcript")
+    assert not any(e["type"] == "metrics" for e in events[:events.index({"type": "reply_end"})])
+
+
+def test_barge_in_cuts_the_greeting_and_stores_only_what_was_heard():
+    engines, seen, stored = greeting_engines()
+
+    async def scenario():
+        sent = []
+        call, flux = await start_call(engines, sent)
+        call.speaker.hold = asyncio.Event()
+        call.greet()
+        await wait_until(lambda: call.current is not None and call.current[1] > 0)
+        call.set_playing(True)
+        greeting = call.reply_task
+        await flux.emit("StartOfTurn", "sorry")  # Barge-in during the greeting.
+        assert greeting.cancelled() and call.speaker.abandoned == [
+            "Hi Asha, this is Cadence. How can I help?"]
+        call.speaker.hold = None
+        call.report_played(0.06)  # 0.06 of the 0.125 s received: five of nine words.
+        await flux.emit("EndOfTurn", "sorry, who is this")
+        await finish(call)
+        return sent
+
+    events = events_of(asyncio.run(scenario()))
+    assert {"type": "interrupt"} in events
+    assert stored == [("call-1", "Hi Asha, this is Cadence....", "interrupted")]
+    assert seen["replies"] == ["sorry, who is this"]
+
+
+def test_without_a_greeting_the_caller_speaks_first():
+    engines, _ = make_engines()
+
+    async def scenario():
+        sent = []
+        call, _ = await start_call(engines, sent)
+        call.greet()
+        assert call.reply_task is None
+        await call.close()
+        return sent
+    assert asyncio.run(scenario()) == []
