@@ -32,7 +32,7 @@ def test_refresh_tokens_are_stored_encrypted():
 
 def test_consent_asks_only_for_gmail_readonly_offline():
     url = google_oauth.consent_url(SETTINGS, "s")
-    assert "gmail.readonly" in url and "access_type=offline" in url and "prompt=consent" in url
+    assert "gmail.readonly" in url and "calendar.readonly" in url and "access_type=offline" in url and "prompt=consent" in url
     assert "login_hint=owner%40example.com" in url and "gmail.send" not in url
 
 

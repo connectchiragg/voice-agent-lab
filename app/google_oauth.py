@@ -4,7 +4,7 @@ One-time consent, behind Cloudflare Access on the VALR host:
 
 1. The owner opens `/oauth/google/start` (valr.haciensus.com). The app checks the
    Access JWT (and, with VALR_OWNER_EMAILS set, that it is the owner) and redirects to
-   Google's consent screen for `gmail.readonly` only, offline access, with a signed,
+   Google's consent screen for `gmail.readonly` and `calendar.readonly` only, offline access, with a signed,
    expiring `state`.
 2. Google redirects to `/oauth/google/callback` (GOOGLE_OAUTH_REDIRECT_URI). The code
    is exchanged for tokens; only the refresh token is kept, encrypted (Fernet, key
@@ -37,7 +37,9 @@ from cryptography.fernet import Fernet, InvalidToken
 AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 USERINFO_URL = "https://gmail.googleapis.com/gmail/v1/users/me/profile"
-SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
+GMAIL_SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
+CALENDAR_SCOPE = "https://www.googleapis.com/auth/calendar.readonly"
+SCOPES = (GMAIL_SCOPE, CALENDAR_SCOPE)  # One consent: read mail (R1) and the calendar (sync).
 PROVIDER = "google_gmail"
 STATE_TTL_S = 900
 SCHEMA = """
@@ -125,7 +127,7 @@ def check_state(token_key: str, state: str, now: float | None = None) -> bool:
 
 def consent_url(settings: OAuthSettings, state: str) -> str:
     params = {"client_id": settings.client_id, "redirect_uri": settings.redirect_uri,
-              "response_type": "code", "scope": SCOPE, "access_type": "offline",
+              "response_type": "code", "scope": " ".join(SCOPES), "access_type": "offline",
               "prompt": "consent", "include_granted_scopes": "false", "state": state}
     if settings.account:
         params["login_hint"] = settings.account
@@ -145,8 +147,9 @@ async def exchange_code(settings: OAuthSettings, code: str,
     if not refresh or not access:
         raise ValueError("Google returned no refresh token; remove the app's access in the "
                          "Google account and connect again")
-    if SCOPE not in scope.split():
-        raise ValueError("gmail.readonly was not granted")
+    missing = [name.rsplit("/", 1)[1] for name in SCOPES if name not in scope.split()]
+    if missing:
+        raise ValueError(f"not granted: {', '.join(missing)} (tick every box on the consent screen)")
     profile = await http.get(USERINFO_URL, headers={"Authorization": f"Bearer {access}"})
     account = str(profile.json().get("emailAddress", "")).lower() if profile.status_code == 200 else ""
     return refresh, scope, account
