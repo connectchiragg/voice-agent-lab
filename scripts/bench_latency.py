@@ -266,7 +266,7 @@ def main() -> None:
     parser.add_argument("--models", type=Path, default=Path(os.getenv("MODELS_DIR", ".cache/models")))
     parser.add_argument("--kokoro", type=Path, help="Kokoro ONNX file (default: the app's KOKORO_MODEL)")
     parser.add_argument("--voice", default=os.getenv("KOKORO_VOICE", "af_heart"))
-    parser.add_argument("--schedule", default="6,12", help="SpeechChunker word schedule")
+    parser.add_argument("--schedule", default="3,5,7,10,14", help="SpeechChunker word schedule")
     parser.add_argument("--audio-dir", type=Path, help="Extra name.wav + name.txt utterances")
     parser.add_argument("--save-wavs", type=Path, help="Write each synthesized piece here")
     parser.add_argument("--roundtrip", action="store_true", help="Transcribe TTS pieces with Nemotron")

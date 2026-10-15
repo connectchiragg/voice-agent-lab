@@ -145,19 +145,30 @@ def stream_words(text):
 def test_chunker_grows_pieces_and_prefers_natural_boundaries():
     text = ("Sure thing, Coorg is lovely in winter. It is about five hours away, "
             "so most people stay a night or two. The coffee estates are worth a visit. Want tips?")
-    assert chunk_all(stream_words(text)) == [
+    assert chunk_all(stream_words(text), schedule=(6, 12)) == [
         "Sure thing, Coorg is lovely in winter.",     # Sentence end within 6 + 3 words.
         "It is about five hours away,",               # Clause end in piece two.
         "so most people stay a night or two.",        # Sentences from here on.
         "The coffee estates are worth a visit.",
         "Want tips?",
     ]
+    assert chunk_all(stream_words(text))[:2] == [  # Default: a short first piece.
+        "Sure thing,",                                # Forced cut at a two-word clause.
+        "Coorg is lovely in winter.",
+    ]
 
 
 def test_chunker_cuts_long_openers_without_dangling_words():
     text = "Heading out to the Western Ghats for the weekend is a great plan for you."
-    pieces = chunk_all(stream_words(text))
+    pieces = chunk_all(stream_words(text), schedule=(6, 12))
     assert pieces[0] == "Heading out to the Western Ghats"  # Not "...Ghats for".
+    assert " ".join(pieces) == text
+
+
+def test_chunker_short_first_piece_never_ends_on_a_dangling_word():
+    text = "It is a lovely day for a long walk by the river with friends."
+    pieces = chunk_all(stream_words(text), schedule=(3, 10))
+    assert pieces[0] == "It is a lovely"  # Trimming would leave "It is"; extend instead.
     assert " ".join(pieces) == text
 
 

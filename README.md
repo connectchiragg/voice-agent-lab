@@ -44,7 +44,7 @@ How a call flows (`app/pipeline.py`):
    ends. `Call.respond` hands it to the LangGraph agent, which
    (`app/agent.py`) streams the reply from Groq and checkpoints history.
 4. `SpeechChunker` cuts streamed text into pieces that grow over the reply
-   (about 6 words, then 12, then whole sentences) at natural boundaries, and
+   (about 3 words, then 5, 7, 10, 14, then whole sentences) at natural boundaries, and
    Kokoro synthesizes each while the previous one plays.
 5. Audio goes back in 200 ms packets; the browser plays them gap-free.
 

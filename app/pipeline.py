@@ -169,17 +169,20 @@ DANGLING = frozenset("a an the to of for in on at by with from and or but nor so
 class SpeechChunker:
     """Cut streamed LLM text into pieces for TTS, growing them over the reply.
 
-    Kokoro costs ~240 ms plus ~0.22 s per second of speech, so a short first
-    piece starts audio sooner. Each later piece is synthesized while the
-    previous one plays, so it may be longer; after the schedule, pieces are
-    whole sentences for the most natural prosody.
+    Kokoro costs ~240 ms plus ~0.22 s per second of speech on an M2, but about
+    0.7 s per second on one AWS core, so a short first piece starts audio
+    sooner. Each later piece is synthesized while the previous one plays, so it
+    may only grow by about the inverse of that ratio, or the listener hears a
+    gap. On that core (3, 5, 7, 10, 14) cut first-piece time by ~200 ms and
+    estimated gaps by two thirds against (6, 12); (3, 10) made gaps worse.
+    After the schedule, pieces are whole sentences for the most natural prosody.
 
     Within a piece's word budget (plus a little lookahead) we cut at the first
     sentence end, or a clause end once a few words are in. With no boundary,
     we cut at the budget, never on a dangling word like "the" or "for".
     """
 
-    def __init__(self, schedule: tuple[int, ...] = (6, 12), sentence_cap: int = 30,
+    def __init__(self, schedule: tuple[int, ...] = (3, 5, 7, 10, 14), sentence_cap: int = 30,
                  lookahead: int = 3, min_clause_words: int = 3) -> None:
         self.text = ""
         self.pieces = 0
@@ -224,14 +227,24 @@ class SpeechChunker:
         return words[-1].end() if final else None
 
     def forced_cut(self, words: list[re.Match[str]], budget: int) -> int:
-        """No natural boundary in reach: prefer the last clause end, else trim danglers."""
-        for index in range(budget, self.min_clause_words - 1, -1):
+        """No natural boundary in reach: prefer the last clause end, else trim danglers.
+
+        Here a two-word clause ("Sure thing,") still beats cutting mid-phrase.
+        """
+        for index in range(budget, 1, -1):
             if CLAUSE_END.search(words[index - 1].group(0).strip()):
                 return words[index - 1].end()
         index = budget
-        while index > 2 and words[index - 1].group(0).strip().lower() in DANGLING:
+        while index > 2 and self.dangling(words[index - 1]):
             index -= 1
+        # Short budgets can run out of words to trim ("It is a"): extend instead.
+        while self.dangling(words[index - 1]) and index < len(words):
+            index += 1
         return words[index - 1].end()
+
+    @staticmethod
+    def dangling(word: re.Match[str]) -> bool:
+        return word.group(0).strip().lower() in DANGLING
 
 
 class Transcriber(SpeechListener, Protocol):
