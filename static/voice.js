@@ -5,10 +5,11 @@ const messages = document.querySelector("#messages");
 const metrics = document.querySelector("#metrics");
 let assistantLine = null;
 let userLine = null;  // The live transcript line while the user is speaking.
-let pendingCaption = null;  // Caption whose audio has not been queued yet.
+let segmentStart = null;  // When the audio of the segment being received starts playing.
 const captionTimers = new Set();
 
-// Reveal a spoken piece word by word across its audio, starting when it plays.
+// Reveal a spoken segment word by word across its audio, starting when it plays.
+// The caption arrives after its audio, so words already due appear at once.
 function scheduleCaption(player, caption, startTime) {
   const line = assistantLine ??= addLine("assistant", "");
   const words = caption.text.split(/\s+/).filter(Boolean);
@@ -26,7 +27,7 @@ function scheduleCaption(player, caption, startTime) {
 function cancelCaptions() {
   captionTimers.forEach(clearTimeout);
   captionTimers.clear();
-  pendingCaption = null;
+  segmentStart = null;
 }
 
 function addLine(role, text) {
@@ -84,10 +85,7 @@ async function startCall() {
       try {
         if (typeof event.data !== "string") {
           const startTime = current.player.enqueue(event.data);
-          if (pendingCaption && startTime !== null) {
-            scheduleCaption(current.player, pendingCaption, startTime);
-            pendingCaption = null;
-          }
+          segmentStart ??= startTime;
           return;
         }
         const message = JSON.parse(event.data);
@@ -126,7 +124,7 @@ async function startCall() {
           }
           userLine = null;
           assistantLine = null;
-          pendingCaption = null;
+          segmentStart = null;
           current.player.markReply();
         } else if (message.type === "interrupt") {
           // Barge-in: stop speaking now and tell the server how much was heard.
@@ -136,15 +134,16 @@ async function startCall() {
           assistantLine?.classList.add("interrupted");
           assistantLine = null;
         } else if (message.type === "caption") {
-          pendingCaption = message;
+          scheduleCaption(current.player, message, segmentStart ?? current.player.context.currentTime);
+          segmentStart = null;
         } else if (message.type === "reply_end") {
           // Captions may still be revealing; the next transcript starts a new line.
         } else if (message.type === "notice") {
           addLine("notice", message.text);
         } else if (message.type === "metrics") {
-          // LLM first token counts from the final transcript: negative when a
-          // speculative reply (started from the live text) was committed.
-          metrics.textContent = `Response ${message.response_ms} ms = end of turn ${message.endpoint_ms} + STT ${message.stt_ms} + LLM first token ${message.llm_first_token_ms} (${message.llm_model}) + TTS ${message.tts_first_audio_ms} (+ overhead); speech to turn end ${message.heard_to_decided_ms} ms; speculative ${message.speculative}`;
+          // LLM first token counts from Flux's end of turn: negative when a
+          // speculative reply (started at the eager end of turn) was committed.
+          metrics.textContent = `Response ${message.response_ms} ms = end of turn ${message.endpoint_ms} + LLM first token ${message.llm_first_token_ms} (${message.llm_model}) + TTS ${message.tts_first_audio_ms} (+ overhead); speculative ${message.speculative}${message.eager_lead_ms === null ? "" : `, eager lead ${message.eager_lead_ms} ms`}`;
         } else if (message.type === "error") {
           endCall(current);
           status.textContent = message.error;

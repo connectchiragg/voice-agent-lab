@@ -5,9 +5,9 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "voice-agent-lab"
 version = "0.1.0"
-description = "A cascaded, open-weight voice agent: VAD and turn detection, STT, LLM, TTS."
+description = "A cascaded voice agent: Deepgram Flux (STT and turns), an open-weight LLM on Groq, Deepgram Aura-2 (TTS)."
 requires-python = ">=3.11"
-dependencies = ["fastapi>=0.115,<1", "uvicorn[standard]>=0.30,<1", "groq>=1.7,<2", "numpy>=2,<3", "onnxruntime>=1.20,<2", "kokoro-onnx>=0.4,<0.5", "sherpa-onnx>=1.13,<2", "python-dotenv>=1,<2", "psycopg[binary]>=3.2,<4", "langgraph>=1,<2", "langgraph-checkpoint-postgres>=3,<4"]
+dependencies = ["fastapi>=0.115,<1", "uvicorn[standard]>=0.30,<1", "groq>=1.7,<2", "numpy>=2,<3", "websockets>=15,<17", "python-dotenv>=1,<2", "psycopg[binary]>=3.2,<4", "langgraph>=1,<2", "langgraph-checkpoint-postgres>=3,<4"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8,<10", "httpx>=0.27,<1"]

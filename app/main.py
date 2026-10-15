@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import Annotated, Literal
 from uuid import uuid4
 
-import numpy as np
 from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
@@ -16,45 +15,25 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
 from app import agent, groq_api
-from app.pipeline import Call, Engines, ReplyEvent, ReplyModel, Samples, TurnDetector
+from app.deepgram import OUTPUT_SAMPLE_RATE, AuraSpeaker, DeepgramSettings, FluxListener
+from app.pipeline import Call, Engines, ReplyEvent, ReplyModel
 
 ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT / ".env")
 logger = logging.getLogger("uvicorn.error")
-# Kokoro weights: fp32 "kokoro-v1.0.onnx" or the same release's int8 / fp16 exports.
-KOKORO_MODEL = os.getenv("KOKORO_MODEL", "kokoro-v1.0.onnx")
-# Start the LLM from the live transcript while STT finalises (see Call); 0 disables it.
+# Start the LLM from Flux's EagerEndOfTurn transcript (see Call); 0 disables it.
 SPECULATIVE_LLM = os.getenv("SPECULATIVE_LLM", "1") == "1"
-MODEL_FILES = ("silero_vad.onnx", "smart-turn-v3.2-cpu.onnx", KOKORO_MODEL, "voices-v1.0.bin",
-               "sherpa-onnx-nemotron-speech-streaming-en-0.6b-160ms-int8-2026-04-25/encoder.int8.onnx")
 
 
-def load_engines() -> Engines:
-    """Load local models once per process; each call gets its own VAD and STT stream."""
-    import threading
-
-    from app.stt import MODEL_DIR, StreamingTranscriber, load_recognizer
-    from app.tts import OUTPUT_SAMPLE_RATE, KokoroVoice
-    from app.turn import SmartTurn
-    from app.vad import SileroVad, load_session
-
-    models = Path(os.getenv("MODELS_DIR", ROOT / ".cache/models"))
-    missing = [name for name in MODEL_FILES if not (models / name).is_file()]
-    if missing:
-        raise RuntimeError(f"Missing models in {models}: {', '.join(missing)}. "
-                           "Run scripts/download-models.sh first.")
-    vad_session = load_session(str(models / "silero_vad.onnx"))
-    turn = SmartTurn(load_session(str(models / "smart-turn-v3.2-cpu.onnx")))
-    voice = KokoroVoice(str(models / KOKORO_MODEL), str(models / "voices-v1.0.bin"),
-                        os.getenv("KOKORO_VOICE", "af_heart"))
-    recognizer = load_recognizer(str(models / MODEL_DIR), int(os.getenv("STT_THREADS", "2")))
-    recognizer_lock = threading.Lock()
-    # Warm up so the first real turn does not pay one-off initialisation costs.
-    turn.completion_probability(np.zeros(16000, dtype=np.float32))
-    voice.synthesize("Hello.")
-    warm = StreamingTranscriber(recognizer, recognizer_lock)
-    warm.on_speech_start(np.zeros(16000, dtype=np.float32))
-    warm.on_speech_end()
+def load_engines() -> Engines | None:
+    """Deepgram Flux (STT) and Aura-2 (TTS) per call; None without an API key."""
+    if not os.getenv("DEEPGRAM_API_KEY"):
+        logger.warning("DEEPGRAM_API_KEY is not set; calls are refused.")
+        return None
+    settings = DeepgramSettings.from_env()
+    logger.info("Deepgram %s: Flux eot %.2f, eager %s, timeout %d ms; voice %s", settings.host,
+                settings.eot_threshold, settings.eager_eot_threshold, settings.eot_timeout_ms,
+                settings.voice)
 
     async def reply(conversation_id: str, text: str,
                     committed: asyncio.Event | None = None) -> AsyncIterator[ReplyEvent]:
@@ -64,16 +43,12 @@ def load_engines() -> Engines:
             elif event["type"] == "model":
                 yield ReplyModel(event["model"])
 
-    async def synthesize(text: str) -> Samples:
-        return await asyncio.to_thread(voice.synthesize, text)
-
-    return Engines(new_transcriber=lambda: StreamingTranscriber(recognizer, recognizer_lock),
-                   new_detector=lambda listener: TurnDetector(SileroVad(vad_session), turn,
-                                                             listener=listener),
-                   reply=reply, synthesize=synthesize,
-                   record_interruption=agent.record_interruption,
+    speculate = SPECULATIVE_LLM and settings.eager_eot_threshold is not None
+    return Engines(new_listener=lambda on_event: FluxListener(settings, on_event),
+                   new_speaker=lambda: AuraSpeaker(settings),
+                   reply=reply, record_interruption=agent.record_interruption,
                    output_sample_rate=OUTPUT_SAMPLE_RATE,
-                   speculate=reply if SPECULATIVE_LLM else None,
+                   speculate=reply if speculate else None,
                    may_speculate=lambda: not groq_api.near_rate_limit())
 
 
@@ -90,7 +65,7 @@ async def watch_event_loop(interval_s: float = 0.1, threshold_s: float = 0.25) -
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    app.state.engines = await asyncio.to_thread(load_engines)
+    app.state.engines = load_engines()
     watcher = asyncio.create_task(watch_event_loop())
     try:
         async with groq_api.shared_groq_client(), agent.lifespan(app):
@@ -135,8 +110,8 @@ async def home() -> FileResponse:
 
 @app.get("/healthz")
 async def health() -> dict[str, bool]:
-    """Liveness for container hosts; answers only after startup has loaded the models."""
-    return {"ok": True, "models_loaded": getattr(app.state, "engines", None) is not None}
+    """Liveness for container hosts; `speech` is false without a Deepgram key."""
+    return {"ok": True, "speech": getattr(app.state, "engines", None) is not None}
 
 
 @app.websocket("/ws/voice")
@@ -157,12 +132,20 @@ async def voice(socket: WebSocket) -> None:
         async with asyncio.timeout(15):
             settings = CallSettings.model_validate_json(await socket.receive_text())
         if engines is None:
-            await send({"type": "error", "error": "Voice models are not loaded."})
+            await send({"type": "error", "error": "Speech services are not configured."})
             return
         if not settings.echo_cancelled:
             logger.warning("No browser echo cancellation; barge-in disabled for this call.")
         # Without echo cancellation the assistant's own voice would interrupt it.
         call = Call(engines, send, str(uuid4()), barge_in=settings.echo_cancelled)
+        try:
+            await call.start()  # Opens the Flux and Aura sockets for this call.
+        except Exception as error:
+            # A refused handshake carries Deepgram's HTTP status (401 key, 402 credit).
+            status = getattr(getattr(error, "response", None), "status_code", None)
+            logger.warning("Deepgram connection failed: %s %s", type(error).__name__, status or "")
+            await send({"type": "error", "error": "The speech service is unavailable. Try again later."})
+            return
         await send({"type": "ready", "sample_rate": engines.output_sample_rate,
                     "encoding": "pcm_f32le"})
         while True:

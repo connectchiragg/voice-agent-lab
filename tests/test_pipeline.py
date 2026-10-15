@@ -1,196 +1,168 @@
-"""Turn detection, sentence chunking and the per-call reply flow, with fake models."""
+"""Reply segmentation and the per-call flow driven by Flux turn events, with fake Deepgram stages."""
 import asyncio
 
 import numpy as np
 import pytest
 
-from app import pipeline
-from app.pipeline import (Call, Engines, ReplyModel, SpeechChunker, TurnDetector, decode_pcm,
-                          heard_text)
-from app.vad import CHUNK
+from app.deepgram import TurnEvent
+from app.pipeline import Call, Engines, ReplyModel, ReplyText, decode_pcm, heard_text, same_words
 
-LOUD, QUIET = 0.3, 0.0
+SEGMENT_SAMPLES = 6000  # Each fake segment: two 3000-sample chunks, 0.25 s at 24 kHz.
 
 
-class LevelVad:
-    """Treat any chunk with a loud sample as speech."""
-    def probability(self, chunk):
-        return 1.0 if np.abs(chunk).max() > 0.1 else 0.0
+class FakeListener:
+    """Stands in for Flux: records the audio sent; tests emit turn events by hand."""
+    def __init__(self, on_event):
+        self.on_event = on_event
+        self.audio, self.closed = [], False
 
-    def reset(self):
+    async def start(self):
+        pass
+
+    async def send(self, pcm, arrived=None):
+        self.audio.append((pcm, arrived))
+
+    async def close(self):
+        self.closed = True
+
+    async def emit(self, kind, text="", speech_ended=None):
+        import time
+        await self.on_event(TurnEvent(kind, text, received=time.perf_counter(),
+                                      speech_ended=speech_ended))
+
+
+class FakeSpeaker:
+    """Stands in for Aura: each segment yields two chunks; `hold` pauses after the first."""
+    def __init__(self, hold=None):
+        self.segments, self.abandoned, self.hold = [], [], hold
+
+    async def start(self):
+        pass
+
+    async def synthesize(self, text):
+        self.segments.append(text)
+        finished = False
+        try:
+            yield np.full(SEGMENT_SAMPLES // 2, 0.25, dtype=np.float32)
+            if self.hold is not None:
+                await self.hold.wait()
+            yield np.full(SEGMENT_SAMPLES // 2, 0.25, dtype=np.float32)
+            finished = True
+        finally:
+            if not finished:
+                self.abandoned.append(text)  # Aura would get a Clear here.
+
+    async def close(self):
         pass
 
 
-class FixedTurn:
-    def __init__(self, completion):
-        self.completion = completion
-        self.calls = 0
+def make_engines(reply=("Hi there. ", "All good!"), speculative=None, allowed=True,
+                 record_interruption=None):
+    seen = {"replies": [], "speculations": [], "closed": [], "speakers": []}
+    hold_speculation = asyncio.Event()
 
-    def completion_probability(self, samples):
-        self.calls += 1
-        return self.completion
+    async def generate(conversation_id, text):
+        seen["replies"].append(text)
+        for delta in reply:
+            await asyncio.sleep(0)
+            yield delta
 
+    async def speculate(conversation_id, text, committed):
+        seen["speculations"].append(text)
+        try:
+            for delta in speculative:
+                yield delta
+            await hold_speculation.wait()  # Stays open like a stream still generating.
+        finally:
+            seen["closed"].append(committed.is_set())
 
-def chunks(level, count):
-    return np.full(CHUNK * count, level, dtype=np.float32)
+    def new_speaker():
+        seen["speakers"].append(FakeSpeaker())
+        return seen["speakers"][-1]
 
-
-def detector(completion=0.9, listener=None):
-    return TurnDetector(LevelVad(), FixedTurn(completion), start_ms=96, pause_ms=192,
-                        max_pause_ms=960, preroll_ms=128, listener=listener)
-
-
-class FakeTranscriber:
-    """Streams the first word as a partial, then finalises the next scripted transcript.
-
-    `live` scripts the live text at the end of each turn (default: the final text).
-    """
-    def __init__(self, transcripts, live=None):
-        self.transcripts, self.partial, self.final_ms, self.events = list(transcripts), None, 7.0, []
-        self.live, self.text = list(live or transcripts), ""
-
-    def on_speech_start(self, preroll):
-        self.events.append(("start", len(preroll)))
-        self.partial = self.transcripts[0].split()[0] if self.transcripts[0].split() else None
-        self.text = self.live.pop(0) if len(self.live) > 1 else self.live[0]
-
-    def on_speech(self, samples):
-        self.events.append(("audio", len(samples)))
-
-    def on_speech_end(self, silence_s):
-        self.events.append(("end",))
-        self.partial = None
-        return self.transcripts.pop(0) if len(self.transcripts) > 1 else self.transcripts[0]
-
-    def on_discard(self):
-        self.events.append(("discard",))
-        self.partial = None
-
-    def take_partial(self):
-        partial, self.partial = self.partial, None
-        return partial
+    engines = Engines(new_listener=FakeListener, new_speaker=new_speaker, reply=generate,
+                      speculate=speculate if speculative is not None else None,
+                      may_speculate=lambda: allowed)
+    if record_interruption is not None:
+        engines.record_interruption = record_interruption
+    seen["release"] = hold_speculation
+    return engines, seen
 
 
-def test_listener_follows_each_utterance_from_preroll_to_final_text():
-    listener = FakeTranscriber(["hello there"])
-    turns = detector(listener=listener)
-    turns.feed(chunks(QUIET, 10))
-    turns.feed(chunks(LOUD, 20))
-    (utterance,) = turns.feed(chunks(QUIET, 6))
-    assert listener.events[0] == ("start", CHUNK * 4)  # The pre-roll, voiced start included.
-    assert listener.events[-1] == ("end",)
-    assert sum(n for kind, *n in listener.events if kind == "audio" for n in n) == CHUNK * (17 + 6)
-    assert (utterance.text, utterance.stt_ms) == ("hello there", 7.0)
-    turns.feed(chunks(LOUD, 10))
-    turns.discard()
-    assert listener.events[-1] == ("discard",)
+async def start_call(engines, sent, **options):
+    async def send(data):
+        sent.append(data)
+
+    call = Call(engines, send, "call-1", **options)
+    await call.start()
+    return call, call.listener
 
 
-def test_confident_turn_ends_after_short_pause():
-    turns = detector(0.9)
-    assert turns.feed(chunks(QUIET, 10)) == []
-    assert turns.feed(chunks(LOUD, 20)) == []
-    assert turns.speaking
-    (utterance,) = turns.feed(chunks(QUIET, 6))
-    assert utterance.completion == 0.9
-    assert utterance.pause_ms == pytest.approx(6 * 32)
-    # Pre-roll (4 chunks, ending with the voiced ones) + 20 voiced - 3 already in pre-roll + 6 silent.
-    assert len(utterance.audio) == CHUNK * (4 + 17 + 6)
-    assert not turns.speaking
+async def finish(call):
+    if call.reply_task:
+        await call.reply_task
+    await call.close()
 
 
-def test_incomplete_turn_waits_for_more_speech_or_timeout():
-    turn_model = FixedTurn(0.1)
-    turns = TurnDetector(LevelVad(), turn_model, start_ms=96, pause_ms=192, max_pause_ms=960)
-    turns.feed(chunks(LOUD, 10))
-    assert turns.feed(chunks(QUIET, 6)) == []  # "I'd like to book a table for..."
-    turns.feed(chunks(LOUD, 5))  # Speech resumes: same turn.
-    assert turns.speaking
-    assert turns.feed(chunks(QUIET, 29)) == []
-    (utterance,) = turns.feed(chunks(QUIET, 1))
-    assert utterance.completion is None  # Ended by the 960 ms timeout.
-    assert turn_model.calls == 2
+async def wait_until(condition):
+    for _ in range(1000):
+        if condition():
+            return
+        await asyncio.sleep(0)
+    raise AssertionError("condition never became true")
 
 
-def test_short_noise_does_not_start_a_turn():
-    turns = detector()
-    turns.feed(np.concatenate([chunks(LOUD, 2), chunks(QUIET, 20)]))
-    assert not turns.speaking
+def events_of(sent):
+    return [item for item in sent if isinstance(item, dict)]
 
 
-def test_audio_is_buffered_across_uneven_packets():
-    turns = detector()
-    audio = np.concatenate([chunks(LOUD, 20), chunks(QUIET, 6)])
-    found = []
-    for start in range(0, len(audio), 1600):  # 100 ms browser packets.
-        found += turns.feed(audio[start:start + 1600])
-    assert len(found) == 1
+def run_turn(engines, transcript="what's up"):
+    async def scenario():
+        import time
+        sent = []
+        call, flux = await start_call(engines, sent)
+        await flux.emit("StartOfTurn", "what's")
+        await flux.emit("Update", "what's")  # Unchanged text is not resent.
+        await flux.emit("EndOfTurn", transcript, speech_ended=time.perf_counter() - 0.3)
+        await finish(call)
+        return sent
+    return asyncio.run(scenario())
 
 
-def test_discard_drops_partial_turn():
-    turns = detector()
-    turns.feed(chunks(LOUD, 10))
-    turns.discard()
-    assert not turns.speaking
-    assert turns.feed(chunks(QUIET, 10)) == []
+def test_reply_text_cuts_whole_sentences_and_merges_what_is_ready():
+    text = ReplyText()
+    for delta in ("Sure", " thing, Coorg is lovely", ". It is five", " hours away. Want"):
+        text.push(delta)
+    assert text.take() == "Sure thing, Coorg is lovely. It is five hours away."
+    assert text.take() == ""  # "Want" may continue.
+    text.push(" tips?")
+    assert text.take() == ""  # No space after "?" yet: the sentence may go on ("?!").
+    text.finish()
+    assert text.take() == "Want tips?"
+    assert text.take() == ""
 
 
-def chunk_all(deltas, **options):
-    chunker = SpeechChunker(**options)
-    pieces = []
-    for delta in deltas:
-        pieces += chunker.push(delta)
-    return pieces + chunker.flush()
+def test_reply_text_does_not_cut_decimals_and_caps_run_ons():
+    text = ReplyText(max_words=6)
+    text.push("It is 3.5 km")
+    assert text.take() == ""
+    text.push(" away from here, past the old bridge and then")
+    assert text.take() == "It is 3.5 km away from here,"  # The last clause end within the cap.
+    text.push(" left at the temple gate near the market ")
+    assert text.take() == "past the old bridge and then left at the temple gate near the market"
 
 
-def stream_words(text):
-    """Deliver text the way an LLM does: small deltas that split words."""
-    return [text[i:i + 3] for i in range(0, len(text), 3)]
-
-
-def test_chunker_grows_pieces_and_prefers_natural_boundaries():
-    text = ("Sure thing, Coorg is lovely in winter. It is about five hours away, "
-            "so most people stay a night or two. The coffee estates are worth a visit. Want tips?")
-    assert chunk_all(stream_words(text), schedule=(6, 12)) == [
-        "Sure thing, Coorg is lovely in winter.",     # Sentence end within 6 + 3 words.
-        "It is about five hours away,",               # Clause end in piece two.
-        "so most people stay a night or two.",        # Sentences from here on.
-        "The coffee estates are worth a visit.",
-        "Want tips?",
-    ]
-    assert chunk_all(stream_words(text))[:2] == [  # Default: a short first piece.
-        "Sure thing,",                                # Forced cut at a two-word clause.
-        "Coorg is lovely in winter.",
-    ]
-
-
-def test_chunker_cuts_long_openers_without_dangling_words():
-    text = "Heading out to the Western Ghats for the weekend is a great plan for you."
-    pieces = chunk_all(stream_words(text), schedule=(6, 12))
-    assert pieces[0] == "Heading out to the Western Ghats"  # Not "...Ghats for".
-    assert " ".join(pieces) == text
-
-
-def test_chunker_short_first_piece_never_ends_on_a_dangling_word():
-    text = "It is a lovely day for a long walk by the river with friends."
-    pieces = chunk_all(stream_words(text), schedule=(3, 10))
-    assert pieces[0] == "It is a lovely"  # Trimming would leave "It is"; extend instead.
-    assert " ".join(pieces) == text
-
-
-def test_chunker_waits_for_partial_words_and_flushes_the_rest():
-    chunker = SpeechChunker()
-    assert chunker.push("Hello there") == []          # "there" may be incomplete.
-    assert chunker.push(". How") == ["Hello there."]
-    assert chunker.flush() == ["How"]
-    assert chunker.flush() == []
-
-
-def test_chunker_caps_run_on_sentences():
-    words = " ".join(f"word{i}" for i in range(80))
-    pieces = chunk_all([words], schedule=(), sentence_cap=30, lookahead=3)
-    assert all(len(piece.split()) <= 30 for piece in pieces)
-    assert " ".join(pieces) == words
+def test_next_segment_waits_for_text_and_ends_with_the_reply():
+    async def scenario():
+        text = ReplyText()
+        waiting = asyncio.create_task(text.next_segment())
+        await asyncio.sleep(0)
+        assert not waiting.done()
+        text.push("Hello there. ")
+        assert await waiting == "Hello there."
+        text.finish()
+        assert await text.next_segment() is None
+    asyncio.run(scenario())
 
 
 def test_decode_pcm_rejects_bad_packets():
@@ -200,99 +172,66 @@ def test_decode_pcm_rejects_bad_packets():
             decode_pcm(bad)
 
 
-def fake_engines(transcript="what's up", reply=("Hi there. ", "All good!"), tts_samples=6000):
-    seen = {"replies": []}
+def test_microphone_audio_goes_to_flux_as_linear16_with_its_arrival_time():
+    engines, _ = make_engines()
 
-    async def generate(conversation_id, text):
-        seen["replies"].append((conversation_id, text))
-        for delta in reply:
-            await asyncio.sleep(0)
-            yield delta
+    async def scenario():
+        call, flux = await start_call(engines, [])
+        await call.hear(np.array([0.5, -1.0, 2.0], "<f4").tobytes())
+        await call.close()
+        return flux
 
-    async def synthesize(text):
-        return np.full(tts_samples, 0.25, dtype=np.float32)
-
-    return Engines(new_transcriber=lambda: FakeTranscriber([transcript]),
-                   new_detector=lambda listener: detector(listener=listener),
-                   reply=generate, synthesize=synthesize), seen
-
-
-def speech_then_pause():
-    return [packet.tobytes() for packet in np.split(
-        np.concatenate([chunks(LOUD, 20), chunks(QUIET, 10)]).astype("<f4"), 30)]
+    flux = asyncio.run(scenario())
+    ((pcm, arrived),) = flux.audio
+    assert np.frombuffer(pcm, "<i2").tolist() == [16383, -32767, 32767]
+    assert arrived > 0
+    assert flux.closed
 
 
-async def run_call(engines, packets, playing=None):
-    sent = []
-
-    async def send(data):
-        sent.append(data)
-
-    call = Call(engines, send, "call-1")
-    if playing is not None:
-        call.set_playing(playing)
-    for packet in packets:
-        await call.hear(packet)
-    if call.reply_task:
-        await call.reply_task
-    await call.close()
-    return sent
-
-
-def test_finished_turn_is_transcribed_answered_and_spoken():
-    engines, seen = fake_engines()
-    sent = asyncio.run(run_call(engines, speech_then_pause()))
-    events = [item for item in sent if isinstance(item, dict)]
-    audio = b"".join(item for item in sent if isinstance(item, bytes))
-    assert events[0] == {"type": "partial", "text": "what's"}  # Live words while speaking.
+def test_finished_turn_is_answered_and_spoken_with_captions_after_audio():
+    engines, seen = make_engines()
+    sent = run_turn(engines)
+    events = events_of(sent)
+    assert events[0] == {"type": "partial", "text": "what's"}
     assert events[1] == {"type": "transcript", "text": "what's up"}
-    # Each spoken piece is captioned just before its own audio.
+    assert seen["replies"] == ["what's up"]
+    # The first sentence is its own segment; the rest arrives while it is spoken.
+    assert seen["speakers"][0].segments == ["Hi there.", "All good!"]
     captions = [e for e in events if e["type"] == "caption"]
-    assert [c["text"] for c in captions] == ["Hi there.", "All good!"]
-    assert all(c["seconds"] == 0.25 for c in captions)
+    assert [(c["text"], c["seconds"]) for c in captions] == [("Hi there.", 0.25), ("All good!", 0.25)]
     first_caption = sent.index(captions[0])
-    assert isinstance(sent[first_caption + 1], bytes)
+    assert isinstance(sent[first_caption - 1], bytes)  # Each caption follows its audio.
     assert events[-1] == {"type": "reply_end"}
     (metrics,) = [e for e in events if e["type"] == "metrics"]
-    assert metrics["endpoint_ms"] == round(6 * 32)
-    assert metrics["stt_ms"] == 7
-    # Two spoken pieces, each 6000 samples, sent in 200 ms (4800-sample) packets.
-    assert len(audio) == 2 * 6000 * 4
-    assert max(len(item) for item in sent if isinstance(item, bytes)) == pipeline.OUTPUT_PACKET_SAMPLES * 4
-    assert seen["replies"] == [("call-1", "what's up")]
+    assert 290 <= metrics["endpoint_ms"] <= 2000  # Speech ended 0.3 s before EndOfTurn.
+    assert metrics["response_ms"] >= metrics["endpoint_ms"]
+    assert metrics["speculative"] == "skipped" and metrics["eager_lead_ms"] is None
+    audio = b"".join(item for item in sent if isinstance(item, bytes))
+    assert len(audio) == 2 * SEGMENT_SAMPLES * 4
 
 
-def test_silence_or_empty_transcript_does_not_reply():
-    engines, seen = fake_engines(transcript="  ")
-    sent = asyncio.run(run_call(engines, speech_then_pause()))
-    assert sent == [{"type": "partial", "text": ""}]  # Only clears the live line.
+def test_empty_transcript_does_not_reply():
+    engines, seen = make_engines()
+    sent = run_turn(engines, transcript="  ")
+    assert events_of(sent)[-1] == {"type": "partial", "text": ""}  # Only clears the live line.
     assert seen["replies"] == []
 
 
-def test_short_sound_during_playback_does_not_interrupt():
-    engines, seen = fake_engines()
-    blip = np.concatenate([chunks(LOUD, 5), chunks(QUIET, 40)]).astype("<f4")  # 160 ms "mm-hmm"
-    sent = asyncio.run(run_call(engines, [p.tobytes() for p in np.split(blip, 45)], playing=True))
-    assert sent == []
-    assert seen["replies"] == []
-
-
-def test_barge_in_disabled_without_echo_cancellation():
-    engines, seen = fake_engines()
+def test_without_echo_cancellation_a_turn_during_playback_is_ignored():
+    engines, seen = make_engines()
 
     async def scenario():
         sent = []
-
-        async def send(data):
-            sent.append(data)
-
-        call = Call(engines, send, "call-1", barge_in=False)
+        call, flux = await start_call(engines, sent, barge_in=False)
         call.set_playing(True)
-        for packet in speech_then_pause():
-            await call.hear(packet)
+        await flux.emit("StartOfTurn", "hello")
+        await flux.emit("Update", "hello there")
+        call.set_playing(False)
+        await flux.emit("EndOfTurn", "hello there")
+        await finish(call)
         return sent
 
-    assert asyncio.run(scenario()) == []
+    assert asyncio.run(scenario()) == []  # No partials, no interrupt, no reply.
     assert seen["replies"] == []
 
 
@@ -305,63 +244,40 @@ def test_heard_text_keeps_only_what_was_played():
     assert heard_text(spoken, 9.0) == "Coorg is lovely. It is five hours away by road."
 
 
-async def wait_until(condition):
-    for _ in range(1000):
-        if condition():
-            return
-        await asyncio.sleep(0)
-    raise AssertionError("condition never became true")
-
-
-def test_barge_in_cancels_reply_records_heard_text_and_answers_new_turn():
-    recorded, calls = [], []
-    never = asyncio.Event()
-
-    async def reply(conversation_id, text):
-        calls.append(text)
-        if len(calls) == 1:
-            yield "First sentence here. "
-            await never.wait()  # Still generating when the user interrupts.
-        else:
-            yield "Okay."
-
-    async def synthesize(text):
-        return np.zeros(24000, dtype=np.float32)  # One second per piece.
+def test_barge_in_cancels_reply_clears_tts_records_heard_text_and_answers_new_turn():
+    recorded = []
 
     async def record_interruption(conversation_id, user_text, heard):
         recorded.append((conversation_id, user_text, heard))
 
-    engines = Engines(new_transcriber=lambda: FakeTranscriber(["what's up", "wait, stop"]),
-                      new_detector=lambda listener: detector(listener=listener),
-                      reply=reply, synthesize=synthesize, record_interruption=record_interruption)
+    engines, seen = make_engines(reply=("First sentence here. ", "Second one. "),
+                                 record_interruption=record_interruption)
 
     async def scenario():
         sent = []
-
-        async def send(data):
-            sent.append(data)
-
-        call = Call(engines, send, "call-1")
-        for packet in speech_then_pause():
-            await call.hear(packet)
-        await wait_until(lambda: call.spoken)
+        call, flux = await start_call(engines, sent)
+        speaker = call.speaker
+        speaker.hold = asyncio.Event()  # The segment's second chunk never arrives.
+        await flux.emit("StartOfTurn", "what's")
+        await flux.emit("EndOfTurn", "what's up")
+        await wait_until(lambda: call.current is not None and call.current[1] > 0)
         call.set_playing(True)
         first_reply = call.reply_task
-        for packet in speech_then_pause():
-            await call.hear(packet)
-            if {"type": "interrupt"} in sent and call.played is not None and not call.played.done():
-                call.report_played(0.5)  # The browser flushed after half a second.
+        speaker.hold = None
+        await flux.emit("StartOfTurn", "wait")  # Barge-in.
         assert first_reply.cancelled()
-        await call.reply_task
-        await call.close()
+        assert speaker.abandoned == ["First sentence here."]
+        call.report_played(0.05)  # The browser flushed after 50 ms.
+        await flux.emit("EndOfTurn", "wait, stop")
+        await finish(call)
         return sent
 
-    sent = asyncio.run(scenario())
-    events = [item for item in sent if isinstance(item, dict)]
+    events = events_of(asyncio.run(scenario()))
     types = [e["type"] for e in events]
     assert types.index("interrupt") < types.index("transcript", types.index("interrupt"))
+    # 0.05 of the 0.125 s received so far was played: the first two of three words.
     assert recorded == [("call-1", "what's up", "First sentence...")]
-    assert calls == ["what's up", "wait, stop"]
+    assert seen["replies"] == ["what's up", "wait, stop"]
     assert events[-1] == {"type": "reply_end"}
 
 
@@ -371,230 +287,203 @@ def test_missing_played_report_records_nothing_heard():
     async def record_interruption(conversation_id, user_text, heard):
         recorded.append(heard)
 
-    engines, _ = fake_engines()
-    engines.record_interruption = record_interruption
+    engines, _ = make_engines(record_interruption=record_interruption)
 
     async def scenario():
-        async def send(data):
-            pass
-
-        call = Call(engines, send, "call-1", played_report_timeout_s=0.01)
+        call, _ = await start_call(engines, [], played_report_timeout_s=0.01)
         call.user_text, call.spoken = "hello", [("Hi there.", 1.0)]
         call.set_playing(True)
         await call.interrupt()
         await call.history_task
+        await call.close()
 
     asyncio.run(scenario())
     assert recorded == [""]
 
 
 def test_llm_failure_still_speaks_what_was_generated():
-    engines, _ = fake_engines()
+    engines, _ = make_engines()
 
     async def failing(conversation_id, text):
         yield "Partial answer. "
         raise RuntimeError("provider dropped")
 
     engines.reply = failing
-    sent = asyncio.run(run_call(engines, speech_then_pause()))
-    events = [item for item in sent if isinstance(item, dict)]
+    events = events_of(run_turn(engines))
     assert {"type": "notice", "text": "Sorry, I lost my train of thought."} in events
-    assert any(isinstance(item, bytes) for item in sent)
+    assert [e["text"] for e in events if e["type"] == "caption"] == ["Partial answer."]
     assert events[-1] == {"type": "reply_end"}
 
 
 def test_same_words_ignores_case_punctuation_and_spacing():
-    assert pipeline.same_words("What's the weather in Mysuru?", "whats the  weather in mysuru")
-    assert not pipeline.same_words("What's the weather", "What's the weather in Mysuru?")
+    assert same_words("What's the weather in Mysuru?", "whats the  weather in mysuru")
+    assert not same_words("What's the weather", "What's the weather in Mysuru?")
 
 
-def speculative_engines(transcript="what's up", live=None, speculative=("Hi there. ", "All good!"),
-                        allowed=True):
-    """Engines whose speculative stream records whether it was committed or cancelled."""
-    seen = {"replies": [], "speculations": [], "closed": [], "committed_at_first_send": []}
-    hold = asyncio.Event()
-
-    async def reply(conversation_id, text):
-        seen["replies"].append(text)
-        yield "Fresh answer."
-
-    async def speculate(conversation_id, text, committed):
-        seen["speculations"].append(text)
-        try:
-            for delta in speculative:
-                yield delta
-            await hold.wait()  # Stays open like a stream still generating.
-        finally:
-            seen["closed"].append(committed.is_set())
-
-    async def synthesize(text):
-        return np.full(6000, 0.25, dtype=np.float32)
-
-    engines = Engines(new_transcriber=lambda: FakeTranscriber([transcript], live),
-                      new_detector=lambda listener: detector(listener=listener),
-                      reply=reply, synthesize=synthesize, speculate=speculate,
-                      may_speculate=lambda: allowed)
-    return engines, seen, hold
-
-
-def events_of(sent):
-    return [item for item in sent if isinstance(item, dict)]
-
-
-def test_matching_transcript_commits_the_buffered_speculative_reply():
-    engines, seen, hold = speculative_engines(live=["What's up?"])
+def test_eager_end_of_turn_reply_is_buffered_then_committed_at_end_of_turn():
+    engines, seen = make_engines(speculative=("Hi there. ", "All good!"))
 
     async def scenario():
         sent = []
-
-        async def send(data):
-            sent.append(data)
-
-        call = Call(engines, send, "call-1")
-        for packet in speech_then_pause():
-            await call.hear(packet)
-        await wait_until(lambda: call.spoken)  # Spoken while the stream is still open.
-        hold.set()
-        await call.reply_task
-        await call.close()
+        call, flux = await start_call(engines, sent)
+        await flux.emit("StartOfTurn", "What's")
+        await flux.emit("EagerEndOfTurn", "What's up?")
+        await wait_until(lambda: call.speculation.deltas)
+        assert not any(isinstance(item, bytes) for item in sent)  # Nothing spoken before the commit.
+        await flux.emit("EndOfTurn", "What's up?")
+        await wait_until(lambda: len(call.spoken) == 1)  # Spoken while the stream is still open.
+        seen["release"].set()
+        await finish(call)
         return sent
 
     events = events_of(asyncio.run(scenario()))
-    assert seen["speculations"] == ["What's up?"]  # Started from the live text.
+    assert seen["speculations"] == ["What's up?"]
     assert seen["replies"] == []  # No second LLM call.
-    types = [e["type"] for e in events]
-    assert types.index("transcript") < types.index("caption")  # Nothing spoken before the commit.
     assert [e["text"] for e in events if e["type"] == "caption"] == ["Hi there.", "All good!"]
     (metrics,) = [e for e in events if e["type"] == "metrics"]
-    assert metrics["speculative"] == "committed"
-    assert metrics["llm_first_token_ms"] <= 0  # Tokens arrived before the final transcript.
+    assert metrics["speculative"] == "committed" and metrics["speculations"] == 1
+    assert metrics["eager_lead_ms"] >= 0
+    assert metrics["llm_first_token_ms"] <= 0  # Tokens arrived before EndOfTurn.
     assert seen["closed"] == [True]
 
 
-def test_different_transcript_cancels_speculation_and_answers_the_final_text():
-    engines, seen, _ = speculative_engines(live=["what's"])
-    sent = asyncio.run(run_call(engines, speech_then_pause()))
-    events = events_of(sent)
-    assert seen["speculations"] == ["what's"]
-    assert seen["closed"] == [False]  # The speculative stream was closed uncommitted.
-    assert seen["replies"] == ["what's up"]
-    assert [e["text"] for e in events if e["type"] == "caption"] == ["Fresh answer."]
+def test_turn_resumed_cancels_the_speculation_and_the_next_eager_one_is_used():
+    engines, seen = make_engines(speculative=("Sure. ",))
+
+    async def scenario():
+        sent = []
+        call, flux = await start_call(engines, sent)
+        await flux.emit("StartOfTurn", "Which")
+        await flux.emit("EagerEndOfTurn", "Which is better?")
+        await wait_until(lambda: call.speculation.deltas)
+        await flux.emit("TurnResumed", "Which is better, Python")
+        await wait_until(lambda: seen["closed"])
+        assert seen["closed"] == [False]  # Closed uncommitted: its stream is gone.
+        await flux.emit("EagerEndOfTurn", "Which is better, Python or Java?")
+        await flux.emit("EndOfTurn", "Which is better, Python or Java?")
+        seen["release"].set()
+        await finish(call)
+        return sent
+
+    events = events_of(asyncio.run(scenario()))
+    assert seen["speculations"] == ["Which is better?", "Which is better, Python or Java?"]
+    assert seen["replies"] == []
     (metrics,) = [e for e in events if e["type"] == "metrics"]
-    assert metrics["speculative"] == "cancelled"
+    assert metrics["speculative"] == "committed" and metrics["speculations"] == 2
 
 
-def test_speaking_again_before_the_final_transcript_cancels_speculation():
-    engines, seen, _ = speculative_engines()
-    # The turn ends and speech resumes within one packet, before the transcript is handled.
-    packets = [chunks(LOUD, 20).astype("<f4").tobytes(),
-               np.concatenate([chunks(QUIET, 6), chunks(LOUD, 4)]).astype("<f4").tobytes()]
-    sent = asyncio.run(run_call(engines, packets))
-    assert seen["speculations"] == ["what's up"]
+def test_resumed_turn_without_a_new_eager_end_is_answered_afresh():
+    engines, seen = make_engines(speculative=("Sure. ",))
+
+    async def scenario():
+        sent = []
+        call, flux = await start_call(engines, sent)
+        await flux.emit("StartOfTurn", "Book")
+        await flux.emit("EagerEndOfTurn", "Book a table.")
+        await flux.emit("TurnResumed", "Book a table for four")
+        await flux.emit("EndOfTurn", "Book a table for four.")  # Ended by eot_timeout_ms.
+        await finish(call)
+        return sent
+
+    events = events_of(asyncio.run(scenario()))
+    assert seen["replies"] == ["Book a table for four."]
+    (metrics,) = [e for e in events if e["type"] == "metrics"]
+    assert metrics["speculative"] == "cancelled" and metrics["speculations"] == 1
+
+
+def test_different_final_words_cancel_the_speculation():
+    engines, seen = make_engines(speculative=("Sure. ",))
+
+    async def scenario():
+        sent = []
+        call, flux = await start_call(engines, sent)
+        await flux.emit("StartOfTurn", "what's")
+        await flux.emit("EagerEndOfTurn", "what's")
+        await flux.emit("EndOfTurn", "what's up")
+        await finish(call)
+        return sent
+
+    events = events_of(asyncio.run(scenario()))
     assert seen["closed"] == [False]
-    assert seen["replies"] == ["what's up"]  # The finished turn is still answered.
-    (metrics,) = [e for e in events_of(sent) if e["type"] == "metrics"]
-    assert metrics["speculative"] == "cancelled"
+    assert seen["replies"] == ["what's up"]
+    assert [e["text"] for e in events if e["type"] == "caption"] == ["Hi there.", "All good!"]
 
 
 def test_speculation_is_skipped_near_the_rate_limit():
-    engines, seen, _ = speculative_engines(allowed=False)
-    sent = asyncio.run(run_call(engines, speech_then_pause()))
-    assert seen["speculations"] == []
-    assert seen["replies"] == ["what's up"]
-    (metrics,) = [e for e in events_of(sent) if e["type"] == "metrics"]
-    assert metrics["speculative"] == "skipped"
-    assert metrics["heard_to_decided_ms"] >= 0
-
-
-def test_at_most_one_speculation_per_turn():
-    engines, seen, _ = speculative_engines()
+    engines, seen = make_engines(speculative=("Sure. ",), allowed=False)
 
     async def scenario():
-        async def send(data):
-            pass
+        sent = []
+        call, flux = await start_call(engines, sent)
+        await flux.emit("StartOfTurn", "hi")
+        await flux.emit("EagerEndOfTurn", "what's up")
+        await flux.emit("EndOfTurn", "what's up")
+        await finish(call)
+        return sent
 
-        call = Call(engines, send, "call-1")
-        call.loop = asyncio.get_running_loop()
-        call.start_speculation("what's up")
-        call.start_speculation("what's up")  # A second decision before the first is handled.
-        await asyncio.sleep(0)
+    events = events_of(asyncio.run(scenario()))
+    assert seen["speculations"] == []
+    assert seen["replies"] == ["what's up"]
+    assert [e for e in events if e["type"] == "metrics"][0]["speculative"] == "skipped"
+
+
+def test_reconnect_reset_drops_the_speculation_and_the_live_line():
+    engines, seen = make_engines(speculative=("Sure. ",))
+
+    async def scenario():
+        sent = []
+        call, flux = await start_call(engines, sent)
+        await flux.emit("StartOfTurn", "what's")
+        await flux.emit("EagerEndOfTurn", "what's up")
+        await wait_until(lambda: call.speculation.deltas)
+        await flux.emit("Reset")
+        await wait_until(lambda: seen["closed"])
+        assert call.speculation is None
         await call.close()
+        return sent
 
-    asyncio.run(scenario())
-    assert seen["speculations"] == ["what's up"]
+    sent = asyncio.run(scenario())
+    assert seen["closed"] == [False]
+    assert events_of(sent)[-1] == {"type": "partial", "text": ""}
 
 
 def test_barge_in_during_a_committed_speculative_reply():
-    recorded, replies = [], []
-    never = asyncio.Event()
-    closed = []
-
-    async def speculate(conversation_id, text, committed):
-        try:
-            yield "First sentence here. "
-            await never.wait()  # Still generating when the user interrupts.
-        finally:
-            closed.append(committed.is_set())
-
-    async def reply(conversation_id, text):
-        replies.append(text)
-        yield "Okay."
-
-    async def synthesize(text):
-        return np.zeros(24000, dtype=np.float32)
+    recorded = []
 
     async def record_interruption(conversation_id, user_text, heard):
         recorded.append((user_text, heard))
 
-    engines = Engines(new_transcriber=lambda: FakeTranscriber(["what's up", "wait, stop"],
-                                                              ["What's up?", "wait"]),
-                      new_detector=lambda listener: detector(listener=listener),
-                      reply=reply, synthesize=synthesize, record_interruption=record_interruption,
-                      speculate=speculate)
+    engines, seen = make_engines(speculative=("First sentence here. ",),
+                                 record_interruption=record_interruption)
 
     async def scenario():
         sent = []
-
-        async def send(data):
-            sent.append(data)
-
-        call = Call(engines, send, "call-1")
-        for packet in speech_then_pause():
-            await call.hear(packet)
+        call, flux = await start_call(engines, sent)
+        await flux.emit("StartOfTurn", "What's")
+        await flux.emit("EagerEndOfTurn", "What's up?")
+        await flux.emit("EndOfTurn", "What's up?")
         await wait_until(lambda: call.spoken)
         call.set_playing(True)
         first_reply = call.reply_task
-        for packet in speech_then_pause():
-            await call.hear(packet)
-            if {"type": "interrupt"} in sent and call.played is not None and not call.played.done():
-                call.report_played(0.5)
+        await flux.emit("StartOfTurn", "wait")
         assert first_reply.cancelled()
-        await call.reply_task
-        await call.close()
+        call.report_played(0.1)
+        await flux.emit("EndOfTurn", "wait, stop")
+        await finish(call)
         return sent
 
     events = events_of(asyncio.run(scenario()))
-    # Committed, then closed by the barge-in; the next turn's live text ("wait") differed.
-    assert closed == [True, False]
+    assert seen["closed"] == [True]  # Committed, then closed by the barge-in.
     # Stored against the text the speculative reply answered.
     assert recorded == [("What's up?", "First sentence...")]
-    assert replies == ["wait, stop"]
-    assert [e["speculative"] for e in events if e["type"] == "metrics"] == ["committed", "cancelled"]
+    assert seen["replies"] == ["wait, stop"]
+    assert [e["speculative"] for e in events if e["type"] == "metrics"] == ["committed", "skipped"]
     assert events[-1] == {"type": "reply_end"}
 
 
 def test_model_marker_reaches_metrics_and_is_never_spoken():
-    engines, _ = fake_engines(reply=(ReplyModel("small"), "Hi there. ", ReplyModel("big"), "All good!"))
-    events = events_of(asyncio.run(run_call(engines, speech_then_pause())))
+    engines, _ = make_engines(reply=(ReplyModel("small"), "Hi there. ", ReplyModel("big"), "All good!"))
+    events = events_of(run_turn(engines))
     assert [e["text"] for e in events if e["type"] == "caption"] == ["Hi there.", "All good!"]
     (metrics,) = [e for e in events if e["type"] == "metrics"]
     assert metrics["llm_model"] == "small"  # The model behind the first token.
-
-
-def test_committed_speculation_reports_its_model():
-    engines, _, hold = speculative_engines(live=["What's up?"],
-                                           speculative=(ReplyModel("small"), "Hi there. ", "All good!"))
-    hold.set()
-    events = events_of(asyncio.run(run_call(engines, speech_then_pause())))
-    (metrics,) = [e for e in events if e["type"] == "metrics"]
-    assert metrics["speculative"] == "committed" and metrics["llm_model"] == "small"

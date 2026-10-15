@@ -1,18 +1,33 @@
-"""Call WebSocket contract, with fake engines in place of the real models."""
+"""Call WebSocket contract, with fake engines in place of Deepgram."""
 import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
 from app import main
-from tests.test_pipeline import fake_engines, speech_then_pause
+from tests.test_pipeline import FakeListener, make_engines
+
+
+class TalkingListener(FakeListener):
+    """Hears one turn: a partial after the first packet, the end of turn after the third."""
+    async def send(self, pcm, arrived=None):
+        await super().send(pcm, arrived)
+        if len(self.audio) == 1:
+            await self.emit("StartOfTurn", "what's")
+        elif len(self.audio) == 3:
+            await self.emit("EndOfTurn", "what's up", speech_ended=arrived)
+
+
+def speech_packets():
+    return [np.full(1600, 0.1, "<f4").tobytes() for _ in range(3)]
 
 START = {"type": "start", "sample_rate": 16000, "encoding": "pcm_f32le", "echo_cancelled": True}
 
 
 @pytest.fixture
 def engines(monkeypatch):
-    engines, seen = fake_engines()
+    engines, seen = make_engines()
+    engines.new_listener = TalkingListener
     monkeypatch.setattr(main.app.state, "engines", engines, raising=False)
     return seen
 
@@ -21,7 +36,7 @@ def test_call_hears_a_turn_and_replies_with_audio(engines):
     with TestClient(main.app).websocket_connect("/ws/voice") as socket:
         socket.send_json(START)
         assert socket.receive_json() == {"type": "ready", "sample_rate": 24000, "encoding": "pcm_f32le"}
-        for packet in speech_then_pause():
+        for packet in speech_packets():
             socket.send_bytes(packet)
         assert socket.receive_json() == {"type": "partial", "text": "what's"}
         assert socket.receive_json() == {"type": "transcript", "text": "what's up"}
@@ -33,7 +48,7 @@ def test_call_hears_a_turn_and_replies_with_audio(engines):
             else:
                 kinds.append(__import__("json").loads(frame["text"])["type"])
         assert "metrics" in kinds and kinds.count("caption") == 2
-        assert audio == 2 * 6000 * 4
+        assert audio == 2 * 6000 * 4  # Two segments of fake Aura audio, as float32.
         socket.send_json({"type": "playback", "active": False})
     assert len(engines["replies"]) == 1
 
@@ -54,11 +69,31 @@ def test_invalid_start_and_audio_are_rejected(engines):
         assert error.value.code == 1008
 
 
-def test_missing_models_fail_clearly(monkeypatch):
+def test_missing_deepgram_key_fails_clearly(monkeypatch):
     monkeypatch.delattr(main.app.state, "engines", raising=False)
     with TestClient(main.app).websocket_connect("/ws/voice") as socket:
         socket.send_json(START)
-        assert socket.receive_json() == {"type": "error", "error": "Voice models are not loaded."}
+        assert socket.receive_json() == {"type": "error", "error": "Speech services are not configured."}
+
+
+def test_refused_deepgram_connection_fails_clearly(engines, monkeypatch):
+    class RefusedListener(FakeListener):
+        async def start(self):
+            raise OSError("402")
+
+    main.app.state.engines.new_listener = RefusedListener
+    with TestClient(main.app).websocket_connect("/ws/voice") as socket:
+        socket.send_json(START)
+        assert socket.receive_json() == {"type": "error",
+                                         "error": "The speech service is unavailable. Try again later."}
+
+
+def test_engines_need_a_deepgram_key(monkeypatch):
+    monkeypatch.delenv("DEEPGRAM_API_KEY", raising=False)
+    assert main.load_engines() is None
+    monkeypatch.setenv("DEEPGRAM_API_KEY", "k")
+    engines = main.load_engines()
+    assert engines is not None and engines.output_sample_rate == 24000
 
 
 def test_call_ui_assets_are_served():
@@ -70,5 +105,5 @@ def test_call_ui_assets_are_served():
     assert client.get("/static/audio-player.js").status_code == 200
 
 
-def test_health_reports_whether_models_loaded(engines):
-    assert TestClient(main.app).get("/healthz").json() == {"ok": True, "models_loaded": True}
+def test_health_reports_whether_speech_is_configured(engines):
+    assert TestClient(main.app).get("/healthz").json() == {"ok": True, "speech": True}

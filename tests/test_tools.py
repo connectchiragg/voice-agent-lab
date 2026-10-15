@@ -79,8 +79,3 @@ def test_server_error_is_retried_once(monkeypatch):
         transport=httpx.MockTransport(lambda request: next(responses)), **options))
     assert "No place named" in run("get_weather", '{"location": "Nowhere"}')["error"]
 
-
-def test_speakable_text_normalises_typography():
-    from app.tts import speakable
-    assert speakable("**Twenty\u2011five** in New\u202fYork \u2014 it\u2019s fine") == \
-        "Twenty-five in New York, it's fine"

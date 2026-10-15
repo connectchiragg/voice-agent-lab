@@ -2,8 +2,6 @@
 *
 !app/
 !static/
-!scripts/download-models.sh
-!scripts/bench_latency.py
 !requirements.lock
 **/__pycache__
 **/*.py[cod]

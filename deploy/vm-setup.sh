@@ -5,7 +5,7 @@
 #   sh deploy/vm-setup.sh
 set -eu
 cd "$(dirname "$0")/.."
-[ -s .env ] || { echo "Create .env with GROQ_API_KEY first (see docs/deploy.md)." >&2; exit 1; }
+[ -s .env ] || { echo "Create .env with GROQ_API_KEY and DEEPGRAM_API_KEY first (see docs/deploy.md)." >&2; exit 1; }
 
 if ! command -v docker >/dev/null; then
   sudo apt-get update
@@ -20,7 +20,7 @@ sudo docker run -d --name voice-agent-lab --restart unless-stopped \
 sudo docker run -d --name cloudflared --restart unless-stopped --network host \
   cloudflare/cloudflared:2026.9.3 tunnel --no-autoupdate --url http://127.0.0.1:7860
 
-echo "Waiting for models to load and for the tunnel URL..."
+echo "Waiting for the app and the tunnel URL..."
 for _ in $(seq 60); do
   url=$(sudo docker logs cloudflared 2>&1 | grep -o 'https://[a-z0-9-]*\.trycloudflare\.com' | head -1 || true)
   if [ -n "$url" ] && curl -fsS http://127.0.0.1:7860/healthz >/dev/null 2>&1; then
