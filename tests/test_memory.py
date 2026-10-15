@@ -8,6 +8,7 @@ from uuid import uuid4
 
 import pytest
 from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from psycopg_pool import AsyncConnectionPool
 
 from app import agent, memory, tools
@@ -22,10 +23,17 @@ NOTES = {"name": "Asha", "summary": "Asha asked about the weather in Mysore. She
 
 @pytest.fixture
 def store(monkeypatch):
-    store = memory.InMemoryStore()
+    deleted = []
+
+    async def delete_thread(thread_id):
+        deleted.append(thread_id)
+    store = memory.InMemoryStore(delete_thread)
+    store.deleted = deleted  # Conversations (checkpoint threads) deleted, in order.
     monkeypatch.setattr(memory, "store", store)
     monkeypatch.setattr(memory, "calls", {})
+    monkeypatch.setattr(memory, "active", set())
     monkeypatch.setattr(memory, "tasks", set())
+    monkeypatch.setattr(memory.groq_api, "near_rate_limit", lambda: False)
     return store
 
 
@@ -34,7 +42,8 @@ def fake_llm(monkeypatch, *replies):
     requests = []
     queue = list(replies)
 
-    async def stream_model(messages, tools=None, client=None, tool_choice=None):
+    async def stream_model(messages, tools=None, client=None, tool_choice=None, max_tokens=None):
+        assert max_tokens == memory.SUMMARY_MAX_TOKENS  # Its own cap, not a spoken reply's.
         requests.append(messages)
         reply = queue.pop(0)
         if isinstance(reply, Exception):
@@ -88,15 +97,6 @@ def test_emails_normalize_to_lowercase_keys():
     for unknown in ("", None, "asha", "asha@", "a@b@c.com", "sip:asha@example.com",
                     "Asha <asha@example.com>"):
         assert memory.caller_key_from_email(unknown) is None
-
-
-def test_web_identity_is_read_only_when_the_access_header_is_trusted(monkeypatch):
-    headers = {memory.WEB_EMAIL_HEADER: "Asha@Example.com"}
-    monkeypatch.delenv("CF_ACCESS_EMAIL_HEADER", raising=False)
-    assert memory.web_caller_key(headers) is None
-    monkeypatch.setenv("CF_ACCESS_EMAIL_HEADER", "1")
-    assert memory.web_caller_key(headers) == "email:asha@example.com"
-    assert memory.web_caller_key({}) is None
 
 
 # The summary after a call.
@@ -159,6 +159,13 @@ def test_a_call_with_nothing_said_is_not_remembered(store, monkeypatch):
     assert requests == [] and store.callers == {} and memory.calls == {}
 
 
+def test_a_greeting_alone_is_no_visit_and_its_conversation_is_deleted(store, monkeypatch):
+    requests = fake_llm(monkeypatch)
+    cid = asyncio.run(one_call(PHONE, [{"role": "model", "parts": [{"text": "Hi Asha, this is "
+                                        "Cadence. How can I help?"}], "status": "completed"}]))
+    assert requests == [] and store.callers == {} and store.deleted == [cid]
+
+
 def test_notes_are_trimmed_and_private_looking_names_dropped():
     notes = memory.parse_notes(json.dumps({
         "name": "call me at 98123", "summary": "word " * 400, "facts": ["x" * 500] * 9,
@@ -181,24 +188,41 @@ def remembered(**changes):
     return memory.CallerMemory(**{**values, **changes})
 
 
-def test_block_has_name_date_summary_and_open_items():
+def facts(block):
+    """The block without its fixed rules: what the token cap applies to."""
+    assert block.startswith(memory.BLOCK_RULES + " ")
+    return block[len(memory.BLOCK_RULES) + 1:]
+
+
+def test_block_has_name_date_summary_open_items_and_profile():
     block = memory.render_block(remembered())
-    assert "Name: Asha." in block and "Last call: 14 October 2026." in block
-    assert "Last time: Asha asked about the weather in Mysore." in block
-    assert block.endswith("Open items: wants a callback.")
-    assert "Plans a trip" not in block  # The profile feeds the summarizer, not the prompt.
+    assert facts(block) == ("Name: Asha. Last call: 14 October 2026. Last time: Asha asked "
+                            "about the weather in Mysore. Open items: wants a callback. "
+                            "About them: Plans a trip.")
 
 
-def test_block_stays_within_the_token_cap():
+def test_block_stays_within_the_token_cap_without_counting_the_rules():
     long = remembered(display_name="A" * 60, last_summary="She talked at length. " * 80,
+                      profile="Profile sentence. " * 50,
                       open_items=[f"open item number {index} " + "x" * 100 for index in range(5)])
-    block = memory.render_block(long)
+    block = facts(memory.render_block(long))
     assert memory.estimated_tokens(block) <= memory.MAX_BLOCK_TOKENS
     assert "Name: " in block and "Last call: " in block and "Open items: " in block
-    short = memory.render_block(remembered(last_summary="She talked at length. " * 80,
-                                           open_items=[]))
+    short = facts(memory.render_block(remembered(last_summary="She talked at length. " * 80,
+                                                 open_items=[])))
     assert memory.estimated_tokens(short) <= memory.MAX_BLOCK_TOKENS
     assert "Last time: She talked at length." in short and short.endswith(".")
+    # Rules are outside the cap: a block using all 150 tokens is longer than 150 with them.
+    assert memory.estimated_tokens(memory.render_block(long)) > memory.MAX_BLOCK_TOKENS
+
+
+def test_the_profile_is_trimmed_first():
+    full = remembered(last_summary="She asked about the weather. " * 6, profile="Likes tea. " * 6)
+    tight = facts(memory.render_block(full, max_tokens=60))
+    assert "Last time: She asked about the weather." in tight and "About them" not in tight
+    roomy = facts(memory.render_block(full, max_tokens=150))
+    assert "About them: Likes tea." in roomy
+    assert roomy.index("Last time") < roomy.index("Open items") < roomy.index("About them")
 
 
 @pytest.fixture
@@ -264,6 +288,49 @@ def test_forget_me_deletes_memory_and_this_call_is_not_summarized(store, graph, 
         await asyncio.gather(*memory.tasks)
     asyncio.run(scenario())
     assert store.callers == {} and store.summaries == {} and requests == []
+    # The recorded call's conversation goes with the memory; this call's once it ends.
+    assert store.deleted == ["old", cid]
+
+
+def test_forget_me_deletes_the_conversations_of_past_calls(graph, monkeypatch):
+    store = memory.InMemoryStore(agent.delete_thread)
+    monkeypatch.setattr(memory, "store", store)
+    monkeypatch.setattr(memory, "calls", {})
+    monkeypatch.setattr(memory, "active", set())
+    monkeypatch.setattr(memory, "tasks", set())
+    monkeypatch.setattr(memory.groq_api, "near_rate_limit", lambda: False)
+    fake_llm(monkeypatch, json.dumps(NOTES))
+    past, stranger = str(uuid4()), str(uuid4())
+
+    async def scenario():
+        for cid in (past, stranger):
+            await agent.save_history(cid, said("I'm Asha.", "Hello Asha."))
+        await one_call(PHONE, await agent.load_history(past), past)
+        assert store.summaries[past][0] == PHONE
+        assert await memory.forget(PHONE) is True
+        return await agent.load_history(past), await agent.load_history(stranger)
+    gone, kept = asyncio.run(scenario())
+    assert gone == [] and len(kept) == 3 and store.callers == {}
+
+
+def test_forget_during_a_waiting_summary_stores_nothing_and_deletes_that_call(store, monkeypatch):
+    requests = fake_llm(monkeypatch)
+    monkeypatch.setattr(memory, "SUMMARY_RETRY_S", 0.01)
+
+    async def scenario():
+        await memory.begin_call("live", None)  # Someone else's call keeps the summary waiting.
+        cid = str(uuid4())
+        await memory.begin_call(cid, PHONE)
+
+        async def load_dialogue(_):
+            return said("I'm Asha.", "Hello.")
+        memory.end_call(cid, load_dialogue)
+        await asyncio.sleep(0.05)
+        await memory.forget(PHONE)
+        await asyncio.gather(*memory.tasks)
+        return cid
+    cid = asyncio.run(scenario())
+    assert requests == [] and store.summaries == {} and store.deleted == [cid]
 
 
 def test_forget_me_runs_through_the_agent_and_is_confirmed(store, graph, monkeypatch):
@@ -283,6 +350,78 @@ def test_forget_me_runs_through_the_agent_and_is_confirmed(store, graph, monkeyp
 def test_forget_me_for_an_unknown_caller_explains_there_is_nothing(store):
     result = json.loads(asyncio.run(tools.run_tool("forget_me", "{}", None)))
     assert result["forgotten"] is False and "not identified" in result["reason"]
+
+
+# The summary waits for quiet: no live call, Groq not near its limit.
+
+def test_the_summary_waits_until_no_call_is_live(store, monkeypatch):
+    requests = fake_llm(monkeypatch, json.dumps(NOTES))
+    monkeypatch.setattr(memory, "SUMMARY_RETRY_S", 0.01)
+
+    async def scenario():
+        await memory.begin_call("live", None)
+        cid = str(uuid4())
+        await memory.begin_call(cid, PHONE)
+
+        async def load_dialogue(_):
+            return said("I'm Asha.", "Hello.")
+        memory.end_call(cid, load_dialogue)
+        await asyncio.sleep(0.1)
+        assert requests == [] and memory.tasks  # Still waiting.
+        memory.end_call("live", load_dialogue)  # Unknown caller: nothing to summarize.
+        await asyncio.gather(*memory.tasks)
+    asyncio.run(scenario())
+    assert len(requests) == 1 and store.callers[PHONE].display_name == "Asha"
+
+
+def test_the_summary_retries_after_a_rate_limit_and_waits_near_the_limit(store, monkeypatch):
+    from app.groq_api import ProviderError
+    requests = fake_llm(monkeypatch, ProviderError(429, "rate limited"), json.dumps(NOTES))
+    monkeypatch.setattr(memory, "SUMMARY_RETRY_S", 0.01)
+    near = iter([True, False, True, True, False])  # Checked before each attempt.
+    monkeypatch.setattr(memory.groq_api, "near_rate_limit", lambda: next(near, False))
+    cid = asyncio.run(one_call(PHONE, said("I'm Asha.", "Hello.")))
+    assert len(requests) == 2
+    _, record = store.summaries[cid]
+    assert record.summary == NOTES["summary"] and record.error is None
+
+
+def test_the_summary_gives_up_after_waiting_if_still_near_the_rate_limit(store, monkeypatch):
+    requests = fake_llm(monkeypatch)
+    monkeypatch.setattr(memory, "SUMMARY_RETRY_S", 0.01)
+    monkeypatch.setenv("CALLER_MEMORY_SUMMARY_WAIT_S", "0.05")
+    monkeypatch.setattr(memory.groq_api, "near_rate_limit", lambda: True)
+    cid = asyncio.run(one_call(PHONE, said("I'm Asha.", "Hello.")))
+    assert requests == []
+    _, record = store.summaries[cid]
+    assert (record.summary, record.error) == (None, "RateLimitWait")
+
+
+def test_after_waiting_a_long_live_call_alone_does_not_stop_the_summary(store, monkeypatch):
+    requests = fake_llm(monkeypatch, json.dumps(NOTES))
+    monkeypatch.setattr(memory, "SUMMARY_RETRY_S", 0.01)
+    monkeypatch.setenv("CALLER_MEMORY_SUMMARY_WAIT_S", "0.05")
+
+    async def scenario():
+        await memory.begin_call("long call", None)
+        return await one_call(PHONE, said("I'm Asha.", "Hello."))
+    cid = asyncio.run(scenario())
+    assert len(requests) == 1 and store.summaries[cid][1].summary == NOTES["summary"]
+
+
+# The phone greeting.
+
+def test_the_greeting_names_a_known_caller_only(store):
+    store.callers[PHONE] = remembered()
+    asyncio.run(memory.begin_call("known", PHONE))
+    asyncio.run(memory.begin_call("unknown", None))
+    store.callers["tel:+14155550100"] = remembered(caller_key="tel:+14155550100", display_name=None)
+    asyncio.run(memory.begin_call("nameless", "tel:+14155550100"))
+    assert memory.greeting("known") == "Hi Asha, this is Cadence. How can I help?"
+    assert memory.greeting("unknown") == memory.GREETING == "Hi, this is Cadence. How can I help?"
+    assert memory.greeting("nameless") == memory.GREETING
+    memory.calls["known"].forgotten = True
+    assert memory.greeting("known") == memory.GREETING
 
 
 # Timeouts and unknown callers.
@@ -357,10 +496,40 @@ def test_postgres_store_round_trip():
             assert (loaded.display_name, loaded.call_count, loaded.profile, loaded.open_items,
                     loaded.last_summary) == ("Asha", 2, "Likes tea.", ["callback"], "First call.")
             assert loaded.last_seen == start + timedelta(hours=2)
-            assert await store.forget(key) is True
+            # The recorded calls' conversations are deleted with the memory; others are not.
+            async with AsyncPostgresSaver.from_conn_string(
+                    os.environ["CALLER_MEMORY_TEST_POSTGRES"]) as saver:
+                await saver.setup()
+                await store.setup()
+                assert store.checkpoints
+                graph = agent.build_graph(saver)
+                stranger = str(uuid4())
+                for thread in (first.call_id, failed.call_id, stranger):
+                    await graph.aupdate_state(agent.config(thread), {
+                        "messages": said("Hello", "Hi"), "updated_at": agent.now()}, as_node="agent")
+                assert await store.forget(key) is True
+                for thread, left in ((first.call_id, 0), (failed.call_id, 0), (stranger, 3)):
+                    state = await graph.aget_state(agent.config(thread))
+                    assert len(state.values.get("messages", [])) == left
+                await saver.adelete_thread(stranger)
             assert await store.load(key) is None and await store.forget(key) is False
             async with pool.connection() as connection:
                 cursor = await connection.execute(
                     "SELECT count(*) FROM call_summaries WHERE caller_key = %s", (key,))
                 assert (await cursor.fetchone())[0] == 0
     asyncio.run(scenario())
+
+
+def test_the_greeting_is_history_the_model_sees_and_the_summary_reads(store, graph, monkeypatch):
+    seen = scripted_agent(monkeypatch, ["It's sunny."])
+    cid = str(uuid4())
+
+    async def scenario():
+        await agent.record_greeting(cid, "Hi, this is Cadence. How can I help?", "completed")
+        return await agent.load_history(cid)
+    assert [m["role"] for m in asyncio.run(scenario())] == ["model"]
+    agent_turn(cid, "Weather in Mysore?")
+    assert [(m["role"], m["content"]) for m in seen[0][1:]] == [
+        ("assistant", "Hi, this is Cadence. How can I help?"), ("user", "Weather in Mysore?")]
+    history = asyncio.run(agent.load_history(cid))
+    assert memory.dialogue_text(history).startswith("Assistant: Hi, this is Cadence.")

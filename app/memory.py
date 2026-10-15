@@ -2,10 +2,10 @@
 
 Who is calling, as a normalized `caller_key`:
 
-- phone (Telnyx): the E.164 `from` of the call.initiated webhook -> "tel:+919812345678";
-- web: Cloudflare Access's authenticated email header -> "email:someone@example.com",
-  read only with CF_ACCESS_EMAIL_HEADER=1 (anyone can send that header to an
-  origin that is reachable without Access).
+- phone (Telnyx): the E.164 `from` of the call.initiated webhook -> "tel:+919812345678"
+  (caller ID can be spoofed; accepted for this lab);
+- web: the email in a verified Cloudflare Access JWT (app/access.py) ->
+  "email:someone@example.com". Requests without one (the quick tunnel) are anonymous.
 
 An unknown caller (no key) gets no memory and leaves none.
 
@@ -13,13 +13,15 @@ Per call:
 
 1. `begin_call` loads the caller's memory beside the Deepgram sockets, for at
    most LOAD_TIMEOUT_MS; a slower load is dropped and the call starts without
-   memory. The agent adds `prompt_block` (about 150 tokens at most) to the
-   system prompt.
-2. `end_call` (the call has closed) starts a background task: the LLM writes a
-   short summary of the dialogue and updates the rolling profile, and both are
-   stored. A failure is stored as such and never retried.
-3. The `forget_me` tool calls `forget`: everything stored for the caller is
-   deleted and the current call is not summarized.
+   memory. The agent adds `prompt_block` (fixed rules plus about 150 tokens at
+   most) to the system prompt; a phone call opens with `greeting`.
+2. `end_call` (the call has closed) starts a background task. It waits while
+   any call is live or Groq is near its rate limit (bounded), then the LLM
+   writes a short summary of the dialogue and updates the rolling profile, and
+   both are stored. A failure is stored as such.
+3. The `forget_me` tool calls `forget`: everything stored for the caller,
+   with the conversations (LangGraph threads) of their recorded calls, is
+   deleted; the current call is not summarized and its thread is deleted too.
 
 Storage: tables `callers` and `call_summaries` in the app's Postgres, created if
 missing at startup; in memory (lost on restart) when Postgres is unavailable.
@@ -31,7 +33,7 @@ import logging
 import os
 import re
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
@@ -42,16 +44,26 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 from pydantic import BaseModel, ConfigDict, ValidationError
 
+from app import access, groq_api
+from app.groq_api import ProviderError
 from app.llm import stream_model
 
 logger = logging.getLogger("uvicorn.error")
 LOAD_TIMEOUT_MS = 150  # Past this the call starts without memory (CALLER_MEMORY_LOAD_TIMEOUT_MS).
 SUMMARY_TIMEOUT_S = 30.0
+# The summary waits while a call is live or Groq is near its limit: first retry
+# after SUMMARY_RETRY_S, doubling to SUMMARY_RETRY_MAX_S, for at most SUMMARY_WAIT_S
+# (CALLER_MEMORY_SUMMARY_WAIT_S).
+SUMMARY_WAIT_S = 600.0
+SUMMARY_RETRY_S = 5.0
+SUMMARY_RETRY_MAX_S = 60.0
+# Output tokens for the summary's JSON, separate from a spoken reply's cap
+# (gpt-oss also spends some of it on reasoning).
+SUMMARY_MAX_TOKENS = 1200
 DRAIN_S = 10.0  # On shutdown, summaries still running get this long to finish.
 MAX_DIALOGUE_CHARS = 6000  # About 1,500 input tokens: Groq's free tier allows 7,000 a minute.
 MAX_BLOCK_TOKENS = 150
 CHARS_PER_TOKEN = 4  # An estimate for English text; no tokenizer is loaded for one prompt line.
-WEB_EMAIL_HEADER = "cf-access-authenticated-user-email"
 
 E164 = re.compile(r"\+[1-9]\d{6,14}")
 EMAIL = re.compile(r"[^@\s:<>\"]+@[^@\s:<>\"]+\.[^@\s:<>\"]+")
@@ -75,11 +87,9 @@ def caller_key_from_email(email: object) -> str | None:
     return f"email:{address}" if len(address) <= 254 and EMAIL.fullmatch(address) else None
 
 
-def web_caller_key(headers: Mapping[str, str]) -> str | None:
-    """The Cloudflare Access user of a browser call, when that header is trusted."""
-    if os.getenv("CF_ACCESS_EMAIL_HEADER", "0") != "1":
-        return None
-    return caller_key_from_email(headers.get(WEB_EMAIL_HEADER))
+async def web_caller_key(headers: Mapping[str, str]) -> str | None:
+    """The Cloudflare Access user of a browser call, from a verified token only."""
+    return caller_key_from_email(await access.verified_email(headers))
 
 
 # Storage.
@@ -110,18 +120,29 @@ class CallRecord:
     open_items: list[str] | None = None
 
 
+DeleteThread = Callable[[str], Awaitable[None]]  # A conversation's LangGraph checkpoints.
+
+
+async def keep_thread(thread_id: str) -> None:
+    """Default without conversation storage: nothing to delete."""
+
+
 class MemoryStore(Protocol):
     async def load(self, caller_key: str) -> CallerMemory | None: ...
     async def record_call(self, caller_key: str, record: CallRecord) -> None: ...
-    async def forget(self, caller_key: str) -> bool: ...  # True if anything was stored.
+    # Memory and the conversations (checkpoint threads) of every recorded call;
+    # True if anything was stored.
+    async def forget(self, caller_key: str) -> bool: ...
+    async def delete_threads(self, thread_ids: Sequence[str]) -> None: ...
 
 
 class InMemoryStore:
     """Without Postgres: the same behaviour, lost on restart."""
 
-    def __init__(self) -> None:
+    def __init__(self, delete_thread: DeleteThread = keep_thread) -> None:
         self.callers: dict[str, CallerMemory] = {}
         self.summaries: dict[str, tuple[str, CallRecord]] = {}  # call_id -> (caller_key, record)
+        self.delete_thread = delete_thread
 
     async def load(self, caller_key: str) -> CallerMemory | None:
         return self.callers.get(caller_key)
@@ -141,9 +162,15 @@ class InMemoryStore:
             last_summary=record.summary or known.last_summary)
 
     async def forget(self, caller_key: str) -> bool:
-        self.summaries = {call_id: entry for call_id, entry in self.summaries.items()
-                          if entry[0] != caller_key}
+        threads = [call_id for call_id, entry in self.summaries.items() if entry[0] == caller_key]
+        await self.delete_threads(threads)
+        for call_id in threads:
+            del self.summaries[call_id]
         return self.callers.pop(caller_key, None) is not None
+
+    async def delete_threads(self, thread_ids: Sequence[str]) -> None:
+        for thread_id in thread_ids:
+            await self.delete_thread(thread_id)
 
 
 SCHEMA = """
@@ -167,17 +194,27 @@ CREATE TABLE IF NOT EXISTS call_summaries (
 );
 CREATE INDEX IF NOT EXISTS call_summaries_by_caller ON call_summaries (caller_key, ended_at DESC);
 """
+# LangGraph's checkpoint tables (AsyncPostgresSaver.adelete_thread deletes the same rows).
+CHECKPOINT_TABLES = ("checkpoints", "checkpoint_blobs", "checkpoint_writes")
 
 
 class PostgresStore:
     """The tables live beside LangGraph's checkpoints, in the same database."""
 
-    def __init__(self, pool: AsyncConnectionPool) -> None:
+    def __init__(self, pool: AsyncConnectionPool, delete_thread: DeleteThread = keep_thread) -> None:
         self.pool = pool
+        # Conversations kept elsewhere (no checkpoint tables here) are deleted through this.
+        self.delete_thread = delete_thread
+        self.checkpoints = False  # LangGraph's tables are in this database.
 
     async def setup(self) -> None:
         async with self.pool.connection() as connection, connection.transaction():
             await connection.execute(SCHEMA)
+            cursor = await connection.execute(
+                "SELECT count(*) FROM unnest(%s::text[]) AS name WHERE to_regclass(name) IS NOT NULL",
+                (list(CHECKPOINT_TABLES),))
+            row = await cursor.fetchone()
+            self.checkpoints = row is not None and row[0] == len(CHECKPOINT_TABLES)
 
     async def load(self, caller_key: str) -> CallerMemory | None:
         async with self.pool.connection() as connection:
@@ -216,11 +253,35 @@ class PostgresStore:
                  "ended": record.ended_at, "profile": record.profile, "open_items": open_items})
 
     async def forget(self, caller_key: str) -> bool:
+        """One transaction: the caller, their summaries and those calls' conversations."""
         async with self.pool.connection() as connection, connection.transaction():
-            await connection.execute("DELETE FROM call_summaries WHERE caller_key = %s", (caller_key,))
+            cursor = await connection.execute(
+                "DELETE FROM call_summaries WHERE caller_key = %s RETURNING call_id", (caller_key,))
+            threads = [row[0] for row in await cursor.fetchall()]
+            if self.checkpoints:
+                await self.delete_checkpoints(connection, threads)
             cursor = await connection.execute(
                 "DELETE FROM callers WHERE caller_key = %s RETURNING caller_key", (caller_key,))
-            return await cursor.fetchone() is not None
+            had_memory = await cursor.fetchone() is not None
+        if not self.checkpoints:
+            for thread_id in threads:
+                await self.delete_thread(thread_id)
+        return had_memory
+
+    async def delete_threads(self, thread_ids: Sequence[str]) -> None:
+        if not self.checkpoints:
+            for thread_id in thread_ids:
+                await self.delete_thread(thread_id)
+            return
+        async with self.pool.connection() as connection, connection.transaction():
+            await self.delete_checkpoints(connection, list(thread_ids))
+
+    @staticmethod
+    async def delete_checkpoints(connection: Any, thread_ids: list[str]) -> None:
+        if thread_ids:
+            for table in CHECKPOINT_TABLES:
+                await connection.execute(f"DELETE FROM {table} WHERE thread_id = ANY(%s)",
+                                         (thread_ids,))
 
 
 # Calls in progress, and calls being summarized.
@@ -230,12 +291,13 @@ class CallerCall:
     caller_key: str
     started_at: datetime
     memory: CallerMemory | None = None  # Loaded in time at the start, if known.
-    ended: bool = False
+    ended_at: datetime | None = None  # Set once the call has closed.
     forgotten: bool = False  # forget_me: show and store nothing more.
 
 
 store: MemoryStore | None = None  # None: caller memory is off.
-calls: dict[str, CallerCall] = {}  # By conversation id.
+calls: dict[str, CallerCall] = {}  # By conversation id: identified callers only.
+active: set[str] = set()  # Conversation ids of every call in progress, identified or not.
 tasks: set[asyncio.Task[None]] = set()
 
 
@@ -243,8 +305,13 @@ def load_timeout_s() -> float:
     return float(os.getenv("CALLER_MEMORY_LOAD_TIMEOUT_MS", LOAD_TIMEOUT_MS)) / 1000
 
 
+def summary_wait_s() -> float:
+    return float(os.getenv("CALLER_MEMORY_SUMMARY_WAIT_S", SUMMARY_WAIT_S))
+
+
 async def begin_call(conversation_id: str, caller_key: str | None) -> None:
     """Load a known caller's memory, giving up after the load timeout. Never raises."""
+    active.add(conversation_id)
     if store is None or caller_key is None:
         return
     call = CallerCall(caller_key, datetime.now(timezone.utc))
@@ -280,42 +347,102 @@ def prompt_block(conversation_id: str) -> str:
     return render_block(call.memory)
 
 
+GREETING = "Hi, this is Cadence. How can I help?"
+
+
+def greeting(conversation_id: str) -> str:
+    """What the assistant says first on a phone call: by name for a known caller.
+
+    Fixed text, so it is spoken at once without asking the LLM.
+    """
+    call = calls.get(conversation_id)
+    name = call.memory.display_name if call and call.memory and not call.forgotten else None
+    return f"Hi {name}, this is Cadence. How can I help?" if name else GREETING
+
+
 Dialogue = Sequence[Mapping[str, Any]]
 
 
 def end_call(conversation_id: str, load_dialogue: Callable[[str], Awaitable[Dialogue]]) -> None:
     """The call has closed: summarize it in the background. Returns at once."""
+    active.discard(conversation_id)
     call = calls.get(conversation_id)
-    if call is None or call.ended:
+    if call is None or call.ended_at is not None:
         return
-    call.ended = True
-    if call.forgotten or store is None:
+    call.ended_at = datetime.now(timezone.utc)
+    if store is None:
         calls.pop(conversation_id, None)
         return
-    task = asyncio.create_task(remember_call(conversation_id, call, load_dialogue))
+    spawn(remember_call(conversation_id, call, load_dialogue))
+
+
+def spawn(work: Coroutine[object, object, None]) -> None:
+    task = asyncio.create_task(work)
     tasks.add(task)
     task.add_done_callback(tasks.discard)
 
 
+def summary_blocked() -> str | None:
+    """Why a summary should wait rather than compete with live calls for Groq, if it should."""
+    if active:
+        return "a call is in progress"
+    if groq_api.near_rate_limit():
+        return "near the Groq rate limit"
+    return None
+
+
+async def wait_to_summarize(call: CallerCall, deadline: float) -> bool:
+    """Wait while calls are live or Groq is near its limit, with backoff, until the
+    monotonic `deadline`. False: give up (still near the rate limit then, or forgotten)."""
+    delay = SUMMARY_RETRY_S
+    while (reason := summary_blocked()) is not None and not call.forgotten:
+        if time.monotonic() >= deadline:
+            # A long call alone does not cost this summary; a full rate limit does.
+            return not groq_api.near_rate_limit()
+        logger.info("Caller memory: summary waits %.0f s (%s)", delay, reason)
+        await asyncio.sleep(min(delay, max(0.0, deadline - time.monotonic())))
+        delay = min(delay * 2, SUMMARY_RETRY_MAX_S)
+    return not call.forgotten
+
+
 async def remember_call(conversation_id: str, call: CallerCall,
                         load_dialogue: Callable[[str], Awaitable[Dialogue]]) -> None:
-    """Summarize a finished call and store it; a failed summary is stored as failed."""
+    """Summarize a finished call and store it; a failed summary is stored as failed.
+
+    A call that was forgotten, or in which the caller said nothing (no visit),
+    leaves nothing: its conversation (perhaps just the greeting, with the
+    caller's name) is deleted too.
+    """
+    assert store is not None and call.ended_at is not None
     try:
-        dialogue = dialogue_text(await load_dialogue(conversation_id))
-        if not dialogue or store is None:
-            return  # Nothing was said: no visit to remember.
-        ended_at = datetime.now(timezone.utc)
-        previous = await store.load(call.caller_key)
-        try:
-            notes = await asyncio.wait_for(summarize(previous, dialogue), SUMMARY_TIMEOUT_S)
-            record = CallRecord(conversation_id, call.started_at, ended_at, notes.summary,
-                                notes.facts, display_name=notes.name, profile=notes.profile,
-                                open_items=notes.open_items)
-        except Exception as error:
-            logger.warning("Caller memory: summarizing the call failed: %s", type(error).__name__)
-            record = CallRecord(conversation_id, call.started_at, ended_at, None,
-                                error=type(error).__name__)
+        dialogue = "" if call.forgotten else dialogue_text(await load_dialogue(conversation_id))
+        if not dialogue:
+            await store.delete_threads([conversation_id])
+            return
+        deadline = time.monotonic() + summary_wait_s()
+        while True:
+            if not await wait_to_summarize(call, deadline):
+                if not call.forgotten:
+                    record = CallRecord(conversation_id, call.started_at, call.ended_at, None,
+                                        error="RateLimitWait")
+                    break
+                await store.delete_threads([conversation_id])
+                return
+            previous = await store.load(call.caller_key)
+            try:
+                notes = await asyncio.wait_for(summarize(previous, dialogue), SUMMARY_TIMEOUT_S)
+                record = CallRecord(conversation_id, call.started_at, call.ended_at, notes.summary,
+                                    notes.facts, display_name=notes.name, profile=notes.profile,
+                                    open_items=notes.open_items)
+            except ProviderError as error:
+                if error.status_code == 429:
+                    continue  # Rate limited after all: wait again (note_rate_limited was called).
+                record = failed_record(conversation_id, call, error)
+            except Exception as error:
+                record = failed_record(conversation_id, call, error)
+            break
         if call.forgotten:  # forget_me from another call while this one was summarized.
+            await store.delete_threads([conversation_id])
             return
         await store.record_call(call.caller_key, record)
         logger.info("Caller memory: call %s", "summarized" if record.summary else "recorded as failed")
@@ -325,8 +452,16 @@ async def remember_call(conversation_id: str, call: CallerCall,
         calls.pop(conversation_id, None)
 
 
+def failed_record(conversation_id: str, call: CallerCall, error: Exception) -> CallRecord:
+    assert call.ended_at is not None
+    logger.warning("Caller memory: summarizing the call failed: %s", type(error).__name__)
+    return CallRecord(conversation_id, call.started_at, call.ended_at, None,
+                      error=type(error).__name__)
+
+
 async def forget(caller_key: str) -> bool:
-    """Delete everything stored for the caller; their calls in progress store nothing more."""
+    """Delete everything stored for the caller, with the conversations of their recorded
+    calls; their calls in progress store nothing more and are deleted once they end."""
     for call in calls.values():
         if call.caller_key == caller_key:
             call.forgotten = True
@@ -386,7 +521,8 @@ async def summarize(previous: CallerMemory | None, dialogue: str) -> CallNotes:
     """One LLM request (with the usual hedge); raises if the reply is not usable notes."""
     messages = [{"role": "system", "content": SUMMARY_PROMPT},
                 {"role": "user", "content": notes_prompt(previous, dialogue)}]
-    reply = "".join([event async for event in stream_model(messages) if isinstance(event, str)])
+    reply = "".join([event async for event in stream_model(messages, max_tokens=SUMMARY_MAX_TOKENS)
+                     if isinstance(event, str)])
     return parse_notes(reply)
 
 
@@ -435,27 +571,29 @@ def estimated_tokens(text: str) -> int:
 
 
 def render_block(memory: CallerMemory, max_tokens: int = MAX_BLOCK_TOKENS) -> str:
-    """Name, last call date, last summary and open items, within `max_tokens` (estimated).
+    """The fixed rules, then name, last call date, last summary, open items and profile.
 
-    Kept whole in this order of priority: the rules, the name and date, the open
-    items; the last summary gets what is left and is cut to fit.
+    Everything after the rules fits in `max_tokens` (estimated). In order of
+    priority: name and date, then open items (whole), then the last summary,
+    then the rolling profile; the summary and profile are cut to fit, the
+    profile first.
     """
     budget = max_tokens * CHARS_PER_TOKEN
     zone = ZoneInfo(os.getenv("ASSISTANT_TIMEZONE", "Asia/Kolkata"))
-    head = [BLOCK_RULES]
-    if memory.display_name:
-        head.append(f"Name: {memory.display_name}.")
+    head = [f"Name: {memory.display_name}."] if memory.display_name else []
     head.append(f"Last call: {memory.last_seen.astimezone(zone):%d %B %Y}.")
     items = list(memory.open_items)
     while items and len(" ".join(head + [open_items_line(items)])) > budget:
         items.pop()
     tail = [open_items_line(items)] if items else []
-    lines = head
-    if memory.last_summary:
-        room = budget - len(" ".join(head + tail)) - len(" Last time: ")
-        if room >= 40:
-            lines = head + [f"Last time: {clip(memory.last_summary, room)}"]
-    return " ".join(lines + tail)
+
+    def fitted(label: str, text: str, kept: list[str]) -> list[str]:
+        room = budget - len(" ".join(kept)) - len(f" {label} ")
+        return [f"{label} {clip(text, room)}"] if text and room >= 40 else []
+
+    summary = fitted("Last time:", memory.last_summary or "", head + tail)
+    profile = fitted("About them:", memory.profile, head + summary + tail)
+    return " ".join([BLOCK_RULES] + head + summary + tail + profile)
 
 
 def open_items_line(items: list[str]) -> str:
@@ -465,8 +603,13 @@ def open_items_line(items: list[str]) -> str:
 # App lifespan.
 
 @asynccontextmanager
-async def lifespan(conninfo: Callable[[], str]) -> AsyncIterator[None]:
-    """Postgres when available, else memory; on shutdown, let summaries finish briefly."""
+async def lifespan(conninfo: Callable[[], str],
+                   delete_thread: DeleteThread = keep_thread) -> AsyncIterator[None]:
+    """Postgres when available, else memory; on shutdown, let summaries finish briefly.
+
+    `delete_thread` deletes a conversation's checkpoints wherever the agent keeps
+    them; it is used when they are not in this Postgres database.
+    """
     global store
     if os.getenv("CALLER_MEMORY", "1") != "1":
         logger.info("Caller memory is off (CALLER_MEMORY=0).")
@@ -477,7 +620,7 @@ async def lifespan(conninfo: Callable[[], str]) -> AsyncIterator[None]:
         pool = AsyncConnectionPool(conninfo(), min_size=1, max_size=4, open=False,
                                    kwargs={"autocommit": True})
         await pool.open(wait=True, timeout=5)
-        postgres = PostgresStore(pool)
+        postgres = PostgresStore(pool, delete_thread)
         await postgres.setup()
         store = postgres
     except Exception as error:
@@ -486,7 +629,7 @@ async def lifespan(conninfo: Callable[[], str]) -> AsyncIterator[None]:
         if pool is not None:
             await pool.close()
             pool = None
-        store = InMemoryStore()
+        store = InMemoryStore(delete_thread)
     try:
         yield
     finally:
@@ -497,5 +640,6 @@ async def lifespan(conninfo: Callable[[], str]) -> AsyncIterator[None]:
             await asyncio.gather(*late, return_exceptions=True)
         store = None
         calls.clear()
+        active.clear()
         if pool is not None:
             await pool.close()

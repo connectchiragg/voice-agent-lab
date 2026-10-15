@@ -253,32 +253,50 @@ made up answers instead.
 
 A returning caller is recognised and the last call recalled (`app/memory.py`).
 
-- Who: phone calls by the caller's E.164 number (Telnyx `call.initiated` `from`),
-  stored as `tel:+919812345678`; browser calls by the Cloudflare Access email,
-  stored as `email:someone@example.com`, read from `Cf-Access-Authenticated-User-Email`
-  only with `CF_ACCESS_EMAIL_HEADER=1`. Anyone can send that header to an origin
-  reachable without Access (a quick tunnel URL, for example), so set it only
-  when every route to the app goes through Access. Anonymous, SIP and
-  national-format numbers and unauthenticated browsers are unknown callers: no
-  memory is read or written for them.
+- Who: phone calls by the caller's E.164 number (Telnyx `call.initiated` `from`,
+  carried through the one-time stream token), stored as `tel:+919812345678`;
+  browser calls by the email in the Cloudflare Access JWT (`Cf-Access-Jwt-Assertion`),
+  stored as `email:someone@example.com`. The JWT is verified (RS256 only) against
+  the team's certs, cached for an hour, for the Access app's AUD tag
+  (`CF_ACCESS_AUD`), the team issuer and its expiry (`app/access.py`); the
+  email header alone is ignored. Requests through the quick tunnel carry no
+  JWT and are anonymous, as are anonymous, SIP and national-format numbers:
+  no memory is read or written for them.
+- Caller ID can be spoofed: anyone who fakes a known caller's number hears
+  that caller's name and last topic. Accepted for this lab (no PIN); a real
+  deployment would need a second factor before reading memory to a caller.
 - Call start: the transport passes the key to `open_call(..., caller_id=)`. The
   memory loads beside the Deepgram sockets with a 150 ms limit; a slower load is
   dropped and the call starts without memory, so the first reply never waits.
   Measured against local Postgres: p50 0.2 ms, max 1.1 ms over 50 loads.
-- Prompt: for a known caller the system prompt ends with a block of at most
-  about 150 tokens (estimated at 4 characters a token): short behaviour rules
+- Phone greeting: once the media stream starts, the assistant speaks first
+  through Aura, fixed text with no LLM call: "Hi Asha, this is Cadence. How can
+  I help?" for a known caller with a name, else "Hi, this is Cadence. How can I
+  help?". Barge-in interrupts it like any reply; it is stored as an assistant
+  message (only the words heard, if interrupted).
+- Prompt: for a known caller the system prompt ends with short fixed rules
   (greet by name, mention the last topic only if natural, never read the notes
-  out), the name, the last call's date, its summary (cut to fit) and open items.
+  out), then at most about 150 tokens (estimated at 4 characters a token; the
+  rules are not counted): the name, the last call's date, open items, the last
+  summary and the rolling profile. The profile is cut first, then the summary.
 - Call end: a background task sends the dialogue (no tool results, last 6,000
   characters) and the earlier notes to the same LLM, hedge included, and stores
   a two-to-four-sentence summary, up to five facts, and the updated name,
-  rolling profile and open items. It never delays the call. A failed or
-  unusable reply is stored as a failed summary (exception class only) and not
-  retried. A call in which the caller said nothing is not recorded.
-- `forget_me` tool: deletes the caller's rows, drops the memory from the
-  prompt at once, and the current call is not summarized. It has side effects,
-  so a speculative reply runs it only once committed. Conversation transcripts
-  (LangGraph checkpoints) are untouched.
+  rolling profile and open items. It never competes with live calls: while any
+  call is in progress or Groq is near its free-tier limit it waits, checking
+  after 5 s and backing off to every 60 s, for up to 10 minutes
+  (`CALLER_MEMORY_SUMMARY_WAIT_S`); a 429 on the summary waits again. After
+  that it runs anyway if only a call is live, and is stored as failed
+  (`RateLimitWait`) if Groq is still near its limit. Its output cap is 1,200
+  tokens, separate from a spoken reply's 400. A failed or unusable reply is
+  stored as a failed summary (exception class only). A call in which the caller
+  said nothing is no visit: nothing is recorded and its conversation (perhaps
+  only the greeting) is deleted.
+- `forget_me` tool: in one transaction, deletes the caller's rows and the
+  LangGraph checkpoint threads of every call in `call_summaries` for them;
+  drops the memory from the prompt at once; the current call is not summarized
+  and its thread is deleted when it ends. It has side effects, so a speculative
+  reply runs it only once committed.
 
 Tables, created if missing at startup in the same Postgres database (in memory,
 lost on restart, without Postgres; `CALLER_MEMORY=0` turns the feature off):
@@ -293,8 +311,7 @@ call_summaries (call_id text PRIMARY KEY,  -- the conversation (LangGraph thread
 ```
 
 Not yet verified on a live call: the summarizer's output with the real model
-(tests use a fake LLM), and Telnyx caller numbers (the phone transport is on
-another branch).
+(tests use a fake LLM).
 
 Next: Temporal workflows.
 

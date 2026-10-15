@@ -253,6 +253,20 @@ async def save_history(conversation_id: str, messages: list[Message]) -> None:
     }, as_node="agent")
 
 
+async def delete_thread(conversation_id: str) -> None:
+    """Delete a conversation's checkpoints (forget_me)."""
+    saver = graph.checkpointer if graph is not None else None
+    if isinstance(saver, BaseCheckpointSaver):
+        await saver.adelete_thread(conversation_id)
+
+
+async def record_greeting(conversation_id: str, text: str, status: MessageStatus) -> None:
+    """The assistant spoke first (phone calls): store what was said as its message."""
+    messages = await load_history(conversation_id)
+    messages.append(model_message(text, status))
+    await save_history(conversation_id, messages)
+
+
 async def stream_conversation(conversation_id: str, message: str,
                               committed: asyncio.Event | None = None) -> AsyncIterator[ChatEvent]:
     """Supply a new turn to the graph and forward its custom streaming events.

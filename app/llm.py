@@ -38,7 +38,8 @@ DEFAULT_FALLBACK_MODEL = "openai/gpt-oss-20b"
 # 600 ms is past the 120b's usual spread, so about one request in eight is hedged, and
 # a hedged reply typically starts about 1 s after the request instead of stalling.
 FIRST_TOKEN_DEADLINE_MS = 600
-GIVE_UP_S = 5.0  # Neither model has started: report an error instead of waiting on.
+GIVE_UP_S = 5.0
+REPLY_MAX_TOKENS = 400  # A spoken reply (other uses, such as caller-memory summaries, set their own).  # Neither model has started: report an error instead of waiting on.
 
 
 @dataclass(frozen=True)
@@ -157,7 +158,8 @@ class Reply:
 
 
 async def open_reply(client: AsyncGroq, model: str, messages: list[dict[str, Any]],
-                     tools: list[dict[str, Any]] | None, tool_choice: str | None = None) -> Reply:
+                     tools: list[dict[str, Any]] | None, tool_choice: str | None = None,
+                     max_tokens: int = REPLY_MAX_TOKENS) -> Reply:
     """Start a stream and wait for its first text or tool-call delta (or its end)."""
     options: dict[str, Any] = {"tools": tools} if tools else {}
     if tools and tool_choice:
@@ -166,7 +168,7 @@ async def open_reply(client: AsyncGroq, model: str, messages: list[dict[str, Any
         model=model,
         messages=messages,  # type: ignore[arg-type]
         reasoning_effort=os.getenv("GROQ_LLM_REASONING", "low"),  # type: ignore[arg-type]
-        max_completion_tokens=400,
+        max_completion_tokens=max_tokens,
         stream=True,
         **options,
     )
@@ -206,7 +208,8 @@ def worth_falling_back(error: BaseException) -> bool:
 
 
 async def first_reply(client: AsyncGroq, messages: list[dict[str, Any]],
-                      tools: list[dict[str, Any]] | None, tool_choice: str | None) -> Reply:
+                      tools: list[dict[str, Any]] | None, tool_choice: str | None,
+                      max_tokens: int = REPLY_MAX_TOKENS) -> Reply:
     """Race the primary model against at most one fallback request; return the first to start.
 
     The fallback starts when the primary has produced nothing after the
@@ -221,7 +224,8 @@ async def first_reply(client: AsyncGroq, messages: list[dict[str, Any]],
     errors: dict[str, BaseException] = {}
 
     def start(model: str) -> None:
-        attempts[asyncio.create_task(open_reply(client, model, messages, tools, tool_choice))] = model
+        attempts[asyncio.create_task(open_reply(client, model, messages, tools, tool_choice,
+                                                         max_tokens))] = model
 
     def may_hedge() -> bool:
         return bool(fallback) and fallback != primary and fallback not in attempts.values() \
@@ -277,7 +281,8 @@ def log_winner(model: str, primary: str, elapsed_ms: float) -> None:
 
 async def stream_model(messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None,
                        client: AsyncGroq | None = None,
-                       tool_choice: str | None = None) -> AsyncIterator[ModelEvent]:
+                       tool_choice: str | None = None,
+                       max_tokens: int = REPLY_MAX_TOKENS) -> AsyncIterator[ModelEvent]:
     """Yield the answering model's name, then text deltas as Groq produces them, then any tool calls.
 
     Groq's first token normally arrives in about half a second, but a request
@@ -287,7 +292,7 @@ async def stream_model(messages: list[dict[str, Any]], tools: list[dict[str, Any
     """
     async with (nullcontext(client) if client is not None else groq_client()) as groq:
         try:
-            reply = await first_reply(groq, messages, tools, tool_choice)
+            reply = await first_reply(groq, messages, tools, tool_choice, max_tokens)
             try:
                 yield ModelUsed(reply.model)
                 async for event in reply.events:

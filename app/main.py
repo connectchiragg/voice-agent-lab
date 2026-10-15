@@ -15,7 +15,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from app import agent, groq_api, memory, telnyx, webrtc
+from app import access, agent, groq_api, memory, telnyx, webrtc
 from app.deepgram import AuraSpeaker, DeepgramSettings, FluxListener
 from app.pipeline import Call, Engines, ReplyEvent, ReplyModel
 from app.transport import SpeechUnavailable, apply_player_event, open_call
@@ -82,8 +82,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         # Exits in reverse: calls close first, then their summaries finish with the LLM
         # and history still available.
-        async with (groq_api.shared_groq_client(), agent.lifespan(app),
-                    memory.lifespan(agent.postgres_conninfo), webrtc.lifespan(app),
+        async with (groq_api.shared_groq_client(), access.lifespan(), agent.lifespan(app),
+                    memory.lifespan(agent.postgres_conninfo, agent.delete_thread),
+                    webrtc.lifespan(app),
                     telnyx.lifespan(app)):
             yield
     finally:
@@ -141,7 +142,7 @@ async def voice(socket: WebSocket) -> None:
         # Without echo cancellation the assistant's own voice would interrupt it.
         try:
             call = await open_call(engines, send, str(uuid4()), barge_in=settings.echo_cancelled,
-                                   caller_id=memory.web_caller_key(socket.headers))
+                                   caller_id=await memory.web_caller_key(socket.headers))
         except SpeechUnavailable as error:
             await send({"type": "error", "error": str(error)})
             return

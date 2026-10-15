@@ -1,10 +1,12 @@
 """Call WebSocket contract, with fake engines in place of Deepgram."""
+import time
+
 import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
-from app import main
+from app import access, main
 from tests.test_pipeline import FakeListener, make_engines
 
 
@@ -114,16 +116,18 @@ def test_health_reports_whether_speech_is_configured(engines):
     assert TestClient(main.app).get("/healthz").json() == {"ok": True, "speech": True}
 
 
-def test_access_email_identifies_a_browser_caller_when_trusted(engines, monkeypatch):
+def test_only_a_verified_access_token_identifies_a_browser_caller(engines, monkeypatch):
+    from tests.test_access import AUD, TEAM, keys, token
     callers = []
 
     async def begin_call(conversation_id, caller_id):
         callers.append(caller_id)
 
     main.app.state.engines.begin_call = begin_call
-    headers = {"Cf-Access-Authenticated-User-Email": "Asha@Example.com"}
-    for trusted in ("0", "1"):
-        monkeypatch.setenv("CF_ACCESS_EMAIL_HEADER", trusted)
+    monkeypatch.setattr(access, "verifier", access.AccessVerifier(
+        TEAM, AUD, keys=keys(), fetched_at=time.monotonic()))
+    for headers in ({"Cf-Access-Authenticated-User-Email": "asha@example.com"},
+                    {"Cf-Access-Jwt-Assertion": token()}):
         with TestClient(main.app).websocket_connect("/ws/voice", headers=headers) as socket:
             socket.send_json(START)
             assert socket.receive_json()["type"] == "ready"

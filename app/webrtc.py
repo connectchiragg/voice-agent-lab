@@ -468,7 +468,7 @@ async def offer(offer: Offer, request: Request) -> dict[str, str]:
         logger.warning("No browser echo cancellation; barge-in disabled for this call.")
     try:
         peer.call = await open_call(engines, peer.send, str(uuid4()), barge_in=offer.echo_cancelled,
-                                    caller_id=memory.web_caller_key(request.headers))
+                                    caller_id=await memory.web_caller_key(request.headers))
     except SpeechUnavailable as error:
         await peer.close("the speech service is unavailable")
         raise HTTPException(503, str(error)) from error
