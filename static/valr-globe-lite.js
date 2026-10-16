@@ -20,7 +20,7 @@ function toXYZ(lat, lng) {
 }
 
 export function mount(el, data, {onSelect} = {}) {
-  const ORDER = ["offer", "interviewing", "screening", "applied", "other", "closed"];
+  const ORDER = ["offer", "final", "interviewing", "screening", "applied", "other", "closed"];
   const sorted = [...(data?.leads ?? [])].sort((a, b) =>
     (ORDER.indexOf(a.stage) - ORDER.indexOf(b.stage)) || (hash(a.id) - hash(b.id)));
   const count = Math.max(sorted.length, 10);
@@ -143,7 +143,7 @@ export function mount(el, data, {onSelect} = {}) {
       const [x, y, z] = s;
       const front = z > -0.05;
       const c = stageColor(n.lead.stage);
-      const size = (n.lead.stage === "interviewing" || n.lead.stage === "offer" ? 5 : 3.6) * (0.75 + Math.max(z, 0) * 0.4);
+      const size = (["interviewing", "final", "offer"].includes(n.lead.stage) ? 5 : 3.6) * (0.75 + Math.max(z, 0) * 0.4);
       ctx.globalAlpha = front ? 1 : 0.22;
       if (front) {
         const halo = ctx.createRadialGradient(x, y, 0, x, y, size * 4);
@@ -159,7 +159,7 @@ export function mount(el, data, {onSelect} = {}) {
         ctx.strokeStyle = ink; ctx.lineWidth = 1.5;
         ctx.beginPath(); ctx.arc(x, y, size + 5, 0, TAU); ctx.stroke();
       }
-      const labelled = front && z > 0.25 && (n.lead.stage === "interviewing" || n.lead.stage === "offer" || n.lead.waiting_on_you);
+      const labelled = front && z > 0.25 && (["interviewing", "final", "offer"].includes(n.lead.stage) || n.lead.waiting_on_you);
       if (labelled || isSel || isHover) {
         const text = n.lead.company.toUpperCase();
         ctx.fillStyle = "rgba(5,7,12,0.7)";

@@ -94,7 +94,8 @@ daily (Schedule valr-gmail-watch) ──> GmailWatchWorkflow: users.watch again 
        chat; stage hint: screening);
      - the organizer or an attendee is already a contact on a Gmail lead (screening).
 5. **Stage, expiry and next step.**
-   - The stage moves only forward: sourced → applied → screening → interviewing → offer.
+   - The stage moves only forward: sourced → applied → screening → interviewing → final stages
+  → offer.
    - A touchpoint can close a lead: closed-won or closed-lost.
    - A hint of screening or later re-opens a closed-lost lead.
    - A lead that is not closed, with no touchpoint for 21 days and nothing scheduled, is
@@ -142,20 +143,34 @@ Every live lead lands in one of four bands. Closed leads are their own grey band
 | Momentum | 0–25 | Next step: an interview within 7 days 15, within 14 days 9, an open offer 15; + 10 × min(1, touches in the last 14 days / 4) |
 | Quality | 0–15 | Interview score 5 × mean/10 (2.5 with none) + recruiter tone 5 × (mean of the last 3 inbound sentiments + 1)/2 (2.5) + latest cue: positive 5, none 2.5, negative 0 |
 
-Caps: ghosted at most 24 (always Cold), closed-lost at most 10. Each lead carries its parts
+Caps: ghosted at most 24 (always Cold), closed-lost at most 10.
+
+**Hot tiers.** A Hot lead is placed by its stage; recency, momentum and quality (scaled 0–1)
+only move it inside its tier, never above a higher one:
+
+| Tier | Score | When |
+|---|---|---|
+| Offer | 95–100 | An open offer, always the hottest |
+| Final stages | 88–94 | Stage `final` ("Final stages"): a final round, an offer discussion, references, a background check; once interviewing, also an HR round or compensation/CTC talk. Found in the classifier's stage hint, the next step or the calendar/email title, or set by him. Hot while their last move is under 14 days old or something is booked. |
+| Later round | 80–87 | Interviewing and active, after a second round or for a panel, onsite or hiring-manager round |
+| Early round | 75–79 | Interviewing and active (an interview within 7 days, or a plain score of 75+) | Each lead carries its parts
 (points, maximum, a one-line reason), and the card shows them as bars.
 
 The archetypes in `tests/test_leads_temperature.py` are the spec (scores within ±2):
 
 | Situation | Score | Band | Ball in court |
 |---|---|---|---|
-| Final round tomorrow after two strong rounds | 90 | Hot | nobody (booked) |
-| Interviewing, next interview in 3 days | 86 | Hot | nobody (booked) |
-| Offer received 3 days ago | 84 | Hot | **you** (decide) |
+| Offer received 3 days ago | 99 | Hot (offer) | **you** (decide) |
+| Final round tomorrow after two strong rounds | 94 | Hot (final) | nobody (booked) |
+| Compensation talk with HR booked after the rounds | 93 | Hot (final) | nobody (booked) |
+| References requested after the onsite | 92 | Hot (final) | **you** |
+| Interviewing, next interview in 3 days (a panel) | 86 | Hot (later round) | nobody (booked) |
+| First technical round in 2 days | 78 | Hot (early round) | nobody (booked) |
 | Recruiter screen booked in 2 days | 68 | Warm | nobody (booked) |
 | Interviewed 2 days ago, waiting for feedback | 66 | Warm | them |
 | Take-home sent 3 days ago, not submitted | 60 | Warm | **you** |
 | Recruiter replied yesterday asking for availability | 58 | Warm | **you** |
+| Recruiter asks your expected CTC before a first screen | 55 | Warm (not final: too early) | **you** |
 | You answered the recruiter's question yesterday | 53 | Warm | them |
 | Interviewed 2 weeks ago, then silence | 46 | Cool | them |
 | Applied 2 days ago, no reply | 44 | Cool | them |

@@ -86,7 +86,9 @@ def test_temperature_parts_add_up_and_rank():
         p = lead.parts
         raw = sum(p[k]["points"] for k in ("recency", "stage", "momentum", "quality"))
         assert 0 <= lead.temperature <= 100
-        if p["cap"] is None:
+        if p["tier"]:  # Hot: placed inside its stage's tier.
+            assert p["tier"]["low"] <= lead.temperature <= p["tier"]["high"]
+        elif p["cap"] is None:
             assert abs(raw - lead.temperature) <= 1.0
         else:
             assert lead.temperature <= p["cap"]

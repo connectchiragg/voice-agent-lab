@@ -135,3 +135,9 @@ function simulate(rgb, vision) {
   return MACHADO[vision].map((row) => Math.max(0, Math.min(1, row[0] * rgb[0] + row[1] * rgb[1] + row[2] * rgb[2])));
 }
 function dE(a, b) { return Math.hypot(...a.map((v, i) => v - b[i])); }
+
+test("final stages sit between interviewing and an offer in size", () => {
+  const r = (stage) => nodeRadius({ stage });
+  assert.ok(r("interviewing") < r("final") && r("final") < r("offer"));
+  assert.equal(tipText({ company: "Acme", temperature: 92, stage: "final" }, NOW), "Acme · Hot · 92 · Final stages · no touch yet");
+});
