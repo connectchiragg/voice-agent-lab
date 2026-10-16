@@ -1,30 +1,69 @@
-// The VALR cockpit's behaviour: countdowns, the performance chart, the owner's
-// actions (POST with the page's CSRF token) and a quiet refresh when something changes.
+// /valr behaviour: countdowns, the interview drawer, the owner's actions (POST with the
+// page's CSRF token), the prep checklists, the trend chart and a quiet refresh.
 const csrf = document.querySelector('meta[name="csrf-token"]')?.content ?? "";
 const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
 
-// Countdowns.
+// Relative times next to the IST times the server wrote.
 function until(ms) {
-  if (ms <= 0) return "now";
-  const minutes = Math.round(ms / 60000);
+  const minutes = Math.round(Math.abs(ms) / 60000);
+  if (minutes < 1) return "now";
   if (minutes < 60) return `${minutes} min`;
   const hours = Math.floor(minutes / 60);
   if (hours < 48) return `${hours} h ${String(minutes % 60).padStart(2, "0")} min`;
-  return `${Math.floor(hours / 24)} days`;
+  return `${Math.round(hours / 24)} days`;
 }
 function tick() {
   const now = Date.now();
   document.querySelectorAll("[data-countdown]").forEach(node => {
     const ms = Date.parse(node.dataset.countdown) - now;
-    if (node.hasAttribute("data-short")) {
-      node.textContent = ms > 0 ? `in ${until(ms)}` : "passed";
-    } else {
-      node.textContent = ms > 0 ? `in ${until(ms)}` : "calling now";
-    }
+    node.textContent = ms > 30000 ? `in ${until(ms)}` : ms > -60000 ? "now" : `${until(ms)} ago`;
   });
 }
 tick();
 setInterval(tick, 15000);
+
+// Toasts.
+const toast = document.querySelector(".toast");
+let toastTimer = null;
+function say(text, ok = true) {
+  toast.textContent = text;
+  toast.classList.toggle("bad", !ok);
+  toast.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { toast.hidden = true; }, 5000);
+}
+
+// The interview drawer: a <dialog> per interview; the URL hash keeps it linkable.
+function openDrawer(ref, push = true) {
+  const dialog = document.getElementById(`iv-${ref}`);
+  if (!dialog || dialog.open) return;
+  document.querySelectorAll("dialog.drawer[open]").forEach(d => d.close());
+  dialog.showModal();
+  if (push) history.pushState({ref}, "", `#iv-${ref}`);
+  setTimeout(() => dialog.querySelector(".close")?.focus(), 50);
+}
+document.addEventListener("click", event => {
+  const opener = event.target.closest("[data-open]");
+  if (opener) {
+    event.preventDefault();
+    openDrawer(opener.dataset.open);
+    return;
+  }
+  if (event.target.closest("[data-close]")) event.target.closest("dialog").close();
+  if (event.target.matches("dialog.drawer")) event.target.close();  // A click on the backdrop.
+});
+document.querySelectorAll("dialog.drawer").forEach(dialog => {
+  dialog.addEventListener("close", () => {
+    if (location.hash === `#${dialog.id}`) history.pushState(null, "", location.pathname + location.search);
+  });
+});
+function fromHash() {
+  const match = location.hash.match(/^#iv-(slot-[\w-]+)$/);
+  document.querySelectorAll("dialog.drawer[open]").forEach(d => { if (!match || d.id !== `iv-${match[1]}`) d.close(); });
+  if (match) openDrawer(match[1], false);
+}
+addEventListener("popstate", fromHash);
+fromHash();
 
 // Actions.
 async function post(path, body = {}) {
@@ -34,56 +73,51 @@ async function post(path, body = {}) {
     body: JSON.stringify(body),
   });
   const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(typeof data.detail === "string" ? data.detail : `HTTP ${response.status}`);
+  if (!response.ok) throw new Error(typeof data.detail === "string" ? data.detail : `Something went wrong (HTTP ${response.status}).`);
   return data;
 }
-function report(near, text, ok) {
-  const box = near.closest(".hero-actions, .slot-actions")?.querySelector(".action-result");
-  if (!box) return;
-  box.textContent = text;
-  box.className = `action-result small tone-${ok ? "ok" : "bad"}`;
-}
+const BUSY = {sync: "Syncing…", refresh: "Starting…", dials: "Saving…"};
 document.addEventListener("click", async event => {
   const button = event.target.closest("button[data-action]");
   if (!button) return;
   const action = button.dataset.action;
+  if (action === "reload") {
+    location.reload();
+    return;
+  }
+  const label = button.textContent;
+  button.setAttribute("aria-busy", "true");
   button.disabled = true;
+  button.textContent = BUSY[action];
   try {
-    const result = action === "sync" ? await post("/valr/api/sync")
-      : await post(`/valr/api/slots/${encodeURIComponent(button.dataset.ref)}/refresh`);
-    report(button, result.message ?? "Done.", true);
+    let result;
+    if (action === "sync") {
+      result = await post("/valr/api/sync");
+    } else if (action === "refresh") {
+      result = await post(`/valr/api/slots/${encodeURIComponent(button.dataset.ref)}/refresh`);
+    } else if (action === "dials") {
+      result = await post("/valr/api/dials", {paused: button.dataset.paused === "true"});
+      setTimeout(() => { rememberOpen(); location.reload(); }, 600);
+    }
+    say(result?.message ?? "Done.");
     scheduleCheck(4000);
   } catch (error) {
-    report(button, error.message, false);
+    say(error.message, false);
   } finally {
-    setTimeout(() => { button.disabled = false; }, 3000);
-  }
-});
-const dials = document.querySelector("#dials-toggle");
-dials?.addEventListener("change", async () => {
-  const paused = !dials.checked;
-  dials.disabled = true;
-  try {
-    const result = await post("/valr/api/dials", {paused});
-    document.querySelector("[data-dials-label]").textContent = paused ? "paused" : "on";
-    report(dials, result.message, true);
-    scheduleCheck(500);
-  } catch (error) {
-    dials.checked = !dials.checked;
-    report(dials, error.message, false);
-  } finally {
-    dials.disabled = false;
+    button.removeAttribute("aria-busy");
+    button.disabled = false;
+    button.textContent = label;
   }
 });
 
-// Prep checklist ticks: this browser only.
+// Prep checklists: ticks stay in this browser only.
 const CHECKS = "valr-checklist";
 function loadChecks() {
   try { return JSON.parse(localStorage.getItem(CHECKS) ?? "{}"); } catch { return {}; }
 }
 const checks = loadChecks();
 document.querySelectorAll("[data-check]").forEach(box => {
-  const key = box.nextElementSibling?.textContent ?? box.dataset.check;
+  const key = `${box.dataset.check.split(":")[0]}:${box.nextElementSibling?.textContent ?? ""}`;
   box.checked = Boolean(checks[key]);
   box.addEventListener("change", () => {
     checks[key] = box.checked;
@@ -91,29 +125,25 @@ document.querySelectorAll("[data-check]").forEach(box => {
   });
 });
 
-// Keep open briefings open across a refresh.
-const OPEN = "valr-open";
-try {
-  const open = new Set(JSON.parse(sessionStorage.getItem(OPEN) ?? "[]"));
-  document.querySelectorAll(".slot[data-ref]").forEach(slot => {
-    if (open.has(slot.dataset.ref)) slot.querySelector("details").open = true;
-  });
-} catch {}
+// Quiet refresh: poll the JSON state; reload only when something shown changed.
 function rememberOpen() {
-  const refs = [...document.querySelectorAll(".slot[data-ref] details[open]")]
-    .map(details => details.closest(".slot").dataset.ref);
-  try { sessionStorage.setItem(OPEN, JSON.stringify(refs)); } catch {}
+  const open = document.querySelector("dialog.drawer[open]");
+  try { sessionStorage.setItem("valr-open", open ? open.id : ""); } catch {}
 }
-
-// Quiet refresh: poll the JSON state; reload only when what is shown changed.
+try {
+  const open = sessionStorage.getItem("valr-open");
+  if (open && !location.hash) openDrawer(open.replace(/^iv-/, ""), false);
+  sessionStorage.removeItem("valr-open");
+} catch {}
 function signature(view) {
   return JSON.stringify([
-    view.dials_paused?.enabled, view.next_call?.at, view.jobs?.length && view.jobs[0].status,
+    view.dials_paused?.enabled, view.next_call?.at, view.jobs?.[0]?.status,
     (view.blocks ?? []).map(b => [b.id, b.state, b.slots.map(s => [s.ref, s.status, s.updated_at])]),
   ]);
 }
 let baseline = null;
 let checkTimer = null;
+const updated = document.querySelector("[data-updated]");
 async function check() {
   if (document.hidden) return;
   try {
@@ -123,8 +153,12 @@ async function check() {
     if (baseline !== null && now !== baseline) {
       rememberOpen();
       location.reload();
+      return;
     }
     baseline = now;
+    if (updated) {
+      updated.textContent = new Date().toLocaleTimeString("en-US", {hour: "numeric", minute: "2-digit", timeZone: "Asia/Kolkata"});
+    }
   } catch {}
 }
 function scheduleCheck(delay) {
@@ -135,7 +169,7 @@ check();
 setInterval(check, 60000);
 document.addEventListener("visibilitychange", () => { if (!document.hidden) check(); });
 
-// The performance chart: hand-rolled SVG, one line per dimension (mean score per day).
+// The trend chart: single interviews as dots, the 3-interview average as the line.
 const SVG = "http://www.w3.org/2000/svg";
 function el(name, attrs = {}, parent) {
   const node = document.createElementNS(SVG, name);
@@ -143,37 +177,57 @@ function el(name, attrs = {}, parent) {
   parent?.append(node);
   return node;
 }
+const source = document.querySelector("#perf-data");
+const data = source ? JSON.parse(source.textContent) : null;
+let chosen = "overall";
+function series(key) {
+  if (key === "overall") return {raw: data.overall.raw, ma: data.overall.ma, label: "Overall"};
+  const trend = data.trends[key];
+  const label = data.dimensions.find(d => d.key === key)?.label ?? key;
+  return {raw: trend.raw, ma: trend.ma, label};
+}
 function drawChart() {
   const holder = document.querySelector("#perf-chart");
-  const source = document.querySelector("#perf-data");
-  if (!holder || !source) return;
-  const {rows, dimensions} = JSON.parse(source.textContent);
-  const dims = Object.keys(dimensions);
-  if (!rows.length || !dims.length) return;
-  const styles = getComputedStyle(document.documentElement);
-  const colors = dims.map((_, i) => styles.getPropertyValue(`--c${(i % 7) + 1}`).trim());
-  const days = [...new Set(rows.map(r => r.date))].sort();
-  const t = day => Date.parse(`${day}T00:00:00Z`);
-  const t0 = t(days[0]);
-  const t1 = Math.max(t(days.at(-1)), t0 + 86400000);
-  const width = Math.max(holder.clientWidth, 300);
-  const height = width < 520 ? 240 : 280;
-  const pad = {l: 28, r: 12, t: 12, b: 28};
+  if (!holder || !data || !data.interviews.length) return;
+  const days = data.interviews.map(i => Date.parse(`${i.date}T00:00:00Z`));
+  const t0 = days[0];
+  const t1 = Math.max(days.at(-1), t0 + 86400000);
+  const width = Math.max(holder.clientWidth, 280);
+  const height = width < 560 ? 230 : 280;
+  const pad = {l: 30, r: 14, t: 14, b: 30};
   const x = ms => pad.l + ((ms - t0) / (t1 - t0)) * (width - pad.l - pad.r);
-  const y = score => pad.t + ((5 - score) / 4) * (height - pad.t - pad.b);
+  const y = v => pad.t + ((10 - v) / 9) * (height - pad.t - pad.b);
   holder.replaceChildren();
   const svg = el("svg", {viewBox: `0 0 ${width} ${height}`, "aria-hidden": "true"}, holder);
   const grid = el("g", {class: "grid axis"}, svg);
-  for (let s = 1; s <= 5; s++) {
-    el("line", {x1: pad.l, x2: width - pad.r, y1: y(s), y2: y(s)}, grid);
-    el("text", {x: pad.l - 10, y: y(s) + 4, "text-anchor": "end"}, grid).textContent = s;
+  for (const v of [1, 4, 7, 10]) {
+    el("line", {x1: pad.l, x2: width - pad.r, y1: y(v), y2: y(v)}, grid);
+    el("text", {x: pad.l - 10, y: y(v) + 3, "text-anchor": "end"}, grid).textContent = v;
   }
-  const ticks = Math.min(days.length, width < 520 ? 3 : 6);
+  const ticks = Math.min(days.length, width < 560 ? 3 : 6);
   for (let i = 0; i < ticks; i++) {
     const ms = t0 + ((t1 - t0) * i) / Math.max(ticks - 1, 1);
-    const label = new Date(ms).toLocaleDateString(undefined, {day: "numeric", month: "short", timeZone: "UTC"});
-    el("text", {x: x(ms), y: height - 8, "text-anchor": i === 0 ? "start" : i === ticks - 1 ? "end" : "middle"}, grid)
-      .textContent = label;
+    const label = new Date(ms).toLocaleDateString("en-GB", {day: "numeric", month: "short", timeZone: "UTC"}).toUpperCase();
+    el("text", {x: x(ms), y: height - 8, "text-anchor": i === 0 ? "start" : i === ticks - 1 ? "end" : "middle"}, grid).textContent = label;
+  }
+  // The other dimensions' averages, faint, for context.
+  if (chosen !== "overall") {
+    for (const other of Object.keys(data.trends).filter(k => k !== chosen)) {
+      const s = series(other);
+      const d = s.ma.map((v, i) => v === null ? null : `${x(days[i]).toFixed(1)},${y(v).toFixed(1)}`).filter(Boolean);
+      if (d.length > 1) el("path", {class: "ma faint", d: `M${d.join("L")}`}, svg);
+    }
+  }
+  const s = series(chosen);
+  const points = s.ma.map((v, i) => v === null ? null : [x(days[i]), y(v)]).filter(Boolean);
+  if (points.length > 1) {
+    el("path", {class: "ma-area", d: `M${points.map(p => p.join(",")).join("L")}L${points.at(-1)[0]},${y(1)}L${points[0][0]},${y(1)}Z`}, svg);
+    const line = el("path", {class: "ma", d: `M${points.map(p => p.join(",")).join("L")}`}, svg);
+    if (!reduceMotion) {
+      const length = line.getTotalLength();
+      line.animate([{strokeDasharray: `${length}`, strokeDashoffset: length}, {strokeDasharray: `${length}`, strokeDashoffset: 0}],
+        {duration: 800, easing: "ease-out"});
+    }
   }
   let tip = holder.parentElement.querySelector(".chart-tip");
   if (!tip) {
@@ -182,61 +236,31 @@ function drawChart() {
     holder.parentElement.append(tip);
   }
   tip.hidden = true;
-  const groups = {};
-  dims.forEach((dim, i) => {
-    const byDay = new Map();
-    rows.filter(r => r.dimension === dim).forEach(r => {
-      const list = byDay.get(r.date) ?? [];
-      list.push(r);
-      byDay.set(r.date, list);
+  s.raw.forEach((v, i) => {
+    if (v === null || v === undefined) return;
+    const dot = el("circle", {class: "raw", cx: x(days[i]), cy: y(v), r: 4}, svg);
+    const ma = s.ma[i];
+    if (ma !== null) el("circle", {class: "ma-dot", cx: x(days[i]), cy: y(ma), r: 3.5}, svg);
+    const hit = el("circle", {cx: x(days[i]), cy: y(v), r: 14, fill: "transparent"}, svg);
+    hit.addEventListener("pointerenter", () => {
+      const interview = data.interviews[i];
+      tip.textContent = `${interview.company} · ${interview.date} · ${s.label} ${v.toFixed(1)} (avg ${ma?.toFixed(1) ?? "–"})`;
+      tip.hidden = false;
+      const scale = holder.getBoundingClientRect().width / width;
+      tip.style.left = `${Math.max(0, Math.min(x(days[i]) * scale - 90, holder.clientWidth - 260))}px`;
+      tip.style.top = `${y(v) * scale - 44}px`;
     });
-    const points = [...byDay.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([day, list]) => ({
-      day, score: list.reduce((sum, r) => sum + r.score, 0) / list.length,
-      who: list.map(r => r.company).filter(Boolean).join(", "),
-    }));
-    const group = groups[dim] = el("g", {class: "series", style: `color:${colors[i]}`}, svg);
-    const d = points.map((p, k) => `${k ? "L" : "M"}${x(t(p.day)).toFixed(1)},${y(p.score).toFixed(1)}`).join("");
-    const path = el("path", {d, stroke: "currentColor"}, group);
-    if (!reduceMotion) {
-      const length = path.getTotalLength();
-      path.style.strokeDasharray = `${length}`;
-      path.style.strokeDashoffset = `${length}`;
-      path.animate([{strokeDashoffset: length}, {strokeDashoffset: 0}], {duration: 900, easing: "ease-out", fill: "forwards"});
-    }
-    points.forEach(p => {
-      const dot = el("circle", {cx: x(t(p.day)), cy: y(p.score), r: 4, fill: "currentColor"}, group);
-      dot.addEventListener("pointerenter", () => {
-        tip.textContent = `${dimensions[dim].label}: ${p.score.toFixed(1)} · ${p.day}${p.who ? ` · ${p.who}` : ""}`;
-        tip.hidden = false;
-        const box = holder.getBoundingClientRect();
-        const scale = box.width / width;
-        tip.style.left = `${Math.min(x(t(p.day)) * scale, box.width - 180)}px`;
-        tip.style.top = `${y(p.score) * scale - 36}px`;
-      });
-      dot.addEventListener("pointerleave", () => { tip.hidden = true; });
-    });
-  });
-  const legend = document.querySelector("#perf-legend");
-  legend.replaceChildren();
-  let focused = null;
-  dims.forEach((dim, i) => {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.setAttribute("aria-pressed", "false");
-    button.style.color = colors[i];
-    button.innerHTML = "<i></i>";
-    button.querySelector("i").style.background = colors[i];
-    button.append(document.createTextNode(dimensions[dim].label));
-    button.title = "Highlight this dimension";
-    button.addEventListener("click", () => {
-      focused = focused === dim ? null : dim;
-      holder.classList.toggle("focus", focused !== null);
-      Object.entries(groups).forEach(([name, group]) => group.classList.toggle("on", name === focused));
-      legend.querySelectorAll("button").forEach(b => b.setAttribute("aria-pressed", String(b === button && focused !== null)));
-    });
-    legend.append(button);
+    hit.addEventListener("pointerleave", () => { tip.hidden = true; });
+    dot.dataset.i = i;
   });
 }
+document.querySelectorAll(".pick").forEach(button => {
+  button.addEventListener("click", () => {
+    chosen = button.dataset.dim;
+    document.querySelectorAll(".pick").forEach(b => b.setAttribute("aria-pressed", String(b === button)));
+    drawChart();
+  });
+});
 drawChart();
 let resizeTimer = null;
 addEventListener("resize", () => {

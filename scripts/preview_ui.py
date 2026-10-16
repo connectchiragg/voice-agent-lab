@@ -1,6 +1,8 @@
 """Local preview of both pages with fictional data: the call page (/) and the VALR cockpit (/valr).
 
     VALR_DEV_PREVIEW=1 python scripts/preview_ui.py        # http://127.0.0.1:8090/ and /valr
+    .../valr?scenario=empty                                 # first run: nothing connected, no data
+    .../valr?scenario=error                                 # the calendar store is down
 
 No Postgres, Temporal, Deepgram or LLM: the cockpit shows tests/valr_sample.py's made-up
 interviews, its buttons change in-memory state only, and a call talks to the stub
@@ -12,6 +14,7 @@ and be addressed to 127.0.0.1 (app/valr_dashboard.py). The app's images contain 
 this script nor tests/, and their startup never enables the preview.
 """
 import argparse
+import contextvars
 import os
 import sys
 from pathlib import Path
@@ -37,9 +40,20 @@ def main() -> None:
     valr_dashboard.enable_dev_preview(args.host)  # Raises unless VALR_DEV_PREVIEW=1 and loopback.
     os.environ["VALR_ADMIN_EMAILS"] = valr_dashboard.PREVIEW_EMAIL
     state = {"paused": False}
+    scenario: contextvars.ContextVar[str] = contextvars.ContextVar("scenario", default="full")
+
+    @app_main.app.middleware("http")
+    async def pick_scenario(request, call_next):
+        wanted = request.query_params.get("scenario", "full")
+        if wanted == "down" and request.url.path == "/valr":
+            from fastapi.responses import HTMLResponse
+            from app import valr_page
+            return HTMLResponse(valr_page.error_page("The database didn't answer."), status_code=503)
+        scenario.set(wanted if wanted in ("full", "empty", "error") else "full")
+        return await call_next(request)
 
     async def collect(pool, now=None):
-        return sample_view(paused=state["paused"])
+        return sample_view(paused=state["paused"], scenario=scenario.get())
 
     class Pool:
         def connection(self):
