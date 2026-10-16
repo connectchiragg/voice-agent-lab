@@ -79,9 +79,23 @@ def test_no_attendee_email_or_phone_number_is_shown(client):
         assert "greenhouse" not in text.lower() and "555 0134" not in text
         assert "[phone hidden]" in text and "[email hidden]" in text
     page = client.get("/valr", headers=GOOD).text
-    assert "Maya Lin" in page and "skipped: HR / recruiting" in page  # Names and roles, not addresses.
-    assert "$180k-$215k" in page  # Comp stays visible to the owner.
-    assert "R1" in page and "Interview intel" in page and "Company &amp; pay" in page
+    assert "Maya Lin" in page and "Recruiter, not researched" in page  # Names and roles, not addresses.
+    assert "$180k-$215k" in page and "45–60 LPA" in page  # Pay stays visible to the owner.
+    assert "+1 228 888 8007" in page  # VALR's own number, to call it: not an attendee's.
+
+
+def test_plain_language_and_ist_times(client):
+    import re
+    page = client.get("/valr", headers=GOOD).text
+    for heading in ("Who you're meeting", "What to expect in this round", "Likely questions",
+                    "Pay snapshot", "Prep checklist", "From your emails &amp; past rounds", "Focus this week"):
+        assert heading in page, heading
+    visible = re.sub(r"<[^>]+>", " ", re.sub(r"<script.*?</script>|<[^>]*=\"[^\"]*\"", " ", page, flags=re.S))
+    for jargon in ("R1", "R2", "R3", "slot", "workflow", "cache hit", " block"):
+        assert jargon not in visible, jargon
+    times = re.findall(r"\b\d{1,2}:\d{2} (?:AM|PM) IST\b", page)
+    assert times and not re.search(r">\d{2}:\d{2}<", page)  # 12-hour IST, never bare 24-hour times.
+    assert "Times in IST" in page
 
 
 def test_pause_flag_round_trip_needs_owner_and_csrf(client):
@@ -105,7 +119,7 @@ def test_pause_flag_round_trip_needs_owner_and_csrf(client):
     assert ok.status_code == 200 and ok.json()["paused"] is True
     assert client.flags == {interview_store.DIALS_PAUSED: True}
     page = client.get("/valr", headers=GOOD).text
-    assert "Automatic calls are paused" in page and "Paused: no automatic call" in page
+    assert "Briefing calls paused" in page and "Paused: no call" in page and "Resume calls" in page
     assert client.get("/valr/api/state", headers=GOOD).json()["next_call"] is None
     client.post("/valr/api/dials", content=json.dumps({"paused": False}),
                 headers={**json_headers, "X-CSRF-Token": csrf})
@@ -213,3 +227,25 @@ def test_dev_preview_is_loopback_only(monkeypatch):
 
 async def _view():
     return sample_view()
+
+
+@pytest.mark.parametrize("scenario,expected", [
+    ("empty", ["Finish setting up", "Connect your Google Calendar", "Your scores appear after"]),
+    ("error", ["We couldn't load your interviews just now", "Reconnect"]),
+])
+def test_first_run_and_error_states(client, monkeypatch, scenario, expected):
+    async def collect(pool, now=None):
+        return sample_view(scenario=scenario)
+    monkeypatch.setattr(valr_view, "collect", collect)
+    page = client.get("/valr", headers=GOOD).text
+    for text in expected:
+        assert text in page, text
+
+
+def test_a_database_outage_is_a_page_not_a_traceback(client, monkeypatch):
+    async def collect(pool, now=None):
+        raise OSError("connection refused")
+    monkeypatch.setattr(valr_view, "collect", collect)
+    response = client.get("/valr", headers=GOOD)
+    assert response.status_code == 503 and "can't read its data" in response.text
+    assert "connection refused" not in response.text

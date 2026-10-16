@@ -21,7 +21,98 @@ def _part(summary, claims, ok=True):
         {"claim": c, "source_url": u} for c, u in claims]}, "evidence": "", "seen_urls": []}
 
 
-def sample_view(now: datetime | None = None, paused: bool = False) -> dict:
+def _round():
+    part = _part("A 60-minute system design round: 45 minutes on one problem, then your questions. "
+                 "Senior candidates are expected to drive the design and size it.", [
+                     ("Glassdoor reports a 'design a metrics pipeline' prompt.",
+                      "https://www.glassdoor.example/Interview/Juniper"),
+                     ("Interviewers score trade-offs and capacity estimates explicitly.",
+                      "https://www.glassdoor.example/Interview/Juniper-2")])
+    part["findings"]["likely_questions"] = [
+        "Design ingestion for sensor data from 10,000 robots at 50 Hz.",
+        "How would you backfill a day of data after an outage without double counting?",
+        "Batch or streaming for fleet health alerts? Defend it.",
+        "Walk us through partitioning a 5 TB Postgres table."]
+    part["findings"]["prep"] = ["Size 10k robots x 50 Hz x 200 B before drawing boxes",
+                                "Have one exactly-once vs at-least-once story ready",
+                                "Prepare a question about their Kafka migration"]
+    return part
+
+
+def _company():
+    part = _part("Series C warehouse-robotics company, 400 people; raised $90M in May.", [
+        ("Series C, $90M, May 2026.", "https://news.example/juniper-series-c"),
+        ("Senior backend base $180k-$215k (US); India roles 45-60 LPA.",
+         "https://levels.example/companies/juniper/salaries"),
+        ("Hybrid, three office days in Bengaluru.", "https://careers.juniper.example/bengaluru")])
+    part["findings"]["pay_range"] = {"min": 45, "max": 60, "unit": "LPA", "currency": "INR",
+                                     "source_url": "https://levels.example/companies/juniper/salaries"}
+    return part
+
+
+DIMENSIONS = [
+    ("technical_depth", "Technical depth", [("tradeoffs", "Trade-offs"), ("numbers", "Numbers & sizing")]),
+    ("problem_solving", "Problem solving", [("clarify", "Clarifying"), ("decompose", "Decomposition")]),
+    ("communication", "Communication", [("answer_first", "Answer first"), ("concise", "Concision")]),
+    ("structure", "Structure", [("star", "STAR stories"), ("signposting", "Signposting")]),
+    ("confidence", "Confidence", [("ownership", "Owning decisions")]),
+    ("pushback", "Handling pushback", [("hold_update", "Hold or update")]),
+    ("pay", "Pay conversations", [("defer", "Deferring the number")]),
+]
+
+
+def scorecards(now: datetime) -> dict:
+    """The profile agent's upcoming scorecard file, in the shape app/valr_view expects (1-10)."""
+    base = {"technical_depth": 6, "problem_solving": 6, "communication": 4.5, "structure": 4,
+            "confidence": 6, "pushback": 6.5, "pay": 4}
+    slope = {"technical_depth": 0.45, "problem_solving": 0.35, "communication": 0.6, "structure": 0.65,
+             "confidence": 0.05, "pushback": -0.4, "pay": 0.3}
+    companies = [("Lumen", "Phone screen"), ("Orbit", "System design"), ("Kite", "Coding"),
+                 ("Juniper", "Hiring manager"), ("Vela", "System design"), ("Tessel", "Coding"),
+                 ("Nimbus", "System design")]
+    interviews = []
+    for i, (company, round_) in enumerate(companies):
+        scores = {k: round(max(1, min(10, base[k] + slope[k] * i + (0.8 if (i + len(k)) % 3 == 0 else -0.3))), 1)
+                  for k in base}
+        subs = {sub: round(max(1, min(10, scores[k] + (0.6 if j else -0.5))), 1)
+                for k, _, ss in DIMENSIONS for j, (sub, _) in enumerate(ss)}
+        interviews.append({
+            "id": f"fathom:{1000 + i}", "date": (now - timedelta(days=70 - 10 * i)).date().isoformat(),
+            "company": company, "round": round_, "scores": scores, "sub_scores": subs,
+            "badges": (["Best clarity yet"] if i == 6 else []) + (["Sized it first"] if i in (4, 6) else []),
+            "questions": [
+                {"question": "Design a rate limiter for a public API", "score": round(5 + i * 0.5, 1),
+                 "feedback": "Good token-bucket choice; sized the Redis memory only when asked.",
+                 "better": "Lead with the numbers: 50k req/s, 1 KB per key, then pick the algorithm.",
+                 "strong": i > 3},
+                {"question": "Tell me about a time you disagreed with your manager", "score": round(7 - i * 0.3, 1),
+                 "feedback": "Clear situation, but the result was missing and you conceded quickly.",
+                 "better": "Close with the outcome and what you would hold firm on next time.",
+                 "strong": False},
+                {"question": "What are your salary expectations?", "score": round(4 + i * 0.4, 1),
+                 "feedback": "Deferred politely and asked for their range." if i > 2
+                 else "Gave a number before hearing their band.",
+                 "better": "Ask for the band first; tie your range to scope.", "strong": i > 2},
+            ],
+        })
+    return {"generated_at": (now - timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "dimensions": [{"key": k, "label": label, "subs": [{"key": s, "label": l} for s, l in ss]}
+                           for k, label, ss in DIMENSIONS],
+            "interviews": interviews,
+            "badges": [{"label": "3 rounds in a row: answer first", "detail": "Communication up 2.4 since August"},
+                       {"label": "Sizing habit", "detail": "Estimated capacity unprompted in 2 of the last 3 designs"}],
+            "focus_this_week": [
+                {"action": "Rehearse a 60-second capacity estimate out loud, twice a day",
+                 "why": "Sizing questions decided two of your last four design rounds."},
+                {"action": "When challenged, restate their concern before you answer",
+                 "why": "Handling pushback has dipped three rounds running."},
+                {"action": "Close every story with the result and a number",
+                 "why": "STAR answers lose points at the 'result' step."}]}
+
+
+def sample_view(now: datetime | None = None, paused: bool = False, scenario: str = "full") -> dict:
+    """scenario: full (a busy week), empty (first run: nothing connected, no data) or error
+    (the calendar store and Temporal are down)."""
     now = (now or datetime.now(timezone.utc)).replace(second=0, microsecond=0)
     first = now + timedelta(hours=2, minutes=40)
     tomorrow = (now + timedelta(days=1)).replace(hour=9, minute=30)
@@ -67,18 +158,14 @@ def sample_view(now: datetime | None = None, paused: bool = False) -> dict:
                                       "https://mail.google.com/mail/u/0/#inbox/18f2c"),
                                      ("Your last Juniper call (Fathom) stalled on capacity estimates.",
                                       "https://fathom.video/calls/123")]),
-                "round": _part("System design on telemetry ingestion is their standard senior round.", [
-                    ("Glassdoor reports a 'design a metrics pipeline' prompt.",
-                     "https://www.glassdoor.example/Interview/Juniper")]),
+                "round": _round(),
                 "interviewers_by_email": {"dev.k@juniper.example,maya.lin@juniper.example": _part(
                     "Maya leads telemetry; Dev runs the data platform.", [
                         ("Maya Lin: 'Streaming telemetry at fleet scale' (2025).",
                          "https://engineering.juniper.example/blog/streaming-telemetry"),
                         ("Dev Kapoor spoke on Postgres partitioning at PGConf.",
                          "https://pgconf.example/talks/kapoor")])},
-                "company": _part("Series C warehouse-robotics company, 400 people; raised $90M in May.", [
-                    ("Series C, $90M, May 2026.", "https://news.example/juniper-series-c"),
-                    ("Senior backend base $180k-$215k.", "https://levels.example/companies/juniper/salaries")]),
+                "company": _company(),
             },
         },
         "ev-juniper-2": {"key": "ev-juniper-2", "company_key": "juniper", "status": "partial",
@@ -98,21 +185,6 @@ def sample_view(now: datetime | None = None, paused: bool = False) -> dict:
     recorded = {valr_view.group_blocks(events)[0].block_id: {"state": "waiting",
                                                              "label": "your interviews with Juniper"}}
     blocks = valr_view.build_blocks(events, recorded, slots, jobs, {}, {"me@example.com"}, now, paused)
-    dims = list(valr_view.DIMENSION_LABELS)
-    base = {"technical_depth": 3, "problem_solving": 3, "communication_clarity": 2, "structure": 2,
-            "confidence": 3, "handling_pushback": 3, "compensation_handling": 2}
-    slope = {"technical_depth": 0.25, "problem_solving": 0.2, "communication_clarity": 0.35,
-             "structure": 0.3, "confidence": 0.0, "handling_pushback": -0.2, "compensation_handling": 0.15}
-    rows = []
-    for i, company in enumerate(["Lumen", "Orbit", "Kite", "Juniper", "Vela", "Tessel", "Nimbus"]):
-        day = (now - timedelta(days=70 - 10 * i)).date().isoformat()
-        for dim in dims:
-            score = max(1, min(5, round(base[dim] + slope[dim] * i + (0.4 if (i + len(dim)) % 3 == 0 else 0))))
-            rows.append({"date": day, "company": company, "round_type": "technical", "dimension": dim,
-                         "score": score})
-    trends = {d: {"direction": "improving" if slope[d] >= 0.15 else "declining" if slope[d] < 0 else "flat",
-                  "n": 7, "fitted_change": round(slope[d] * 6, 2), "last": {"score": rows[-7 + dims.index(d)]["score"]}}
-              for d in dims}
     evaluation = {"generated_at": (now - timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%SZ"), "brief": {
         "top_strengths": ["Clear event-driven architecture stories with real numbers",
                           "Calm, methodical debugging narration",
@@ -160,7 +232,25 @@ def sample_view(now: datetime | None = None, paused: bool = False) -> dict:
                                                  "last_error": None}, now),
         },
         "dials": {"briefing": {"used": 2, "limit": 12}, "callback": {"used": 1, "limit": 5}},
-        "performance": valr_view.performance({"rows": rows, "trends": trends}, evaluation),
+        "performance": valr_view.performance(None, evaluation, scorecards(now)),
+        "pay_target": {"min": 50, "max": 65, "unit": "LPA", "currency": "INR"},
+        "setup": {"phone_on_file": True, "test_call_done": True, "valr_number": "+12288888007"},
     }
+    if scenario == "empty":
+        view.update(blocks=[], jobs=[], pay_target=None,
+                    performance=valr_view.performance(None, None, None),
+                    setup={"phone_on_file": False, "test_call_done": False, "valr_number": "+12288888007"},
+                    dials={"briefing": {"used": 0, "limit": 12}, "callback": {"used": 0, "limit": 5}})
+        view["spend"].update(today_usd=0.0, month_usd=0.0, today_jobs=0, month_jobs=0, today_cached=0)
+        view["connections"] = {
+            "google": {"state": "not_connected", "account": "", "age_days": None, "expires_soon": False,
+                       "last_ok_at": None, "configured": True},
+            "fathom": {"configured": False},
+            "calendar": valr_view.calendar_view({}, now)}
+    elif scenario == "error":
+        view.update(blocks=[], errors=["timeline"],
+                    dials={"briefing": {"used": None, "limit": 12}, "callback": {"used": None, "limit": 5}})
+        view["connections"]["google"]["state"] = "reconnect_needed"
+        view["connections"]["calendar"]["last_error"] = "HTTP 401 from Google Calendar"
     view["next_call"] = valr_view.next_call(view["blocks"], now, paused)
     return view

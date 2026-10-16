@@ -175,7 +175,12 @@ async def google_callback(request: Request, code: str = "", state: str = "",
 @router.get("/valr", response_class=HTMLResponse)
 async def dashboard(request: Request) -> HTMLResponse:
     email = await viewer(request)
-    view = await state_view()
+    try:
+        view = await state_view()
+    except Exception as error:  # noqa: BLE001 - a page that says so, not a stack trace or JSON.
+        logger.warning("VALR dashboard unavailable: %s", type(error).__name__)
+        return HTMLResponse(valr_page.error_page("The database didn't answer."), status_code=503,
+                            headers=NO_CACHE)
     return HTMLResponse(valr_page.page(view, email, csrf_token(email)), headers=NO_CACHE)
 
 

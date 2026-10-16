@@ -309,7 +309,7 @@ function startVisualizer() {
     phaseAngle += reduceMotion ? 0 : 0.012;
     const rings = [
       [styles.getPropertyValue("--violet").trim(), you, base + 8, 1],
-      [styles.getPropertyValue("--cyan").trim(), valr, base + 26, -1],
+      [styles.getPropertyValue("--ice").trim(), valr, base + 26, -1],
     ];
     for (const [color, amount, radius, direction] of rings) {
       context.beginPath();
@@ -352,7 +352,7 @@ function drawIdle() {
   context.setTransform(ratio, 0, 0, ratio, 0, 0);
   const styles = getComputedStyle(document.documentElement);
   const base = Math.min(width, height) * 0.25;
-  [[styles.getPropertyValue("--violet").trim(), base + 8], [styles.getPropertyValue("--cyan").trim(), base + 26]]
+  [[styles.getPropertyValue("--violet").trim(), base + 8], [styles.getPropertyValue("--ice").trim(), base + 26]]
     .forEach(([color, radius]) => {
       context.beginPath();
       context.arc(width / 2, height / 2, radius, 0, Math.PI * 2);

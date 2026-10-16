@@ -3,12 +3,12 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-    <meta name="theme-color" content="#060b1c" />
+    <meta name="theme-color" content="#05070c" />
     <title>VALR · Voice Agent Lab</title>
-    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23060b1c'/%3E%3Cpath d='M8 9l8 15 8-15' stroke='%232ee6f5' stroke-width='3.5' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E" />
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%2305070c'/%3E%3Ccircle cx='16' cy='16' r='5' fill='%233b82ff'/%3E%3C/svg%3E" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" />
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=Space+Grotesk:wght@400;500;600&display=swap" />
     <link rel="stylesheet" href="/static/theme.css" />
     <link rel="stylesheet" href="/static/style.css" />
     <script type="module">
@@ -19,13 +19,7 @@
   </head>
   <body data-state="idle">
     <header class="topbar">
-      <div class="brand">
-        <span class="logo" aria-hidden="true">V</span>
-        <div>
-          <h1>VALR</h1>
-          <p class="muted tagline">Voice Agent Lab · talk to it like a person</p>
-        </div>
-      </div>
+      <span class="brand"><span class="brand-dot" aria-hidden="true"></span>valr<span class="brand-sub">/ voice</span></span>
       <div id="connection" class="conn" data-quality="none" title="How your audio reaches VALR">
         <span class="dot" aria-hidden="true"></span>
         <span class="conn-text">Not connected</span>
@@ -33,6 +27,10 @@
     </header>
 
     <main class="stage">
+      <section class="intro">
+        <p class="eyebrow"><span class="eb-num">00</span><span class="eb-rule"></span>Talk to VALR</p>
+        <h1>Just talk. <span class="dim">It listens, then answers<span class="accent">.</span></span></h1>
+      </section>
       <section class="orb-wrap" aria-label="Call">
         <canvas id="visualizer" class="visualizer" aria-hidden="true"></canvas>
         <button id="call" type="button" class="talk" aria-describedby="state-label status">
@@ -56,17 +54,17 @@
 
       <p id="status" class="status" role="status">Ready to start a call.</p>
 
-      <section class="transcript glass" aria-label="Live captions">
+      <section class="transcript panel" aria-label="Live captions">
         <div class="transcript-head">
           <h2>Live captions</h2>
-          <span class="muted small">Grey lines are still being heard</span>
+          <span class="label">Grey = still hearing you</span>
         </div>
         <div id="messages" role="log" aria-label="Chat messages" aria-live="polite">
           <p class="empty-log muted">Your conversation appears here, word by word, in time with VALR's voice.</p>
         </div>
       </section>
 
-      <details id="metrics-panel" class="metrics glass">
+      <details id="metrics-panel" class="metrics panel">
         <summary>
           <span class="metrics-title">Latency</span>
           <span id="metrics" class="metrics-summary num">No turns yet</span>
@@ -88,7 +86,7 @@
         </div>
       </details>
 
-      <details class="howto glass">
+      <details class="howto panel">
         <summary>How this works</summary>
         <ol class="pipeline">
           <li><b>You speak.</b> Your mic streams to the server over WebRTC (or a WebSocket with <code>?transport=ws</code>).</li>
