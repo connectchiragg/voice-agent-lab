@@ -132,3 +132,12 @@ def test_only_a_verified_access_token_identifies_a_browser_caller(engines, monke
             socket.send_json(START)
             assert socket.receive_json()["type"] == "ready"
     assert callers == [None, "email:asha@example.com"]
+
+
+def test_the_call_page_is_served_at_slash_call_on_any_host():
+    client = TestClient(main.app)  # No lifespan: no Groq or Deepgram needed for pages.
+    for host in ("valr.haciensus.com", "voice.haciensus.com"):
+        response = client.get("/call", headers={"host": host})
+        assert response.status_code == 200 and "<html" in response.text.lower()
+    assert client.get("/", headers={"host": "valr.haciensus.com"}, follow_redirects=False) \
+        .headers["location"] == "/valr"

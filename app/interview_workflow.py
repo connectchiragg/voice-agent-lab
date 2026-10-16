@@ -19,11 +19,13 @@ Three workflows, all run by the research worker:
     none -> nothing (the sync does not even signal).
   Each run is one research job (limits in app/research_jobs.py); after it, the slot's
   stored context is merged and its spoken brief re-written (slot_synthesize).
-- `BlockCallWorkflow`, one per block of back-to-back interviews (id from the block's
-  start, `briefing-<UTC start>`): calls the owner at T-15, then T-10 and T-5 if
-  unanswered, and stops after an answer. Its own daily dial budget ("briefing").
+- `BlockCallWorkflow`, one per block of back-to-back interviews (gaps under 30 minutes;
+  id from the block's start, `briefing-<UTC start>`): calls the owner once, 30 minutes
+  before the block's first interview, with no retries; unanswered is final. An interview
+  added later than that: as soon as its research is ready, if 5 minutes are left.
+  Its own daily dial budget ("briefing").
   Before each scheduled dial it asks `dials_paused` (the dashboard's pause switch);
-  a paused attempt is skipped, so resuming before T-5 still gets a call.
+  a paused call is skipped.
   The on-demand variant ("research tomorrow's interviews" on a call) waits for that
   call to end and for the slots' research, then calls back at once.
 
@@ -44,7 +46,11 @@ from app.interview_types import Person, SlotDiff, SlotEvent
 
 TASK_QUEUE = "voice-research"
 RESEARCH_LEAD = timedelta(minutes=60)
+# Before 2026-10-16 (kept for the replay of blocks started earlier): T-15, T-10, T-5.
 CALL_LEADS = (timedelta(minutes=15), timedelta(minutes=10), timedelta(minutes=5))
+SINGLE_CALL_LEAD = timedelta(minutes=30)  # Now: one call at T-30, no retries.
+MIN_LEFT_TO_CALL = timedelta(minutes=5)
+SINGLE_CALL_PATCH = "valr-single-call-t30"
 LINGER_AFTER_END = timedelta(minutes=30)
 CALL_END_WAIT = timedelta(minutes=11)
 READY_WAIT = timedelta(minutes=12)  # On-demand: longest wait for research before calling.
@@ -422,6 +428,23 @@ class BlockCallWorkflow:
                 await self.sleep(min(READY_POLL, max(deadline - workflow.now(), timedelta(seconds=1))))
             first = workflow.now()
             times = [first + timedelta(minutes=5) * index for index in range(len(CALL_LEADS))]
+        elif workflow.patched(SINGLE_CALL_PATCH):
+            # One call, 30 minutes before the block (owner's choice, 2026-10-16); no retries.
+            due = start - SINGLE_CALL_LEAD
+            if workflow.now() >= due:
+                # Added late: call as soon as the research is ready, if 5 minutes are left.
+                latest = start - MIN_LEFT_TO_CALL
+                self.status.state = "waiting_for_research"
+                while not self.cancelled and workflow.now() < latest:
+                    if await self.ready(self.slot_keys):
+                        break
+                    await self.sleep(min(READY_POLL, max(latest - workflow.now(), timedelta(seconds=1))))
+                if self.cancelled:
+                    return await self.finish(block, "cancelled")
+                if workflow.now() >= latest:
+                    return await self.finish(block, "missed", "under five minutes left: no call")
+                due = workflow.now()
+            times = [due]
         else:
             times = [start - lead for lead in CALL_LEADS]
         paused = 0
@@ -454,7 +477,8 @@ class BlockCallWorkflow:
             self.status.state = "waiting"
         if paused == len(times):
             return await self.finish(block, "paused", "automatic calls were paused")
-        return await self.finish(block, "unanswered", f"no answer after {len(times)} attempts")
+        return await self.finish(block, "unanswered", "no answer" if len(times) == 1
+                                 else f"no answer after {len(times)} attempts")
 
     async def paused(self) -> bool:
         try:

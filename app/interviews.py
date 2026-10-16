@@ -32,7 +32,7 @@ from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.service import RPCError
 
 from app import calendar_sync, callbacks, interview_store, memory, research
-from app.interview_types import SlotEvent, group_blocks, people, slot_workflow_id
+from app.interview_types import SlotEvent, brief_is_current, group_blocks, people, slot_workflow_id
 from app.interview_workflow import (TASK_QUEUE, BlockCallWorkflow, BlockInput,
                                     CalendarSyncWorkflow, InterviewSlotWorkflow, ResearchNow,
                                     SlotInput, SyncInput)
@@ -107,7 +107,9 @@ OWNER_RULES = (
     "himself. Help him prepare for his job interviews: his calendar (get_calendar), research and "
     "a briefing callback (research_interviews), briefings, follow-ups from the notes, and a quiz "
     "on likely questions when he asks (one question at a time, then one or two lines of "
-    "feedback). Be brief and natural. When a tool gives 'say' or 'label' text, say it word for "
+    "feedback). If he asks about an interview or to be briefed, call get_briefing first and give "
+    "any ready brief right away; offer research and a callback only for ones not ready, or when "
+    "he asks to refresh. Be brief and natural. When a tool gives 'say' or 'label' text, say it word for "
     "word: never rename a company or a person, never invent one, and keep times exactly. Always "
     "answer his latest question; never repeat your previous message. His pay and email details "
     "are private: only for him, only when relevant. When pay comes up, compare the market range "
@@ -436,6 +438,109 @@ async def researched(keys: list[str]) -> int:
     return sum(1 for slot in slots if slot["status"] in ("done", "partial"))
 
 
+# Briefs already researched: delivered on this call, no proposal and no callback.
+
+NOTES_IN_BRIEF, QUESTIONS_IN_BRIEF, PREP_IN_BRIEF = 8, 6, 4
+
+
+def owner_emails() -> set[str]:
+    return {e.strip().lower() for e in os.getenv("VALR_OWNER_EMAILS", "").split(",") if e.strip()}
+
+
+async def stored_slots(keys: list[str]) -> dict[str, dict[str, Any]]:
+    try:
+        async with research.pool.connection() as connection:  # type: ignore[union-attr]
+            await interview_store.setup(connection)
+            slots = await interview_store.load_slots(connection, keys)
+            company_keys = {slot.get("company_key") for slot in slots if slot.get("company_key")}
+            companies = {key: await interview_store.company(connection, key) for key in company_keys}
+    except Exception as error:  # noqa: BLE001
+        logger.warning("VALR briefs not loaded: %s", type(error).__name__)
+        return {}
+    for slot in slots:
+        slot["_company"] = companies.get(slot.get("company_key"))
+    return {slot["key"]: slot for slot in slots}
+
+
+def brief_payload(event: SlotEvent, slot: dict[str, Any], zone: ZoneInfo) -> dict[str, Any]:
+    """What the call needs to give one brief: the spoken brief, notes, likely questions,
+    prep and the pay snapshot (market range only)."""
+    parts = slot.get("parts") or {}
+    round_found = ((parts.get("round") or {}).get("findings") or {})
+    company_part = parts.get("company") or slot.get("_company") or {}
+    pay = ((company_part.get("findings") or {}) if isinstance(company_part, dict) else {}).get("pay_range")
+    payload: dict[str, Any] = {
+        "label": spoken_label(event, zone),
+        "brief": slot.get("spoken", ""),
+        "notes": [note["fact"] + (" (private)" if note.get("private") else "")
+                  for note in (slot.get("notes") or [])[:NOTES_IN_BRIEF]],
+    }
+    questions = [q.get("question") if isinstance(q, dict) else str(q)
+                 for q in round_found.get("likely_questions") or []][:QUESTIONS_IN_BRIEF]
+    if questions:
+        payload["likely_questions"] = questions
+    if round_found.get("prep"):
+        payload["prep"] = list(round_found["prep"])[:PREP_IN_BRIEF]
+    if isinstance(pay, dict):
+        payload["market_pay"] = {k: pay.get(k) for k in ("min", "max", "unit", "currency", "level")}
+    return payload
+
+
+async def split_ready(events: list[SlotEvent], refresh: bool = False
+                      ) -> tuple[list[dict[str, Any]], list[SlotEvent]]:
+    """(briefs ready to give now, events that still need research)."""
+    if refresh:
+        return [], events
+    zone = owner_zone()
+    slots = await stored_slots([event.key for event in events])
+    ready, todo = [], []
+    for event in events:
+        slot = slots.get(event.key)
+        if slot and brief_is_current(event, slot, owner_emails()):
+            ready.append(brief_payload(event, slot, zone))
+        else:
+            todo.append(event)
+    return ready, todo
+
+
+async def upcoming_events(limit_days: int = 8) -> list[SlotEvent]:
+    now = datetime.now(timezone.utc)
+    async with research.pool.connection() as connection:  # type: ignore[union-attr]
+        await calendar_sync.setup(connection)
+        events = await calendar_sync.upcoming(connection, now - timedelta(minutes=30),
+                                              now + timedelta(days=limit_days))
+    return [e for e in events if e.status != "cancelled" and not e.declined and not e.all_day]
+
+
+async def get_briefing(day: str = "next", company: str = "", caller_key: str | None = None,
+                       conversation_id: str | None = None) -> dict[str, Any]:
+    """The stored briefs for his next interview (or a day, or a company), to give now."""
+    if not is_owner(caller_key):
+        return NOT_OWNER
+    if research.pool is None:
+        return UNAVAILABLE
+    zone = owner_zone()
+    if (day or "next").strip().lower() in ("next", "upcoming", ""):
+        events = matching(await upcoming_events(), company)[:1]
+    else:
+        when = parse_day(day, datetime.now(zone).date())
+        if when is None:
+            return {"error": f"Could not understand the day {day!r}."}
+        events = sorted(matching(await day_events(when), company), key=lambda e: e.start_utc)[:6]
+    if not events:
+        return {"error": "No matching interview on the calendar. Tell him, and ask which one he means."}
+    ready, todo = await split_ready(events)
+    result: dict[str, Any] = {"ready": ready}
+    if todo:
+        result["not_ready"] = [spoken_label(event, zone) for event in todo]
+    result["how"] = ("Give each ready brief now, close to its wording, about a minute each, and "
+                     "pause after each for questions. Answer follow-ups from its notes, questions, "
+                     "prep and market pay. "
+                     + ("For the not-ready ones, offer to research them and call back "
+                        "(research_interviews)." if todo else "No research or callback is needed."))
+    return result
+
+
 async def research_interviews(day: str = "tomorrow", company: str = "", refresh: bool = False,
                               confirmed: bool = False, caller_key: str | None = None,
                               conversation_id: str | None = None,
@@ -456,6 +561,10 @@ async def research_interviews(day: str = "tomorrow", company: str = "", refresh:
         if not events:
             return {"error": f"No interviews found on {when:%A} {('with ' + company) if company else ''}. "
                              "Tell him, and ask if he meant another day."}
+        ready, events = await split_ready(events, refresh)
+        if not events:
+            return {"ready": ready, "how": "These briefs are already researched: give them now, "
+                    "about a minute each, pausing for questions. No research or callback is needed."}
         labels = [spoken_label(event, zone) for event in events]
         word = "today" if when == today else "tomorrow" if when == today + timedelta(days=1) \
             else when.strftime("%A")
@@ -469,6 +578,15 @@ async def research_interviews(day: str = "tomorrow", company: str = "", refresh:
         count = "one interview" if len(events) == 1 else f"{len(events)} interviews"
         promise = ("within five minutes, starting with the earliest one" if guess.capped
                    else f"in about {guess.minutes} minutes")
+        if ready:
+            return {"ready": ready, "proposed": True, "booked": False, "minutes": guess.minutes,
+                    "say_after_briefs": f"The rest aren't researched yet: {'; '.join(labels)}. "
+                                        f"Shall I research {'it' if len(events) == 1 else 'them'} "
+                                        f"and call you back {promise}?",
+                    "why_minutes": guess.why,
+                    "next": "First give the ready briefs now (about a minute each, pausing for "
+                            "questions). Then say 'say_after_briefs' word for word. Only if his "
+                            "next reply is yes, call this tool with confirmed=true."}
         return {"proposed": True, "booked": False, "minutes": guess.minutes,
                 "say": f"I see {count} {word}: {'; '.join(labels)}. I'll research "
                        f"{'it' if len(events) == 1 else 'them'} now and call you back {promise}. Okay?",
@@ -517,17 +635,10 @@ async def start_slot_now(client: Any, event: SlotEvent, owner: str, block_id: st
                          refresh: bool, research_s: int = 165) -> None:
     """Make sure the slot's workflow runs, and ask it to research now (or refresh), with its
     researchers limited to `research_s` so the promise holds."""
-    workflow_id = slot_workflow_id(event.key)
-    now = datetime.now(timezone.utc).isoformat()
+    from app.call_now import start_slot_research
     from app.research_jobs import Limits
-    await client.start_workflow(
-        InterviewSlotWorkflow.run, SlotInput(event, owner, block_id, now, Limits.interview_from_env().job_usd),
-        id=workflow_id, task_queue=TASK_QUEUE, rpc_timeout=callbacks.RPC_TIMEOUT,
-        id_reuse_policy=WorkflowIDReusePolicy.ALLOW_DUPLICATE,
-        id_conflict_policy=WorkflowIDConflictPolicy.USE_EXISTING)
-    handle = client.get_workflow_handle(workflow_id)
-    await handle.signal(InterviewSlotWorkflow.research_within, ResearchNow(research_s, refresh),
-                        rpc_timeout=callbacks.RPC_TIMEOUT)
+    await start_slot_research(client, event, owner, block_id, refresh, research_s,
+                              Limits.interview_from_env().job_usd, rpc_timeout=callbacks.RPC_TIMEOUT)
 
 
 async def sync_now(reason: str) -> bool:

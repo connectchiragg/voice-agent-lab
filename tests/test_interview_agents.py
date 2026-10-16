@@ -125,3 +125,29 @@ def test_slot_guardrail_wants_140_to_230_spoken_words_and_sourced_notes():
     digits = SimpleNamespace(pydantic=SimpleNamespace(spoken=" ".join(["word"] * 170) + " 40 LPA",
                                                       notes=[note]))
     assert not check(digits)[0]
+
+
+def test_round_and_company_extras_follow_the_sourcing_rule():
+    from app.interview_agents import CompanyFindings, PayRange, RoundFindings, extras
+    known = {"https://glassdoor.example/acme"}
+    found = RoundFindings(summary="s", claims=[], likely_questions=[
+        {"question": "Design a call router.", "why_likely": "Glassdoor reviews", "source_url": "https://glassdoor.example/acme"},
+        {"question": "Tell me about failure.", "why_likely": "His weak spot", "source_url": "https://made.up/x"}],
+        prep=["Revise queueing", " ", "Practise a 60 s intro"] + [f"item {n}" for n in range(9)])
+    out = extras("round", found, known)
+    assert out["likely_questions"][0]["source_url"] == "https://glassdoor.example/acme"
+    assert "source_url" not in out["likely_questions"][1]  # Unknown URL: kept unsourced.
+    assert out["prep"][:2] == ["Revise queueing", "Practise a 60 s intro"] and len(out["prep"]) == 6
+    pay = PayRange(min=40, max=60, unit="LPA", currency="INR", level="Senior SWE",
+                   source_url="https://glassdoor.example/acme", confidence="medium")
+    assert extras("company", CompanyFindings(summary="s", claims=[], pay_range=pay), known)["pay_range"]["max"] == 60
+    unsourced = pay.model_copy(update={"source_url": "https://made.up/pay"})
+    assert extras("company", CompanyFindings(summary="s", claims=[], pay_range=unsourced), known) == {}
+    upside_down = pay.model_copy(update={"min": 70})
+    assert extras("company", CompanyFindings(summary="s", claims=[], pay_range=upside_down), known) == {}
+
+
+def test_models_and_reasoning_levels():
+    from app import interview_agents
+    assert interview_agents.RESEARCHER_EFFORT == "medium" and interview_agents.WRITER_EFFORT == "high"
+    assert interview_agents.WRITER_MAX_TOKENS >= 12000  # Thinking counts toward max_tokens.

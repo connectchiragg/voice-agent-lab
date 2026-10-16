@@ -559,7 +559,7 @@ Not yet verified: a real research callback call end to end on the phone.
 
 For its owner, VALR (displayed "VALR", spoken "Valor": `app/persona.py`) is a personal
 interview assistant: it knows his profile, says what is on his calendar, researches each
-upcoming interview and calls him 15 minutes before it with a briefing, answers follow-ups
+upcoming interview and calls him once, 30 minutes before it, with a briefing, answers follow-ups
 from the notes and quizzes him on likely questions. Every other caller gets the generic
 assistant with none of his data.
 
@@ -572,7 +572,7 @@ Google Calendar push (/hooks/gcal) ─┐                 6-hourly sweep (Tempor
                                              │     + R2 interviewers + R3 company (7-day cache),
                                              │     then a 60-90 s spoken brief and cited notes
                                              └─> BlockCallWorkflow per block (gaps < 30 min)
-                                                   calls at T-15, T-10, T-5; stops on an answer
+                                                   one call at T-30, no retries
 ```
 
 **Owner gating.** Interview mode applies only to the owner's caller keys: `tel:`
@@ -647,7 +647,7 @@ connections and recent research. Attendee emails and phone numbers are never sho
 JSON with the page's CSRF token, owner's Access login): sync, refresh one interview's
 research (caches bypassed), and pause or resume automatic calls, a `valr_flags` row the
 briefing-call workflows read before every scheduled dial (a skipped attempt is just
-skipped, so resuming before T-5 still gets a call; calls you ask for still ring;
+skipped (one call at T-30, no retries); calls you ask for still ring;
 VALR_BRIEFING_DIAL=0 stays the hard off). Performance reads `interview_scorecards.json`
 (VALR_SCORECARDS_PATH) when the profile importer writes it, else adapts
 `interview_scores.json` and `evaluation.json` (1-5 scores shown out of 10).

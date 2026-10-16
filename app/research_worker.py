@@ -244,8 +244,8 @@ async def show_blocks(start_workflows: bool) -> None:
         if start <= now:
             continue
         print(f"{block.block_id}  {start.astimezone(zone):%a %d %b %I:%M %p}  "
-              f"research {(start - timedelta(minutes=60)).astimezone(zone):%I:%M %p}, calls "
-              f"{', '.join(f'{(start - timedelta(minutes=m)).astimezone(zone):%I:%M}' for m in (15, 10, 5))}")
+              f"research {(start - timedelta(minutes=60)).astimezone(zone):%I:%M %p}, one call "
+              f"{(start - timedelta(minutes=30)).astimezone(zone):%I:%M %p}")
         for key in block.slot_keys:
             event = by_key[key]
             line = f"    {datetime.fromisoformat(event.start_utc).astimezone(zone):%I:%M %p}  {event.title[:70]}"
@@ -264,6 +264,55 @@ async def show_blocks(start_workflows: bool) -> None:
                 print(f"    call workflow: {status.state}")
             except Exception:  # noqa: BLE001
                 print("    call workflow: none")
+
+
+async def call_now_cli(ref: str) -> None:
+    """`call-now [next|<slot>]`: brief the owner by phone now (research first if needed)."""
+    from app import call_now, calendar_sync, interview_store, interview_worker
+    from app.interview_types import brief_is_current
+    if not interview_worker.owner_phone():
+        sys.exit("VALR_OWNER_PHONE is not set.")
+    now = datetime.now(timezone.utc)
+    async with await connect() as connection:
+        events = await calendar_sync.upcoming(connection, now - timedelta(minutes=30), now + timedelta(days=8))
+        event = call_now.pick(events, ref, now)
+        if event is None:
+            sys.exit("No such upcoming interview.")
+        await interview_store.setup(connection)
+        slot = await interview_store.load_slot(connection, event.key)
+    ready = bool(slot) and brief_is_current(event, slot, interview_worker.owner_emails())
+    client = await temporal_client()
+    workflow_id = await call_now.call_now(client, event, interview_worker.owner_key(),
+                                          interview_worker.owner_phone(), ready,
+                                          research_jobs.Limits.interview_from_env().job_usd)
+    print(f"{workflow_id}: calling about '{event.title[:60]}' "
+          f"({'brief ready' if ready else 'researching first, within five minutes'})")
+
+
+async def reschedule_briefings() -> None:
+    """`reschedule-briefings`: end every pending scheduled briefing call and let a sync
+    plan them again with the current timing (used when the call timing changes)."""
+    from app import interview_store
+    from app.interview_workflow import BlockCallWorkflow  # noqa: F401
+    client = await temporal_client()
+    now = datetime.now(timezone.utc)
+    ended = 0
+    async with await connect() as connection:
+        await interview_store.setup(connection)
+        for block in await interview_store.blocks_between(connection, now, now + timedelta(days=9)):
+            if block["state"] != "waiting" or not block["block_id"].startswith("briefing-2"):
+                continue
+            try:
+                await client.get_workflow_handle(block["block_id"]).terminate(
+                    reason="call timing changed: planned again by the next sync")
+            except Exception:  # noqa: BLE001 - already closed
+                pass
+            await interview_store.record_block(connection, block["block_id"],
+                                               block["start_utc"].isoformat(),
+                                               list(block["slot_keys"]), block["label"], "cancelled")
+            ended += 1
+    print(f"{ended} pending briefing call(s) ended; syncing to plan them again")
+    await show_blocks(True)
 
 
 async def main() -> None:
@@ -297,7 +346,8 @@ async def main() -> None:
     await worker.run()
 
 
-USAGE = 'usage: python -m app.research_worker [test "<topic>" | sync | blocks]'
+USAGE = ('usage: python -m app.research_worker [test "<topic>" | sync | blocks | '
+         'call-now [next|<slot>] | reschedule-briefings]')
 
 if __name__ == "__main__":
     if sys.argv[1:2] == ["test"] and len(sys.argv) == 3:
@@ -306,6 +356,12 @@ if __name__ == "__main__":
     elif sys.argv[1:] in (["sync"], ["blocks"]):
         logging.basicConfig(level=logging.WARNING)
         asyncio.run(show_blocks(sys.argv[1] == "sync"))
+    elif sys.argv[1:2] == ["call-now"] and len(sys.argv) <= 3:
+        logging.basicConfig(level=logging.WARNING)
+        asyncio.run(call_now_cli(sys.argv[2] if len(sys.argv) == 3 else "next"))
+    elif sys.argv[1:] == ["reschedule-briefings"]:
+        logging.basicConfig(level=logging.WARNING)
+        asyncio.run(reschedule_briefings())
     elif len(sys.argv) > 1:
         sys.exit(USAGE)
     else:

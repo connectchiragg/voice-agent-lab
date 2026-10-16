@@ -76,7 +76,7 @@ async function post(path, body = {}) {
   if (!response.ok) throw new Error(typeof data.detail === "string" ? data.detail : `Something went wrong (HTTP ${response.status}).`);
   return data;
 }
-const BUSY = {sync: "Syncing…", refresh: "Starting…", dials: "Saving…"};
+const BUSY = {sync: "Syncing…", refresh: "Starting…", dials: "Saving…", callnow: "Calling…"};
 document.addEventListener("click", async event => {
   const button = event.target.closest("button[data-action]");
   if (!button) return;
@@ -93,6 +93,8 @@ document.addEventListener("click", async event => {
     let result;
     if (action === "sync") {
       result = await post("/valr/api/sync");
+    } else if (action === "callnow") {
+      result = await post("/valr/api/call-now");
     } else if (action === "refresh") {
       result = await post(`/valr/api/slots/${encodeURIComponent(button.dataset.ref)}/refresh`);
     } else if (action === "dials") {

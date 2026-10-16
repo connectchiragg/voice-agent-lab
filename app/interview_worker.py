@@ -32,7 +32,7 @@ from temporalio.client import Client
 from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
 from temporalio.service import RPCError
 
-from app import calendar_sync, google_oauth, interview_store, research_jobs
+from app import calendar_sync, google_oauth, interview_store, interview_types, research_jobs
 from app.interview_types import (Person, SlotEvent, attendee_role, company_key, group_blocks,
                                  people, slot_workflow_id)
 from app.interview_workflow import (TASK_QUEUE, BlockCallWorkflow, BlockInput, BlockRecord,
@@ -78,11 +78,7 @@ def block_label(events: list[SlotEvent]) -> str:
 
 
 def fingerprint(event: SlotEvent) -> str:
-    """Changes whenever an input to the research changes."""
-    text = "|".join([event.key, event.company, event.company_domain, event.start_utc, event.title,
-                     " ".join(event.description.split()),
-                     ",".join(sorted(p.email.lower() for p in people(event, owner_emails())))])
-    return hashlib.sha256(text.encode()).hexdigest()[:16]
+    return interview_types.fingerprint(event, owner_emails())
 
 
 async def connect() -> psycopg.AsyncConnection:
@@ -353,9 +349,10 @@ class InterviewActivities:
                                            or private.pushed_texts or history_available()):
             return InterviewPartResult(task.part, error=f"no private sources (Gmail {private.gmail_status})")
         box: list = []
+        coaching = "\n".join(owner_context()) if task.part == "round" else ""
         work = asyncio.ensure_future(asyncio.to_thread(
             interview_agents.run_interview_part, task.part, event, interviewers, task.seconds,
-            task.budget_usd, meter, private, box))
+            task.budget_usd, meter, private, box, coaching))
         try:
             await heartbeat_while(work)
             outcome = await work

@@ -425,3 +425,103 @@ def test_agent_offers_tools_by_caller(monkeypatch):
     asyncio.run(collect(STRANGER))
     asyncio.run(collect(OWNER))
     assert "get_calendar" not in seen[0][0] and "get_calendar" in seen[1][0]
+
+
+# Ready briefs are given on this call; research is proposed only for the rest.
+
+def ready_slot(event, **extra):
+    from app.interview_types import fingerprint
+    return {"key": event.key, "status": "done", "spoken": f"Brief for {event.company}.",
+            "start_utc": datetime.fromisoformat(event.start_utc),
+            "notes": [{"fact": "Recruiter: bring a laptop.", "private": True}],
+            "parts": {"_fingerprint": fingerprint(event, {"owner@example.com"}),
+                      "round": {"findings": {"likely_questions": [{"question": "Design a call router.",
+                                                                     "why_likely": "Glassdoor"}],
+                                             "prep": ["Revise queueing"]}},
+                      "company": {"findings": {"pay_range": {"min": 40, "max": 60, "unit": "LPA",
+                                                             "currency": "INR", "level": "Senior"}}}},
+            **extra}
+
+
+def two_events(day):
+    base = datetime(day.year, day.month, day.day, 6, 0, tzinfo=timezone.utc)
+    return [SlotEvent(f"e{i}", f"Interview with Co{i}", (base + timedelta(hours=2 * i)).isoformat(),
+                      (base + timedelta(hours=2 * i, minutes=45)).isoformat(), company=f"Co{i}")
+            for i in range(2)]
+
+
+def briefing_env(monkeypatch, ready_keys):
+    async def day_events(day):
+        return two_events(day)
+
+    async def upcoming_events(limit_days=8):
+        return two_events(datetime.now(timezone.utc).date() + timedelta(days=1))
+
+    async def stored_slots(keys):
+        events = {e.key: e for e in two_events(datetime.now(timezone.utc).date())}
+        events.update({e.key: e for e in two_events(datetime.now(timezone.utc).date() + timedelta(days=1))})
+        return {k: ready_slot(events[k]) for k in keys if k in ready_keys}
+
+    async def researched(keys):
+        return 0
+
+    async def temporal():
+        return object()
+    monkeypatch.setattr(interviews, "day_events", day_events)
+    monkeypatch.setattr(interviews, "upcoming_events", upcoming_events)
+    monkeypatch.setattr(interviews, "stored_slots", stored_slots)
+    monkeypatch.setattr(interviews, "researched", researched)
+    monkeypatch.setattr(callbacks, "temporal", temporal)
+    monkeypatch.setattr(interviews.research, "pool", object())
+
+
+def test_a_ready_brief_is_given_now_with_no_proposal(monkeypatch):
+    briefing_env(monkeypatch, {"e0", "e1"})
+    result = asyncio.run(interviews.research_interviews(
+        "today", caller_key=OWNER, conversation_id="r1", turn=TurnContext("research today", 1)))
+    assert "proposed" not in result and "r1" not in interviews.proposals
+    assert [b["brief"] for b in result["ready"]] == ["Brief for Co0.", "Brief for Co1."]
+    first = result["ready"][0]
+    assert first["likely_questions"] == ["Design a call router."] and first["prep"] == ["Revise queueing"]
+    assert first["market_pay"]["min"] == 40 and first["notes"] == ["Recruiter: bring a laptop. (private)"]
+    nxt = asyncio.run(interviews.get_briefing("next", caller_key=OWNER, conversation_id="r1"))
+    assert len(nxt["ready"]) == 1 and "not_ready" not in nxt and "No research" in nxt["how"]
+
+
+def test_not_ready_proposes_research(monkeypatch):
+    briefing_env(monkeypatch, set())
+    result = asyncio.run(interviews.research_interviews(
+        "today", caller_key=OWNER, conversation_id="r2", turn=TurnContext("research today", 1)))
+    assert result["proposed"] and "ready" not in result and "Co0" in result["say"]
+    assert interviews.proposals.pop("r2").keys == ("e0", "e1")
+
+
+def test_mixed_briefs_the_ready_one_then_offers_the_rest(monkeypatch):
+    briefing_env(monkeypatch, {"e0"})
+    result = asyncio.run(interviews.research_interviews(
+        "today", caller_key=OWNER, conversation_id="r3", turn=TurnContext("brief me for today", 1)))
+    assert [b["brief"] for b in result["ready"]] == ["Brief for Co0."]
+    assert "Co1" in result["say_after_briefs"] and "Co0" not in result["say_after_briefs"]
+    assert interviews.proposals.pop("r3").keys == ("e1",)
+    got = asyncio.run(interviews.get_briefing("today", caller_key=OWNER, conversation_id="r3"))
+    assert len(got["ready"]) == 1 and len(got["not_ready"]) == 1
+
+
+def test_refresh_ignores_ready_briefs_and_changed_inputs_need_research(monkeypatch):
+    briefing_env(monkeypatch, {"e0", "e1"})
+    result = asyncio.run(interviews.research_interviews(
+        "today", refresh=True, caller_key=OWNER, conversation_id="r4", turn=TurnContext("refresh", 1)))
+    assert result["proposed"] and "ready" not in result
+    interviews.proposals.pop("r4")
+    from app.interview_types import brief_is_current
+    event = two_events(datetime(2026, 10, 20).date())[0]
+    slot = ready_slot(event)
+    moved = SlotEvent(**{**event.__dict__, "start_utc": "2026-10-20T09:00:00+00:00"})
+    assert brief_is_current(moved, slot, {"owner@example.com"})  # A time move needs no research.
+    renamed = SlotEvent(**{**event.__dict__, "title": "System design with Co0"})
+    assert not brief_is_current(renamed, slot, {"owner@example.com"})
+
+
+def test_get_briefing_is_owner_only():
+    assert asyncio.run(interviews.get_briefing("next", caller_key=STRANGER)) == interviews.NOT_OWNER
+    assert "get_briefing" not in {s["function"]["name"] for s in tools.schemas_for(STRANGER)}

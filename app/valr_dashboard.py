@@ -276,6 +276,34 @@ async def set_dials(request: Request) -> JSONResponse:
                          else "Automatic calls resumed."}, headers=NO_CACHE)
 
 
+@router.post("/valr/api/call-now")
+async def call_me_now(request: Request) -> JSONResponse:
+    """Call the owner now with the brief for his next interview (research it first if needed)."""
+    await action_owner(request)
+    if research.pool is None:
+        raise HTTPException(503, "Postgres is unavailable.")
+    client = await callbacks.temporal()
+    if client is None:
+        raise HTTPException(503, "Temporal is unavailable.")
+    from app import call_now
+    from app.interview_worker import owner_key, owner_phone
+    if not owner_phone():
+        raise HTTPException(503, "VALR_OWNER_PHONE is not set.")
+    now = datetime.now(timezone.utc)
+    async with research.pool.connection() as connection:
+        await calendar_sync.setup(connection)
+        events = await calendar_sync.upcoming(connection, now, now + valr_view.LOOK_AHEAD)
+    event = call_now.pick(events, "next", now)
+    if event is None:
+        raise HTTPException(404, "No upcoming interview to brief.")
+    ready, _ = await interviews.split_ready([event])
+    await call_now.call_now(client, event, owner_key(), owner_phone(), bool(ready),
+                            rpc_timeout=callbacks.RPC_TIMEOUT)
+    logger.info("VALR call-now requested from the dashboard (brief %s)", "ready" if ready else "researching")
+    return JSONResponse({"ok": True, "message": "Calling you now." if ready else
+                         "Researching first; VALR calls you within five minutes."}, headers=NO_CACHE)
+
+
 @router.post("/valr/api/slots/{ref}/refresh")
 async def refresh_slot(request: Request, ref: str) -> JSONResponse:
     """Research one upcoming interview again now, caches bypassed. `ref`: its slot workflow id."""
