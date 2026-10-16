@@ -50,64 +50,119 @@ def _company():
     return part
 
 
-DIMENSIONS = [
-    ("technical_depth", "Technical depth", [("tradeoffs", "Trade-offs"), ("numbers", "Numbers & sizing")]),
-    ("problem_solving", "Problem solving", [("clarify", "Clarifying"), ("decompose", "Decomposition")]),
-    ("communication", "Communication", [("answer_first", "Answer first"), ("concise", "Concision")]),
-    ("structure", "Structure", [("star", "STAR stories"), ("signposting", "Signposting")]),
-    ("confidence", "Confidence", [("ownership", "Owning decisions")]),
-    ("pushback", "Handling pushback", [("hold_update", "Hold or update")]),
-    ("pay", "Pay conversations", [("defer", "Deferring the number")]),
-]
+RUBRIC = {  # Same keys as app/profile/rubric.py (valr-profile); descriptions shortened.
+    "technical": {"system_design": "components, scaling, numbers", "coding_problem_solving": "clarifies, decomposes, tests",
+                  "cs_fundamentals": "data structures, networking, databases", "domain_depth": "voice AI and agents in production",
+                  "tradeoff_reasoning": "names options, compares, justifies"},
+    "communication": {"conciseness_answer_first": "leads with the answer", "structure": "signposted, ordered answers",
+                      "clarity": "easy to follow", "listening_clarifying": "answers the question asked",
+                      "pace_fillers": "steady pace, few fillers"},
+    "behavioural": {"star_stories": "situation-task-action-result", "ownership_impact": "owns decisions, numbers",
+                    "motivation_why_us": "specific reasons", "pushback_curveballs": "composed under pushback"},
+    "process": {"time_management": "paces the round", "questions_at_end": "sharp questions"},
+    "negotiation": {"anchoring": "asks for the band first", "information_control": "keeps current pay private",
+                    "competing_offers": "uses leverage without figures"},
+}
+BASE = {"technical": 6.0, "communication": 4.8, "behavioural": 6.2, "process": 5.5, "negotiation": 4.5}
+SLOPE = {"technical": 0.35, "communication": 0.5, "behavioural": -0.25, "process": 0.1, "negotiation": 0.3}
+ROUNDS = [("Lumen", "seed", "screen"), ("Orbit", "series_b", "system_design"), ("Kite", "series_a", "technical"),
+          ("Juniper", "series_c", "hiring_manager"), ("Vela", "series_b", "system_design"),
+          ("Tessel", "public", "technical"), ("Nimbus", "series_c", "system_design")]
 
 
-def scorecards(now: datetime) -> dict:
-    """The profile agent's upcoming scorecard file, in the shape app/valr_view expects (1-10)."""
-    base = {"technical_depth": 6, "problem_solving": 6, "communication": 4.5, "structure": 4,
-            "confidence": 6, "pushback": 6.5, "pay": 4}
-    slope = {"technical_depth": 0.45, "problem_solving": 0.35, "communication": 0.6, "structure": 0.65,
-             "confidence": 0.05, "pushback": -0.4, "pay": 0.3}
-    companies = [("Lumen", "Phone screen"), ("Orbit", "System design"), ("Kite", "Coding"),
-                 ("Juniper", "Hiring manager"), ("Vela", "System design"), ("Tessel", "Coding"),
-                 ("Nimbus", "System design")]
+def _series(interviews: list, value) -> dict:
+    """The SERIES shape of app/profile/performance.py, computed the same way."""
+    points = [{"x": iv["date"], "interview_id": iv["interview_id"], "company": iv["company"],
+               "round_type": iv["round_type"], "y": float(value(iv))} for iv in interviews if value(iv) is not None]
+    for i, point in enumerate(points):
+        window = [q["y"] for q in points[max(0, i - 2):i + 1]]
+        point["ma3"] = round(sum(window) / len(window), 2)
+    out = {"points": points, "n": len(points), "slope_per_30d": None, "fitted_change": None,
+           "badge": "insufficient_data"}
+    if len(points) >= 2:
+        xs = [datetime.fromisoformat(p["x"]).timestamp() / 86400 for p in points]
+        ys = [p["y"] for p in points]
+        mx, my = sum(xs) / len(xs), sum(ys) / len(ys)
+        var = sum((x - mx) ** 2 for x in xs)
+        slope = sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / var if var else 0.0
+        out["slope_per_30d"], out["fitted_change"] = round(slope * 30, 2), round(slope * (max(xs) - min(xs)), 2)
+    if len(points) >= 3:
+        c = out["fitted_change"]
+        out["badge"] = "improving" if c >= 1 else "declining" if c <= -1 else "flat"
+    return out
+
+
+def performance_file(now: datetime) -> dict:
+    """A made-up performance.json (schema 2), the exact shape the profile importer writes."""
     interviews = []
-    for i, (company, round_) in enumerate(companies):
-        scores = {k: round(max(1, min(10, base[k] + slope[k] * i + (0.8 if (i + len(k)) % 3 == 0 else -0.3))), 1)
-                  for k in base}
-        subs = {sub: round(max(1, min(10, scores[k] + (0.6 if j else -0.5))), 1)
-                for k, _, ss in DIMENSIONS for j, (sub, _) in enumerate(ss)}
+    for i, (company, stage, round_type) in enumerate(ROUNDS):
+        scores = {}
+        for d, subs in RUBRIC.items():
+            scores[d] = {}
+            for j, sub in enumerate(subs):
+                tested = not (d == "negotiation" and round_type not in ("hiring_manager", "screen", "founder")) \
+                    and not (sub == "coding_problem_solving" and round_type == "hiring_manager")
+                value = max(1, min(10, round(BASE[d] + SLOPE[d] * i + ((i + j) % 3 - 1) * 0.6))) if tested else None
+                scores[d][sub] = {"score": value, "justification": "Fictional sample justification.",
+                                  "quote": "a short made-up quote" if value else ""}
+        dims = {d: (round(sum(v["score"] for v in subs.values() if v["score"]) /
+                          len([v for v in subs.values() if v["score"]]), 2)
+                    if any(v["score"] for v in subs.values()) else None) for d, subs in scores.items()}
+        known = [v for v in dims.values() if v is not None]
         interviews.append({
-            "id": f"fathom:{1000 + i}", "date": (now - timedelta(days=70 - 10 * i)).date().isoformat(),
-            "company": company, "round": round_, "scores": scores, "sub_scores": subs,
-            "badges": (["Best clarity yet"] if i == 6 else []) + (["Sized it first"] if i in (4, 6) else []),
-            "questions": [
-                {"question": "Design a rate limiter for a public API", "score": round(5 + i * 0.5, 1),
-                 "feedback": "Good token-bucket choice; sized the Redis memory only when asked.",
-                 "better": "Lead with the numbers: 50k req/s, 1 KB per key, then pick the algorithm.",
-                 "strong": i > 3},
-                {"question": "Tell me about a time you disagreed with your manager", "score": round(7 - i * 0.3, 1),
-                 "feedback": "Clear situation, but the result was missing and you conceded quickly.",
-                 "better": "Close with the outcome and what you would hold firm on next time.",
-                 "strong": False},
-                {"question": "What are your salary expectations?", "score": round(4 + i * 0.4, 1),
-                 "feedback": "Deferred politely and asked for their range." if i > 2
-                 else "Gave a number before hearing their band.",
-                 "better": "Ask for the band first; tie your range to scope.", "strong": i > 2},
-            ],
-        })
-    return {"generated_at": (now - timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "dimensions": [{"key": k, "label": label, "subs": [{"key": s, "label": l} for s, l in ss]}
-                           for k, label, ss in DIMENSIONS],
-            "interviews": interviews,
-            "badges": [{"label": "3 rounds in a row: answer first", "detail": "Communication up 2.4 since August"},
-                       {"label": "Sizing habit", "detail": "Estimated capacity unprompted in 2 of the last 3 designs"}],
-            "focus_this_week": [
-                {"action": "Rehearse a 60-second capacity estimate out loud, twice a day",
-                 "why": "Sizing questions decided two of your last four design rounds."},
-                {"action": "When challenged, restate their concern before you answer",
-                 "why": "Handling pushback has dipped three rounds running."},
-                {"action": "Close every story with the result and a number",
-                 "why": "STAR answers lose points at the 'result' step."}]}
+            "interview_id": f"fathom:{1000 + i}", "source": "fathom", "id": str(1000 + i),
+            "title": f"{company} interview", "date": (now - timedelta(days=70 - 10 * i)).date().isoformat(),
+            "company": company, "company_stage": stage, "round_type": round_type,
+            "outcome": ["advanced", "rejected", "advanced", "unknown", "advanced", "rejected", "unknown"][i],
+            "outcome_evidence": "Fictional: recruiter email about next steps.",
+            "overall_score": round(sum(known) / len(known) + 0.2, 1), "overall_computed": round(sum(known) / len(known), 2),
+            "dimension_scores": dims, "scores": scores,
+            "do_next_time": ["Size the system out loud in the first five minutes",
+                             "When challenged, restate their concern before answering",
+                             "Ask for their band before giving a number"] if i == 6 else
+                            ["Lead with the answer, then the reasoning", "Close stories with a number",
+                             "Ask one question about how the team measures success"],
+            "question_feedback": [
+                {"question": "Design ingestion for telemetry from 10,000 robots", "went_well": "Clear components and data flow.",
+                 "improve": "Sized storage only when asked.", "model_answer_hint": "Start with 10k x 50 Hz x 200 B = 100 MB/s, then pick Kafka."},
+                {"question": "Tell me about a time you disagreed with your manager", "went_well": "Concrete situation.",
+                 "improve": "No result; conceded quickly.", "model_answer_hint": "End with the outcome and what you would hold firm on."},
+                {"question": "What are your salary expectations?", "went_well": "Stayed calm and friendly.",
+                 "improve": "Gave a number before hearing their band." if i < 3 else "Good deferral; could tie the range to scope.",
+                 "model_answer_hint": "Ask for the band first; tie your range to the role's scope."},
+            ][: 2 + i % 2],
+            "transcript_used": True})
+    trends = {"overall": _series(interviews, lambda iv: iv["overall_score"]),
+              "dimensions": {d: _series(interviews, lambda iv, d=d: iv["dimension_scores"][d]) for d in RUBRIC},
+              "subdimensions": {f"{d}.{s}": _series(interviews, lambda iv, d=d, s=s: iv["scores"][d][s]["score"])
+                                for d, subs in RUBRIC.items() for s in subs}}
+    return {"schema_version": 2, "generated_at": (now - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "scale": {"min": 1, "max": 10, "na": None}, "rubric": RUBRIC,
+            "badge_rule": {"metric": "fitted_change", "threshold": 1.0, "min_points": 3,
+                           "values": ["improving", "flat", "declining", "insufficient_data"]},
+            "interviews": interviews, "trends": trends,
+            "by_round_type": {r: {"n": sum(1 for iv in interviews if iv["round_type"] == r),
+                                  "overall": round(sum(iv["overall_score"] for iv in interviews if iv["round_type"] == r)
+                                                   / sum(1 for iv in interviews if iv["round_type"] == r), 2),
+                                  "dimensions": {}} for r in sorted({iv["round_type"] for iv in interviews})},
+            "by_company_stage": {},
+            "callouts": {"most_improved": {"key": "communication.conciseness_answer_first", "fitted_change": 2.6,
+                                           "first": 4.0, "last": 7.0},
+                         "biggest_risk": {"key": "behavioural.pushback_curveballs", "latest_ma3": 4.3,
+                                          "slope_per_30d": -0.6, "badge": "declining"}},
+            "recurring_weak_topics": [
+                {"topic": "Capacity estimates under time pressure", "verdict": "improved",
+                 "occurrences": [{"date": "x", "interview_id": "fathom:1001", "status": "first_seen", "note": ""},
+                                 {"date": "y", "interview_id": "fathom:1006", "status": "improved",
+                                  "note": "Sized it unprompted at Nimbus."}]},
+                {"topic": "Holding a position under pushback", "verdict": "worse",
+                 "occurrences": [{"date": "x", "interview_id": "fathom:1003", "status": "first_seen", "note": ""},
+                                 {"date": "y", "interview_id": "fathom:1005", "status": "worse",
+                                  "note": "Conceded on consistency within a minute."}]},
+                {"topic": "Giving a number before hearing the band", "verdict": "mixed",
+                 "occurrences": [{"date": "x", "interview_id": "fathom:1000", "status": "first_seen", "note": ""}]}],
+            "trend_text": ("Technical answers and answer-first communication improved steadily since August; "
+                           "pushback handling slipped over the last three rounds.")}
 
 
 def sample_view(now: datetime | None = None, paused: bool = False, scenario: str = "full") -> dict:
@@ -185,19 +240,6 @@ def sample_view(now: datetime | None = None, paused: bool = False, scenario: str
     recorded = {valr_view.group_blocks(events)[0].block_id: {"state": "waiting",
                                                              "label": "your interviews with Juniper"}}
     blocks = valr_view.build_blocks(events, recorded, slots, jobs, {}, {"me@example.com"}, now, paused)
-    evaluation = {"generated_at": (now - timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%SZ"), "brief": {
-        "top_strengths": ["Clear event-driven architecture stories with real numbers",
-                          "Calm, methodical debugging narration",
-                          "Good questions about team process"],
-        "recurring_weak_topics": ["Capacity estimates (QPS, storage) under time pressure",
-                                  "Consistency models beyond 'eventual'",
-                                  "Answering pushback on cost trade-offs"],
-        "prep_checklist": ["Rehearse a 60-second capacity estimate", "Prepare two failure-mode stories",
-                           "State the answer first, then the reasoning", "Have the comp range ready; defer the number"],
-        "communication": "Answers improve when you lead with the conclusion.",
-        "negotiation_notes": "Deferred well twice; once anchored early.",
-        "trend": "Structure and clarity improved steadily since August; pushback handling dipped in the last two rounds.",
-    }}
     jobs_recent = [
         {"job_id": "iv-1", "caller": "a1b2c3d4e5f6", "topic": "Juniper Robotics: Senior Backend, system design",
          "status": "done", "promised_minutes": 0, "created_at": now - timedelta(minutes=24), "duration_s": 212.0,
@@ -232,13 +274,13 @@ def sample_view(now: datetime | None = None, paused: bool = False, scenario: str
                                                  "last_error": None}, now),
         },
         "dials": {"briefing": {"used": 2, "limit": 12}, "callback": {"used": 1, "limit": 5}},
-        "performance": valr_view.performance(None, evaluation, scorecards(now)),
+        "performance": valr_view.performance(performance_file(now)),
         "pay_target": {"min": 50, "max": 65, "unit": "LPA", "currency": "INR"},
         "setup": {"phone_on_file": True, "test_call_done": True, "valr_number": "+12288888007"},
     }
     if scenario == "empty":
         view.update(blocks=[], jobs=[], pay_target=None,
-                    performance=valr_view.performance(None, None, None),
+                    performance=valr_view.performance(None),
                     setup={"phone_on_file": False, "test_call_done": False, "valr_number": "+12288888007"},
                     dials={"briefing": {"used": 0, "limit": 12}, "callback": {"used": 0, "limit": 5}})
         view["spend"].update(today_usd=0.0, month_usd=0.0, today_jobs=0, month_jobs=0, today_cached=0)

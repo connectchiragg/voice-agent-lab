@@ -221,131 +221,167 @@ def next_call(blocks: list[dict[str, Any]], now: datetime, paused: bool) -> dict
     return None
 
 
-V2_DIMENSIONS = {  # key -> label, for the 1-5 rubric adapted to the 1-10 shape.
-    "technical_depth": "Technical depth", "problem_solving": "Problem solving",
-    "communication_clarity": "Clarity", "structure": "Structure", "confidence": "Confidence",
-    "handling_pushback": "Handling pushback", "compensation_handling": "Pay conversations",
+LABELS = {  # Plain names for the profile rubric's keys (app/profile/rubric.py).
+    "technical": "Technical", "communication": "Communication", "behavioural": "Behavioural",
+    "process": "Running the round", "negotiation": "Pay conversations",
+    "system_design": "System design", "coding_problem_solving": "Coding & problem solving",
+    "cs_fundamentals": "CS fundamentals", "domain_depth": "Domain depth",
+    "tradeoff_reasoning": "Trade-offs", "conciseness_answer_first": "Answer first",
+    "structure": "Structure", "clarity": "Clarity", "listening_clarifying": "Listening & clarifying",
+    "pace_fillers": "Pace & fillers", "star_stories": "STAR stories",
+    "ownership_impact": "Ownership & impact", "motivation_why_us": "Why us",
+    "pushback_curveballs": "Pushback & curveballs", "time_management": "Time management",
+    "questions_at_end": "Questions at the end", "anchoring": "Anchoring",
+    "information_control": "Information control", "competing_offers": "Competing offers",
 }
-MA_WINDOW = 3
+ROUNDS = {"screen": "Screen", "technical": "Technical", "system_design": "System design",
+          "hiring_manager": "Hiring manager", "behavioural": "Behavioural", "founder": "Founder",
+          "offer": "Offer", "unknown": "Other"}
+BADGES = ("improving", "flat", "declining", "insufficient_data")
 
 
-def moving_average(values: list[float | None], window: int = MA_WINDOW) -> list[float | None]:
-    out: list[float | None] = []
-    for index in range(len(values)):
-        recent = [v for v in values[max(0, index - window + 1):index + 1] if v is not None]
-        out.append(round(sum(recent) / len(recent), 2) if recent and values[index] is not None else None)
-    return out
+def label(key: str) -> str:
+    """"communication.clarity" -> "Clarity"; unknown keys -> "Sentence case"."""
+    last = str(key).split(".")[-1]
+    return LABELS.get(last, last.replace("_", " ").capitalize())
 
 
-def direction(series: list[float | None]) -> tuple[str, float | None]:
-    """improving / flat / declining from the first to the last moving-average point (1-10)."""
-    points = [v for v in series if v is not None]
-    if len(points) < 2:
-        return "insufficient data", None
-    change = round(points[-1] - points[0], 1)
-    return ("improving" if change >= 1 else "declining" if change <= -1 else "flat"), change
+def number(value: Any) -> float | None:
+    return round(float(value), 2) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
 
 
-def scorecards_from_rubric(scores: dict[str, Any] | None,
-                           evaluation: dict[str, Any] | None) -> dict[str, Any]:
-    """Today's files (1-5 rows per dimension, evaluation.json) in the scorecard shape."""
-    cards: dict[tuple[str, str], dict[str, Any]] = {}
-    for row in (scores or {}).get("rows") or []:
-        if not isinstance(row, dict) or row.get("score") is None or not row.get("date"):
-            continue
-        key = (str(row["date"])[:10], str(row.get("company") or ""))
-        card = cards.setdefault(key, {"id": row.get("interview_id") or "|".join(key), "date": key[0],
-                                      "company": row.get("company") or "", "round": row.get("round_type") or "",
-                                      "scores": {}, "questions": [], "badges": []})
-        card["scores"][row.get("dimension")] = float(row["score"]) * 2
-    by_id = {}
-    for analysis in (evaluation or {}).get("interviews") or []:
-        if isinstance(analysis, dict):
-            by_id[((analysis.get("date") or "")[:10], analysis.get("company") or "")] = analysis
-    for key, card in cards.items():
-        analysis = by_id.get(key) or {}
-        for answer, good in ([(a, False) for a in analysis.get("weak_answers") or []]
-                             + [(a, True) for a in analysis.get("strong_answers") or []]):
-            if isinstance(answer, dict):
-                card["questions"].append({"question": answer.get("topic") or "", "score": None,
-                                          "feedback": answer.get("why") or "", "quote": answer.get("quote") or "",
-                                          "strong": good})
-    brief_ = (evaluation or {}).get("brief") or {}
-    return {"dimensions": [{"key": k, "label": v, "subs": []} for k, v in V2_DIMENSIONS.items()],
-            "interviews": sorted(cards.values(), key=lambda c: c["date"]),
-            "focus_this_week": [{"action": a, "why": ""} for a in (brief_.get("prep_checklist") or [])[:3]],
-            "badges": [], "scale": 10}
+def stage(value: Any) -> str:
+    """"series_c" -> "Series C", "public" -> "Public"; unknown -> ""."""
+    text = scrub(value or "").replace("_", " ").strip()
+    if not text or text == "unknown":
+        return ""
+    words = text.split()
+    return " ".join([words[0].capitalize()] + [w.upper() if len(w) == 1 else w for w in words[1:]])
 
 
-def performance(scores: dict[str, Any] | None, evaluation: dict[str, Any] | None,
-                cards: dict[str, Any] | None = None) -> dict[str, Any]:
-    """The performance view: per-interview scorecards (1-10), moving-average trends per
-    dimension, per-question feedback, badges, most improved / biggest risk, focus this week.
+def day_label(date: str) -> str:
+    try:
+        return datetime.fromisoformat(date).strftime("%d %b").lstrip("0")
+    except ValueError:
+        return date
 
-    `cards` is the profile agent's scorecard file when present (same shape as
-    `scorecards_from_rubric` returns); else today's 1-5 files are adapted (x2).
+
+def series_view(raw: Any) -> dict[str, Any]:
+    """A performance.json SERIES -> {points[{x, y, ma3, company, round}], n, change, badge}."""
+    raw = raw if isinstance(raw, dict) else {}
+    points = [{"x": str(p.get("x") or "")[:10], "y": number(p.get("y")), "ma3": number(p.get("ma3")),
+               "company": scrub(p.get("company") or ""), "round": ROUNDS.get(p.get("round_type") or "", "")}
+              for p in raw.get("points") or [] if isinstance(p, dict) and number(p.get("y")) is not None]
+    badge = raw.get("badge") if raw.get("badge") in BADGES else "insufficient_data"
+    return {"points": points, "n": len(points), "change": number(raw.get("fitted_change")),
+            "per_30d": number(raw.get("slope_per_30d")), "badge": badge}
+
+
+def performance(perf: dict[str, Any] | None) -> dict[str, Any]:
+    """The Performance section from the profile agent's performance.json (schema 2).
+
+    Shown out of 10; null scores (not exercised) stay out of averages and charts.
+    Focus this week = the latest interview's `do_next_time`. Free text is scrubbed.
     """
-    source = cards if isinstance(cards, dict) and cards.get("interviews") else \
-        scorecards_from_rubric(scores, evaluation)
-    dims = [{"key": str(d.get("key")), "label": scrub(d.get("label") or d.get("key")),
-             "subs": [{"key": str(x.get("key")), "label": scrub(x.get("label") or x.get("key"))}
-                      for x in d.get("subs") or [] if isinstance(x, dict)]}
-            for d in source.get("dimensions") or [] if isinstance(d, dict)]
-    interviews_ = []
-    for card in sorted((c for c in source.get("interviews") or [] if isinstance(c, dict)),
-                       key=lambda c: str(c.get("date") or "")):
-        values = {k: float(v) for k, v in (card.get("scores") or {}).items() if isinstance(v, (int, float))}
-        overall = card.get("overall")
-        if not isinstance(overall, (int, float)):
-            overall = round(sum(values.values()) / len(values), 1) if values else None
-        interviews_.append({
-            "id": scrub(card.get("id")), "date": str(card.get("date") or "")[:10],
-            "company": scrub(card.get("company")), "round": scrub(card.get("round")),
-            "overall": overall, "scores": values,
-            "sub_scores": {k: float(v) for k, v in (card.get("sub_scores") or {}).items()
-                           if isinstance(v, (int, float))},
-            "badges": strings(card.get("badges"), 4),
-            "questions": [{"question": scrub(q.get("question")), "score": q.get("score"),
-                           "feedback": scrub(q.get("feedback")), "quote": scrub(q.get("quote") or ""),
-                           "better": scrub(q.get("better") or ""), "strong": bool(q.get("strong"))}
-                          for q in card.get("questions") or [] if isinstance(q, dict)][:12],
+    perf = perf if isinstance(perf, dict) else {}
+    rubric = perf.get("rubric") if isinstance(perf.get("rubric"), dict) else {}
+    trends = perf.get("trends") if isinstance(perf.get("trends"), dict) else {}
+    dims = [{"key": str(d), "label": label(d),
+             "subs": [{"key": f"{d}.{sub}", "label": label(sub), "about": scrub(about)}
+                      for sub, about in (subs.items() if isinstance(subs, dict) else [])]}
+            for d, subs in rubric.items()]
+    series = {"overall": series_view(trends.get("overall"))}
+    for key, raw in (trends.get("dimensions") or {}).items():
+        series[str(key)] = series_view(raw)
+    for key, raw in (trends.get("subdimensions") or {}).items():
+        series[str(key)] = series_view(raw)
+    interviews = []
+    for iv in sorted((i for i in perf.get("interviews") or [] if isinstance(i, dict)),
+                     key=lambda i: str(i.get("date") or "")):
+        interviews.append({
+            "id": scrub(iv.get("interview_id")), "date": str(iv.get("date") or "")[:10],
+            "company": scrub(iv.get("company") or ""), "stage": stage(iv.get("company_stage")),
+            "round": ROUNDS.get(iv.get("round_type") or "", label(iv.get("round_type") or "unknown")),
+            "outcome": iv.get("outcome") if iv.get("outcome") in ("advanced", "rejected") else "unknown",
+            "outcome_evidence": scrub(iv.get("outcome_evidence") or ""),
+            "overall": number(iv.get("overall_score")),
+            "dimensions": {str(k): number(v) for k, v in (iv.get("dimension_scores") or {}).items()},
+            "do_next_time": strings(iv.get("do_next_time"), 3),
+            "questions": [{"question": scrub(q.get("question")), "went_well": scrub(q.get("went_well") or ""),
+                           "improve": scrub(q.get("improve") or ""), "hint": scrub(q.get("model_answer_hint") or "")}
+                          for q in iv.get("question_feedback") or [] if isinstance(q, dict)][:6],
         })
-    present = [d for d in dims if any(d["key"] in i["scores"] for i in interviews_)]
-    trends = {}
-    for d in present:
-        raw = [i["scores"].get(d["key"]) for i in interviews_]
-        ma = moving_average(raw)
-        trend, change = direction(ma)
-        trends[d["key"]] = {"raw": raw, "ma": ma, "direction": trend, "change": change,
-                            "last": next((v for v in reversed(raw) if v is not None), None)}
-    overall_raw = [i["overall"] for i in interviews_]
-    overall_ma = moving_average(overall_raw)
-    ranked = sorted(((t["change"], k) for k, t in trends.items() if t["change"] is not None))
-    label = {d["key"]: d["label"] for d in dims}
-    improved = source.get("most_improved") if isinstance(source.get("most_improved"), dict) else (
-        {"dimension": label[ranked[-1][1]], "change": ranked[-1][0]} if ranked and ranked[-1][0] > 0 else None)
-    risk = source.get("biggest_risk") if isinstance(source.get("biggest_risk"), dict) else (
-        {"dimension": label[ranked[0][1]], "change": ranked[0][0],
-         "why": f"down {abs(ranked[0][0]):.1f} points on the 3-interview average"}
-        if ranked and ranked[0][0] < 0 else None)
-    raw_brief = (evaluation or {}).get("brief") or {}
-    highlights = {key: strings(raw_brief.get(key), 8)
-                  for key in ("top_strengths", "recurring_weak_topics", "prep_checklist")}
-    for key in ("communication", "negotiation_notes", "trend"):
-        highlights[key] = scrub(raw_brief.get(key) or "")
+    callouts = perf.get("callouts") if isinstance(perf.get("callouts"), dict) else {}
+    most, risk = callouts.get("most_improved"), callouts.get("biggest_risk")
+    weak = [{"topic": scrub(t.get("topic")), "verdict": t.get("verdict") if t.get("verdict") in
+             ("improved", "same", "worse", "mixed") else "same",
+             "seen": len([o for o in t.get("occurrences") or [] if isinstance(o, dict)]),
+             "last_note": scrub(next((o.get("note") for o in reversed(t.get("occurrences") or [])
+                                      if isinstance(o, dict) and o.get("note")), ""))}
+            for t in perf.get("recurring_weak_topics") or [] if isinstance(t, dict)][:6]
+    rounds = [{"round": ROUNDS.get(k, label(k)), "n": v.get("n"), "overall": number(v.get("overall"))}
+              for k, v in (perf.get("by_round_type") or {}).items() if isinstance(v, dict)]
+    latest = interviews[-1] if interviews else None
     return {
-        "dimensions": present, "interviews": interviews_, "trends": trends,
-        "overall": {"raw": overall_raw, "ma": overall_ma, "direction": direction(overall_ma)[0]},
-        "most_improved": {k: scrub(v) if isinstance(v, str) else v for k, v in improved.items()} if improved else None,
-        "biggest_risk": {k: scrub(v) if isinstance(v, str) else v for k, v in risk.items()} if risk else None,
-        "badges": [{"label": scrub(b.get("label")), "detail": scrub(b.get("detail") or "")}
-                   for b in source.get("badges") or [] if isinstance(b, dict)][:6],
-        "focus_this_week": [{"action": scrub(f.get("action")), "why": scrub(f.get("why") or "")}
-                            for f in source.get("focus_this_week") or [] if isinstance(f, dict)][:3],
-        "highlights": highlights,
-        "generated_at": source.get("generated_at") or (evaluation or {}).get("generated_at"),
-        "available": bool(interviews_ or raw_brief),
+        "dimensions": dims, "series": series, "interviews": interviews,
+        "most_improved": {"key": str(most.get("key")), "label": label(most.get("key", "")),
+                          "change": number(most.get("fitted_change")),
+                          "first": number(most.get("first")), "last": number(most.get("last"))}
+        if isinstance(most, dict) and most.get("key") else None,
+        "biggest_risk": {"key": str(risk.get("key")), "label": label(risk.get("key", "")),
+                         "latest": number(risk.get("latest_ma3")), "per_30d": number(risk.get("slope_per_30d")),
+                         "badge": risk.get("badge") if risk.get("badge") in BADGES else "insufficient_data"}
+        if isinstance(risk, dict) and risk.get("key") else None,
+        "focus_this_week": [{"action": a, "why": f"From your {latest['company'] or 'last'} interview on {day_label(latest['date'])}"}
+                            for a in latest["do_next_time"]] if latest else [],
+        "recurring_weak_topics": weak, "by_round_type": rounds,
+        "trend_text": scrub(perf.get("trend_text") or ""),
+        "generated_at": perf.get("generated_at"),
+        "available": bool(interviews),
     }
+
+
+def _fallback_series(interviews: list[dict[str, Any]], value: Any) -> dict[str, Any]:
+    points = [{"x": iv["date"], "y": value(iv), "company": iv["company"], "round_type": iv["round_type"]}
+              for iv in interviews if value(iv) is not None]
+    for i, point in enumerate(points):
+        window = [q["y"] for q in points[max(0, i - 2):i + 1]]
+        point["ma3"] = round(sum(window) / len(window), 2)
+    change = round(points[-1]["ma3"] - points[0]["ma3"], 2) if len(points) >= 3 else None
+    badge = "insufficient_data" if change is None else \
+        "improving" if change >= 1 else "declining" if change <= -1 else "flat"
+    return {"points": points, "n": len(points), "fitted_change": change, "badge": badge}
+
+
+def performance_from_v1(scores: dict[str, Any] | None, evaluation: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Only when performance.json is missing: the old 1-5 table, doubled, in schema-2 shape."""
+    v1 = {"technical_depth": "technical", "problem_solving": "technical", "communication_clarity": "communication",
+          "structure": "communication", "confidence": "behavioural", "handling_pushback": "behavioural",
+          "compensation_handling": "negotiation"}
+    by_interview: dict[tuple[str, str], dict[str, list[float]]] = {}
+    for row in (scores or {}).get("rows") or []:
+        if isinstance(row, dict) and row.get("score") is not None and row.get("date") and row.get("dimension") in v1:
+            key = (str(row["date"])[:10], str(row.get("company") or ""))
+            by_interview.setdefault(key, {}).setdefault(v1[row["dimension"]], []).append(float(row["score"]) * 2)
+    if not by_interview:
+        return None
+    interviews = []
+    for (date, company), dims in sorted(by_interview.items()):
+        means = {d: round(sum(v) / len(v), 2) for d, v in dims.items()}
+        interviews.append({"interview_id": f"{date}:{company}", "date": date, "company": company,
+                           "round_type": "unknown", "overall_score": round(sum(means.values()) / len(means), 2),
+                           "dimension_scores": means, "do_next_time": [], "question_feedback": []})
+    brief_ = (evaluation or {}).get("brief") or {}
+    if interviews:
+        interviews[-1]["do_next_time"] = list(brief_.get("prep_checklist") or [])[:3]
+    dims = sorted({d for iv in interviews for d in iv["dimension_scores"]})
+    return {"rubric": {d: {} for d in dims}, "interviews": interviews,
+            "trends": {"overall": _fallback_series(interviews, lambda iv: iv["overall_score"]),
+                       "dimensions": {d: _fallback_series(interviews, lambda iv, d=d: iv["dimension_scores"].get(d))
+                                      for d in dims}},
+            "recurring_weak_topics": [{"topic": t, "verdict": "same", "occurrences": []}
+                                      for t in brief_.get("recurring_weak_topics") or []],
+            "trend_text": brief_.get("trend") or "", "generated_at": (evaluation or {}).get("generated_at")}
 
 
 def read_json(path: Path) -> dict[str, Any] | None:
@@ -356,19 +392,24 @@ def read_json(path: Path) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
-def profile_files() -> tuple[dict[str, Any] | None, dict[str, Any] | None, dict[str, Any] | None,
-                             dict[str, Any] | None]:
-    """(scores, evaluation, scorecards, pay target) from the private data dir; None if missing."""
-    from app.profile.config import settings, _path
+def profile_files() -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """(performance, pay target) from the private data dir; None if missing.
+
+    performance.json (VALR_PERFORMANCE_PATH, default /data/performance.json, schema 2);
+    only when it is missing, the old interview_scores.json + evaluation.json, adapted.
+    """
+    from app.profile.config import settings
     cfg = settings()
-    cards = read_json(_path("VALR_SCORECARDS_PATH", "data/interview_scorecards.json"))
+    perf = read_json(Path(os.getenv("VALR_PERFORMANCE_PATH") or "/data/performance.json").expanduser())
+    if not (perf and perf.get("schema_version") == 2):
+        perf = performance_from_v1(read_json(cfg.scores_path.with_suffix(".json")),
+                                   read_json(cfg.evaluation_path))
     profile = read_json(cfg.profile_path) or {}
     target = ((profile.get("compensation") or {}).get("target_lpa")
               if isinstance(profile.get("compensation"), dict) else None)
     target = target if isinstance(target, dict) and target.get("max") else None
-    return read_json(cfg.scores_path.with_suffix(".json")), read_json(cfg.evaluation_path), cards, \
-        ({"min": target.get("min"), "max": target.get("max"), "unit": "LPA", "currency": "INR"}
-         if target else None)
+    return perf, ({"min": target.get("min"), "max": target.get("max"), "unit": "LPA", "currency": "INR"}
+                  if target else None)
 
 
 def calendar_view(state: dict[str, Any], now: datetime) -> dict[str, Any]:
@@ -551,8 +592,8 @@ async def collect(pool: Any, now: datetime | None = None) -> dict[str, Any]:
         "calendar": calendar,
     }
     view["dials"] = await dial_counts(now)
-    scores, evaluation, cards, target = profile_files()
-    view["performance"] = performance(scores, evaluation, cards)
+    perf, target = profile_files()
+    view["performance"] = performance(perf)
     view["pay_target"] = target
     view["setup"] = {"phone_on_file": bool(os.getenv("VALR_OWNER_PHONE", "").strip()),
                      "test_call_done": view.pop("_briefed_ever", False),

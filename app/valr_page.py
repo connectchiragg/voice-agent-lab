@@ -35,9 +35,6 @@ PERSON = {
     "skipped_classifier": ("Not an interviewer", "muted"), "pending": ("Not researched yet", "info"),
     "declined": ("Declined", "muted"),
 }
-TREND = {"improving": ("Improving", "ok", "↗"), "flat": ("Steady", "info", "→"),
-         "declining": ("Slipping", "bad", "↘"), "insufficient data": ("Too early to tell", "muted", "·")}
-
 
 def e(value: object) -> str:
     return html.escape("" if value is None else str(value))
@@ -385,8 +382,7 @@ def detail(slot: dict[str, Any], view: dict[str, Any], clock: Clock) -> str:
         for p in slot["interviewers"]) or '<li class="muted small">No one else is on the invite.</li>'
     questions = "".join(f"<li>{e(q)}</li>" for q in d["likely_questions"])
     perf = view["performance"]
-    prep = d["prep"] or [f["action"] for f in perf.get("focus_this_week") or []] or \
-        perf["highlights"].get("prep_checklist", [])[:4]
+    prep = d["prep"] or [f["action"] for f in perf.get("focus_this_week") or []]
     prep_source = "For this round" if d["prep"] else "From your recent interviews"
     checklist = "".join(f'<li><label><input type="checkbox" data-check="{e(slot["ref"])}:{i}"> <span>{e(x)}</span></label></li>'
                         for i, x in enumerate(prep)) or '<li class="muted small">Nothing yet.</li>'
@@ -422,6 +418,22 @@ def detail(slot: dict[str, Any], view: dict[str, Any], clock: Clock) -> str:
 
 # Performance.
 
+BADGE = {"improving": ("Improving", "ok", "↗"), "flat": ("Steady", "info", "→"),
+         "declining": ("Slipping", "bad", "↘"), "insufficient_data": ("Too early to tell", "muted", "·")}
+VERDICT = {"improved": ("Improved", "ok"), "same": ("No change yet", "warn"), "worse": ("Getting worse", "bad"),
+           "mixed": ("Mixed", "info")}
+OUTCOME = {"advanced": ("Advanced", "ok"), "rejected": ("Not advanced", "bad"), "unknown": ("Outcome unknown", "muted")}
+
+
+def badge_chip(badge: str) -> str:
+    text, tone, arrow = BADGE.get(badge, BADGE["insufficient_data"])
+    return chip(f"{arrow} {text}", tone)
+
+
+def score(value: float | None) -> str:
+    return "–" if value is None else f"{value:.1f}"
+
+
 def performance(view: dict[str, Any], clock: Clock) -> str:
     perf = view["performance"]
     head = f"""{eyebrow("03", "Performance")}
@@ -430,83 +442,99 @@ def performance(view: dict[str, Any], clock: Clock) -> str:
         return f"""
 <section class="section" id="performance" aria-labelledby="perf-title">{head}
   <div class="empty"><p class="empty-title">Your scores appear after your first recorded interview.</p>
-  <p class="muted">Connect Fathom and record your interviews; VALR scores each one on the same rubric and
-  shows what is improving and what to practise.</p></div>
+  <p class="muted">Connect Fathom and record your interviews; VALR scores each one on the same rubric (out of 10)
+  and shows what is improving and what to practise.</p></div>
 </section>"""
-    overall = perf["overall"]
-    last_overall = next((v for v in reversed(overall["ma"]) if v is not None), None)
-    o_label, o_tone, o_arrow = TREND.get(overall["direction"], TREND["insufficient data"])
-    improved, risk = perf.get("most_improved"), perf.get("biggest_risk")
-    improved_chip = (chip(f"↗ +{improved['change']:.1f}", "ok")
-                     if improved and isinstance(improved.get("change"), (int, float)) else "")
+    overall = perf["series"]["overall"]
+    last = overall["points"][-1]["ma3"] if overall["points"] else None
+    most, risk = perf.get("most_improved"), perf.get("biggest_risk")
+    most_html = (f'<p class="tile-mid">{e(most["label"])}</p>'
+                 + (chip(f"↗ +{most['change']:.1f}", "ok") if most.get("change") is not None else "")
+                 + (f'<p class="muted small">{score(most["first"])} → {score(most["last"])} out of 10</p>'
+                    if most.get("first") is not None and most.get("last") is not None else "")) if most else \
+        '<p class="tile-mid">–</p><p class="muted small">Needs 3 interviews on the same skill.</p>'
+    risk_html = (f'<p class="tile-mid">{e(risk["label"])}</p>'
+                 f'<p class="muted small">Recent average {score(risk["latest"])}/10'
+                 + (f", {risk['per_30d']:+.1f} a month" if risk.get("per_30d") is not None else "") + "</p>") if risk else \
+        '<p class="tile-mid">Nothing slipping</p>'
     tiles = f"""
 <div class="tiles">
-  <div class="tile"><p class="mono label">Overall · last 3 interviews</p>
-    <p class="tile-big num">{'–' if last_overall is None else f'{last_overall:.1f}'}<span class="of">/10</span></p>
-    {chip(f'{o_arrow} {o_label}', o_tone)}</div>
-  <div class="tile"><p class="mono label">Most improved</p>
-    <p class="tile-mid">{e(improved['dimension']) if improved else '–'}</p>{improved_chip}</div>
-  <div class="tile risk"><p class="mono label">Biggest risk</p>
-    <p class="tile-mid">{e(risk['dimension']) if risk else 'Nothing slipping'}</p>
-    <p class="muted small">{e(risk.get('why', '')) if risk else ''}</p></div>
+  <div class="tile"><p class="mono label">Overall · average of last 3</p>
+    <p class="tile-big num">{score(last)}<span class="of">/10</span></p>{badge_chip(overall['badge'])}</div>
+  <div class="tile"><p class="mono label">Most improved</p>{most_html}</div>
+  <div class="tile risk"><p class="mono label">Biggest risk</p>{risk_html}</div>
 </div>"""
     focus = "".join(f'<li><span class="f-num mono">0{i}</span><div><p class="f-action">{e(f["action"])}</p>'
                     f'<p class="muted small">{e(f["why"])}</p></div></li>'
                     for i, f in enumerate(perf.get("focus_this_week") or [], 1))
     focus_html = (f'<div class="focus"><h3 class="sub-title">Focus this week</h3><ol class="focus-list">{focus}</ol></div>'
                   if focus else "")
-    badges = "".join(f'<li class="badge"><span class="badge-mark" aria-hidden="true">◆</span><span><b>{e(b["label"])}</b>'
-                     f'<span class="muted small"> {e(b["detail"])}</span></span></li>' for b in perf.get("badges") or [])
-    picker = "".join(f'<button type="button" class="pick" data-dim="{e(d["key"])}" aria-pressed="false">{e(d["label"])}</button>'
-                     for d in perf["dimensions"])
+    dim_buttons = "".join(
+        f'<button type="button" class="pick" data-dim="{e(d["key"])}" aria-pressed="false">{e(d["label"])} '
+        f'<span class="pick-badge" aria-hidden="true">{BADGE.get(perf["series"].get(d["key"], {}).get("badge", ""), BADGE["insufficient_data"])[2]}</span></button>'
+        for d in perf["dimensions"] if perf["series"].get(d["key"], {}).get("n"))
+    weak = "".join(f'<li class="weak"><span class="weak-topic">{e(t["topic"])}</span>{chip(*VERDICT[t["verdict"]])}'
+                   f'<span class="muted small">{t["seen"]} interview{"s" if t["seen"] != 1 else ""}'
+                   f'{(" · " + e(t["last_note"])) if t["last_note"] else ""}</span></li>'
+                   for t in perf.get("recurring_weak_topics") or [])
+    rounds = "".join(f'<li><span>{e(r["round"])}</span><span class="num">{score(r["overall"])}<span class="muted">/10 · {e(r["n"])}</span></span></li>'
+                     for r in perf.get("by_round_type") or [])
     labels = {d["key"]: d["label"] for d in perf["dimensions"]}
     cards = []
     for card in reversed(perf["interviews"]):
         bars = "".join(f'<li><span class="sb-name">{e(labels.get(k, k))}</span><span class="sb-track">'
                        f'<i style="width:{v * 10:.0f}%"></i></span><span class="sb-val num">{v:.1f}</span></li>'
-                       for k, v in card["scores"].items() if k in labels)
+                       if v is not None else
+                       f'<li class="na"><span class="sb-name">{e(labels.get(k, k))}</span><span class="sb-track"></span>'
+                       f'<span class="sb-val num">n/a</span></li>'
+                       for k, v in card["dimensions"].items())
         qs = "".join(
-            f'<li class="q"><p class="q-head"><span class="q-text">{e(q["question"])}</span>'
-            + (chip(f'{q["score"]:.1f}/10', "ok" if q["score"] >= 7 else "warn" if q["score"] >= 5 else "bad")
-               if isinstance(q.get("score"), (int, float))
-               else chip("strong" if q["strong"] else "work on it", "ok" if q["strong"] else "warn"))
-            + "</p>" + (f'<p class="small">{e(q["feedback"])}</p>' if q["feedback"] else "")
-            + (f'<p class="small q-quote">“{e(q["quote"])}”</p>' if q.get("quote") else "")
-            + (f'<p class="small q-better"><span class="mono">Try</span> {e(q["better"])}</p>' if q.get("better") else "")
+            f'<li class="q"><p class="q-text">{e(q["question"])}</p>'
+            + (f'<p class="small q-good"><span class="mono">Went well</span> {e(q["went_well"])}</p>' if q["went_well"] else "")
+            + (f'<p class="small q-improve"><span class="mono">Improve</span> {e(q["improve"])}</p>' if q["improve"] else "")
+            + (f'<p class="small q-better"><span class="mono">Try</span> {e(q["hint"])}</p>' if q["hint"] else "")
             + "</li>" for q in card["questions"])
-        card_badges = "".join(chip(b, "accent") for b in card["badges"])
+        nxt = "".join(f"<li>{e(x)}</li>" for x in card["do_next_time"])
+        stage = f" · {e(card['stage'])}" if card["stage"] else ""
         cards.append(f"""
 <article class="card-score">
   <p class="mono label">{e(clock.short_date(card['date']) if card['date'] else '')} · {e(card['round'])}</p>
-  <h4>{e(card['company'])}</h4>
-  <p class="score-big num">{'–' if card['overall'] is None else f"{card['overall']:.1f}"}<span class="of">/10</span></p>
-  <div class="card-badges">{card_badges}</div>
+  <h4>{e(card['company'] or 'Interview')}<span class="muted small">{stage}</span></h4>
+  <p class="score-big num">{score(card['overall'])}<span class="of">/10</span></p>
+  <div class="card-badges">{chip(*OUTCOME[card['outcome']], card['outcome_evidence'])}</div>
   <ul class="score-bars">{bars}</ul>
+  {f'<details class="qs"><summary>Next time ({len(card["do_next_time"])})</summary><ul class="facts">{nxt}</ul></details>' if nxt else ''}
   {f'<details class="qs"><summary>Question feedback ({len(card["questions"])})</summary><ul>{qs}</ul></details>' if qs else ''}
 </article>""")
-    h = perf["highlights"]
-    lists = ""
-    if h.get("top_strengths") or h.get("recurring_weak_topics"):
-        lists = (f'<div class="two"><div><h3 class="sub-title">What works</h3><ul class="facts">{"".join(f"<li>{e(x)}</li>" for x in h.get("top_strengths") or [])}</ul></div>'
-                 f'<div><h3 class="sub-title">What keeps coming up</h3><ul class="facts">{"".join(f"<li>{e(x)}</li>" for x in h.get("recurring_weak_topics") or [])}</ul></div></div>')
-    data = json.dumps({"interviews": [{"date": i["date"], "company": i["company"], "overall": i["overall"],
-                                       "scores": i["scores"]} for i in perf["interviews"]],
-                       "trends": perf["trends"], "overall": overall,
-                       "dimensions": perf["dimensions"]}).replace("<", "\\u003c")
+    data = json.dumps({"series": perf["series"],
+                       "dimensions": [{"key": d["key"], "label": d["label"],
+                                       "subs": [{"key": x["key"], "label": x["label"]} for x in d["subs"]
+                                                if perf["series"].get(x["key"], {}).get("n")]}
+                                      for d in perf["dimensions"]]}).replace("<", "\\u003c")
+    trend_text = f'<p class="trend-text">{e(perf["trend_text"])}</p>' if perf.get("trend_text") else ""
+    side = ""
+    if weak or rounds:
+        side = (f'<div class="two">'
+                + (f'<div><h3 class="sub-title">Topics that keep coming up</h3><ul class="weak-list">{weak}</ul></div>' if weak else "")
+                + (f'<div><h3 class="sub-title">By round type</h3><ul class="kv-rows">{rounds}</ul></div>' if rounds else "")
+                + "</div>")
     return f"""
 <section class="section" id="performance" aria-labelledby="perf-title">{head}
   {tiles}
   {focus_html}
   <div class="chart-box">
-    <div class="chart-head"><h3 class="sub-title">Trend</h3><p class="muted small">Dots are single interviews; the line is the average of the last 3.</p></div>
-    <div class="picker" role="group" aria-label="Choose what to chart"><button type="button" class="pick" data-dim="overall" aria-pressed="true">Overall</button>{picker}</div>
+    <div class="chart-head"><h3 class="sub-title">Trend</h3><p class="muted small">Dots are single interviews, the line is the
+      average of the last 3, out of 10. Skills a round didn't test are left out.</p></div>
+    <div class="picker" role="group" aria-label="Choose what to chart"><button type="button" class="pick" data-dim="overall" aria-pressed="true">Overall</button>{dim_buttons}</div>
+    <div class="picker subs" role="group" aria-label="Choose a skill" hidden></div>
     <div class="chart-wrap"><div id="perf-chart" class="chart" role="img" aria-label="Interview scores over time">
       <noscript><p class="muted">The chart needs JavaScript; the scorecards below have the numbers.</p></noscript></div></div>
+    <p class="chart-status small" aria-live="polite"></p>
   </div>
-  {f'<ul class="badges">{badges}</ul>' if badges else ''}
+  {trend_text}
+  {side}
   <h3 class="sub-title">Scorecards</h3>
   <div class="cards-row">{''.join(cards)}</div>
-  {lists}
   <script type="application/json" id="perf-data">{data}</script>
 </section>"""
 

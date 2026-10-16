@@ -169,7 +169,8 @@ check();
 setInterval(check, 60000);
 document.addEventListener("visibilitychange", () => { if (!document.hidden) check(); });
 
-// The trend chart: single interviews as dots, the 3-interview average as the line.
+// The trend chart: single interviews as dots, the 3-interview average as the line,
+// for the overall score, a dimension, or one skill within it (performance.json series).
 const SVG = "http://www.w3.org/2000/svg";
 function el(name, attrs = {}, parent) {
   const node = document.createElementNS(SVG, name);
@@ -179,23 +180,35 @@ function el(name, attrs = {}, parent) {
 }
 const source = document.querySelector("#perf-data");
 const data = source ? JSON.parse(source.textContent) : null;
+const BADGES = {improving: "improving", flat: "steady", declining: "slipping", insufficient_data: "too early to tell"};
 let chosen = "overall";
-function series(key) {
-  if (key === "overall") return {raw: data.overall.raw, ma: data.overall.ma, label: "Overall"};
-  const trend = data.trends[key];
-  const label = data.dimensions.find(d => d.key === key)?.label ?? key;
-  return {raw: trend.raw, ma: trend.ma, label};
+function labelOf(key) {
+  if (key === "overall") return "Overall";
+  for (const d of data.dimensions) {
+    if (d.key === key) return d.label;
+    const sub = d.subs.find(x => x.key === key);
+    if (sub) return `${d.label} · ${sub.label}`;
+  }
+  return key;
 }
 function drawChart() {
   const holder = document.querySelector("#perf-chart");
-  if (!holder || !data || !data.interviews.length) return;
-  const days = data.interviews.map(i => Date.parse(`${i.date}T00:00:00Z`));
-  const t0 = days[0];
-  const t1 = Math.max(days.at(-1), t0 + 86400000);
+  if (!holder || !data) return;
+  const s = data.series[chosen];
+  const status = document.querySelector(".chart-status");
+  if (!s || !s.points.length) {
+    holder.replaceChildren();
+    if (status) status.textContent = "No scores for this yet.";
+    return;
+  }
+  const all = Object.values(data.series).flatMap(x => x.points.map(p => Date.parse(`${p.x}T00:00:00Z`)));
+  const t0 = Math.min(...all);
+  const t1 = Math.max(Math.max(...all), t0 + 86400000);
   const width = Math.max(holder.clientWidth, 280);
   const height = width < 560 ? 230 : 280;
   const pad = {l: 30, r: 14, t: 14, b: 30};
-  const x = ms => pad.l + ((ms - t0) / (t1 - t0)) * (width - pad.l - pad.r);
+  const x = day => pad.l + ((Date.parse(`${day}T00:00:00Z`) - t0) / (t1 - t0)) * (width - pad.l - pad.r);
+  const xm = ms => pad.l + ((ms - t0) / (t1 - t0)) * (width - pad.l - pad.r);
   const y = v => pad.t + ((10 - v) / 9) * (height - pad.t - pad.b);
   holder.replaceChildren();
   const svg = el("svg", {viewBox: `0 0 ${width} ${height}`, "aria-hidden": "true"}, holder);
@@ -204,22 +217,19 @@ function drawChart() {
     el("line", {x1: pad.l, x2: width - pad.r, y1: y(v), y2: y(v)}, grid);
     el("text", {x: pad.l - 10, y: y(v) + 3, "text-anchor": "end"}, grid).textContent = v;
   }
-  const ticks = Math.min(days.length, width < 560 ? 3 : 6);
+  const ticks = width < 560 ? 3 : 6;
   for (let i = 0; i < ticks; i++) {
-    const ms = t0 + ((t1 - t0) * i) / Math.max(ticks - 1, 1);
+    const ms = t0 + ((t1 - t0) * i) / (ticks - 1);
     const label = new Date(ms).toLocaleDateString("en-GB", {day: "numeric", month: "short", timeZone: "UTC"}).toUpperCase();
-    el("text", {x: x(ms), y: height - 8, "text-anchor": i === 0 ? "start" : i === ticks - 1 ? "end" : "middle"}, grid).textContent = label;
+    el("text", {x: xm(ms), y: height - 8, "text-anchor": i === 0 ? "start" : i === ticks - 1 ? "end" : "middle"}, grid).textContent = label;
   }
-  // The other dimensions' averages, faint, for context.
-  if (chosen !== "overall") {
-    for (const other of Object.keys(data.trends).filter(k => k !== chosen)) {
-      const s = series(other);
-      const d = s.ma.map((v, i) => v === null ? null : `${x(days[i]).toFixed(1)},${y(v).toFixed(1)}`).filter(Boolean);
-      if (d.length > 1) el("path", {class: "ma faint", d: `M${d.join("L")}`}, svg);
-    }
+  // Context: the overall average when a dimension is shown; the dimension when a skill is.
+  const parent = chosen === "overall" ? null : chosen.includes(".") ? chosen.split(".")[0] : "overall";
+  const context = parent && data.series[parent];
+  if (context && context.points.length > 1) {
+    el("path", {class: "ma faint", d: `M${context.points.map(p => `${x(p.x).toFixed(1)},${y(p.ma3).toFixed(1)}`).join("L")}`}, svg);
   }
-  const s = series(chosen);
-  const points = s.ma.map((v, i) => v === null ? null : [x(days[i]), y(v)]).filter(Boolean);
+  const points = s.points.map(p => [x(p.x), y(p.ma3)]);
   if (points.length > 1) {
     el("path", {class: "ma-area", d: `M${points.map(p => p.join(",")).join("L")}L${points.at(-1)[0]},${y(1)}L${points[0][0]},${y(1)}Z`}, svg);
     const line = el("path", {class: "ma", d: `M${points.map(p => p.join(",")).join("L")}`}, svg);
@@ -236,30 +246,52 @@ function drawChart() {
     holder.parentElement.append(tip);
   }
   tip.hidden = true;
-  s.raw.forEach((v, i) => {
-    if (v === null || v === undefined) return;
-    const dot = el("circle", {class: "raw", cx: x(days[i]), cy: y(v), r: 4}, svg);
-    const ma = s.ma[i];
-    if (ma !== null) el("circle", {class: "ma-dot", cx: x(days[i]), cy: y(ma), r: 3.5}, svg);
-    const hit = el("circle", {cx: x(days[i]), cy: y(v), r: 14, fill: "transparent"}, svg);
+  s.points.forEach(p => {
+    el("circle", {class: "raw", cx: x(p.x), cy: y(p.y), r: 4}, svg);
+    el("circle", {class: "ma-dot", cx: x(p.x), cy: y(p.ma3), r: 3.5}, svg);
+    const hit = el("circle", {cx: x(p.x), cy: y(p.y), r: 14, fill: "transparent"}, svg);
     hit.addEventListener("pointerenter", () => {
-      const interview = data.interviews[i];
-      tip.textContent = `${interview.company} · ${interview.date} · ${s.label} ${v.toFixed(1)} (avg ${ma?.toFixed(1) ?? "–"})`;
+      tip.textContent = `${p.company || "Interview"}${p.round ? ` · ${p.round}` : ""} · ${p.x} · ${p.y.toFixed(1)} (avg ${p.ma3.toFixed(1)})`;
       tip.hidden = false;
       const scale = holder.getBoundingClientRect().width / width;
-      tip.style.left = `${Math.max(0, Math.min(x(days[i]) * scale - 90, holder.clientWidth - 260))}px`;
-      tip.style.top = `${y(v) * scale - 44}px`;
+      tip.style.left = `${Math.max(0, Math.min(x(p.x) * scale - 90, holder.clientWidth - 280))}px`;
+      tip.style.top = `${y(p.y) * scale - 44}px`;
     });
     hit.addEventListener("pointerleave", () => { tip.hidden = true; });
-    dot.dataset.i = i;
   });
+  if (status) {
+    const change = s.change === null ? "" : `, ${s.change > 0 ? "+" : ""}${s.change.toFixed(1)} across the period`;
+    status.textContent = `${labelOf(chosen)}: ${BADGES[s.badge] ?? s.badge}${change} · ${s.n} interview${s.n === 1 ? "" : "s"}`;
+  }
 }
-document.querySelectorAll(".pick").forEach(button => {
-  button.addEventListener("click", () => {
-    chosen = button.dataset.dim;
-    document.querySelectorAll(".pick").forEach(b => b.setAttribute("aria-pressed", String(b === button)));
-    drawChart();
-  });
+const subPicker = document.querySelector(".picker.subs");
+function showSubs(dim) {
+  if (!subPicker) return;
+  const d = data.dimensions.find(x => x.key === dim);
+  subPicker.replaceChildren();
+  subPicker.hidden = !d || !d.subs.length;
+  if (!d) return;
+  for (const sub of [{key: d.key, label: `All of ${d.label.toLowerCase()}`}, ...d.subs]) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "pick sub";
+    button.dataset.dim = sub.key;
+    button.setAttribute("aria-pressed", String(sub.key === chosen));
+    button.textContent = sub.label;
+    subPicker.append(button);
+  }
+}
+document.addEventListener("click", event => {
+  const button = event.target.closest(".pick");
+  if (!button || !data) return;
+  chosen = button.dataset.dim;
+  if (!button.classList.contains("sub")) {
+    document.querySelectorAll(".picker:not(.subs) .pick").forEach(b => b.setAttribute("aria-pressed", String(b === button)));
+    showSubs(chosen);
+  } else {
+    subPicker.querySelectorAll(".pick").forEach(b => b.setAttribute("aria-pressed", String(b === button)));
+  }
+  drawChart();
 });
 drawChart();
 let resizeTimer = null;
