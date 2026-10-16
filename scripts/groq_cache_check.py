@@ -45,7 +45,7 @@ def old_layout(history, memory_block, now):
 
 def run(layout: str) -> list[tuple[int, int]]:
     client = Groq()
-    memory_block = interviews.OWNER_RULES.format(name="Chirag") + "\n\n<profile>\n" + \
+    memory_block = interviews.OWNER_RULES.format(name="Sam") + "\n\n<profile>\n" + \
         interviews.compact(interviews.profile_block(), interviews.EVALUATION_CHARS_ON_CALLS) + "\n</profile>"
     schemas = tools.OWNER_SCHEMAS
     history, out = [], []

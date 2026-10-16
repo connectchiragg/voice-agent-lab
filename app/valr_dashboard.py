@@ -27,12 +27,12 @@ import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from app import (access, auth, calendar_sync, callbacks, google_oauth, interview_store, interviews,
                  research, telegram_api, valr_view)
@@ -265,6 +265,57 @@ async def set_dials(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True, "paused": body.paused,
                          "message": "Automatic calls paused." if body.paused
                          else "Automatic calls resumed."}, headers=NO_CACHE)
+
+
+class ReachRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    mode: Literal["telegram", "call"]
+
+
+@router.post("/valr/api/reach")
+async def set_reach(request: Request) -> JSONResponse:
+    """Settings: a Telegram heads-up (default) or the automatic T-30 call. Stored in the
+    database; overrides VALR_AUTO_DIAL. Either way one attempt, no retries."""
+    await action_owner(request)
+    try:
+        body = ReachRequest.model_validate_json(await request.body())
+    except ValidationError as error:
+        raise HTTPException(400, "Expected {\"mode\": \"telegram\"|\"call\"}.") from error
+    if research.pool is None:
+        raise HTTPException(503, "Postgres is unavailable.")
+    async with research.pool.connection() as connection:
+        await interview_store.setup(connection)
+        await interview_store.set_flag(connection, interview_store.AUTO_DIAL, body.mode == "call")
+    logger.info("VALR reach mode set to %s from the dashboard", body.mode)
+    return JSONResponse({"ok": True, "mode": body.mode,
+                         "message": ("VALR will call you 30 minutes before each interview, once."
+                                     if body.mode == "call" else
+                                     "VALR will send a Telegram heads-up; no automatic calls.")},
+                        headers=NO_CACHE)
+
+
+class PrepCheckRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    ref: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
+    item: str = Field(min_length=1, max_length=400)
+    done: bool
+
+
+@router.post("/valr/api/prep")
+async def set_prep(request: Request) -> JSONResponse:
+    """Tick (or untick) one prep-checklist line; kept on the server so Home can show it done."""
+    await action_owner(request)
+    try:
+        body = PrepCheckRequest.model_validate_json(await request.body())
+    except ValidationError as error:
+        raise HTTPException(400, "Expected {ref, item, done}.") from error
+    if research.pool is None:
+        raise HTTPException(503, "Postgres is unavailable.")
+    async with research.pool.connection() as connection:
+        await interview_store.setup(connection)
+        await interview_store.set_prep_check(connection, body.ref, interview_store.prep_item(body.item), body.done)
+    return JSONResponse({"ok": True, "done": body.done, "message": "Ticked." if body.done else "Unticked."},
+                        headers=NO_CACHE)
 
 
 @router.post("/valr/api/telegram/code")

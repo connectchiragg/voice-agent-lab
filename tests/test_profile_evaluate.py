@@ -32,7 +32,7 @@ def scores(base: int, comp=None):
 def analysis(company="Acme", base=3, comp=None, quote="I would use a token bucket"):
     return {"company": company, "round_type": "system design",
             "interviewers": [{"name": "Priya Interviewer", "role": "Staff Engineer"},
-                             {"name": "Chirag Goel", "role": "candidate"}],
+                             {"name": "Sam Rivera", "role": "candidate"}],
             "questions_asked": ["Design a rate limiter"],
             "strong_answers": [{"topic": "rate limiting", "quote": quote, "why": "clear"}],
             "weak_answers": [{"topic": "consistency", "quote": "uh not sure", "why": "vague"}],
@@ -61,25 +61,68 @@ class FakeLLM:
         self.analyses = list(analyses or [])
         self.fail_on = fail_on
         self.calls = []
+        self.rubric_base = []
 
-    def json(self, *, model, system, user, schema, max_tokens, effort):
-        self.calls.append({"model": model, "system": system, "user": user, "effort": effort})
+    def json(self, *, model, system, user, schema, max_tokens, effort, constrained=True):
+        self.calls.append({"model": model, "system": system, "user": user, "effort": effort,
+                           "constrained": constrained})
         self.ledger.add(model, len(user) // 4, 50)
         if self.fail_on and self.fail_on in user:
             raise LLMError("declined")
         if "is_interview" in schema["properties"]:
             return dict(self.label)
+        if "where_you_stand" in schema["properties"]:
+            return coach_reply()
+        if "leaned_in" in schema["properties"]:
+            return {"cues": [], "leaned_in": "", "disengaged": "", "close": "none"}
+        if "overall_score" in schema["properties"]:
+            return rubric_reply(self.rubric_base.pop(0) if self.rubric_base else 6)
+        if "topics" in schema["properties"]:
+            return {"topics": [{"topic": "consistency", "verdict": "improved", "occurrences": [
+                {"date": "2026-09-01", "interview_id": "fathom:1", "status": "first_seen",
+                 "note": "vague"}]}]}
         if "scores" in schema["properties"]:
             return self.analyses.pop(0) if self.analyses else analysis()
         return dict(BRIEF)
 
 
-def meeting(title, turns=None, participants=("Priya", "Chirag Goel"), date="2026-09-01T10:00:00Z"):
+def coach_reply() -> dict:
+    return {
+        "where_you_stand": "You are close to the bar. Lead with the answer.",
+        "whats_working": [{"headline": "Clear designs", "detail": "You name components.",
+                           "quote_id": "Q1"}],
+        "whats_costing_you": [{"headline": "Burying the answer", "plain_meaning": "Answer first.",
+                               "why_it_matters": "They stop listening.", "quote_id": "Q1",
+                               "what_happened": "Long preamble.", "do_instead": "Say the answer first.",
+                               "model_rephrase": "Short answer: shard by tenant."}] * 2,
+        "this_weeks_focus": [{"drill": f"Drill {i}", "how": "Timer", "done_when": "Under 60s"}
+                             for i in range(3)],
+        "negotiation": {"read": "You share numbers early.",
+                        "scripts": [{"moment": "Asked current pay", "say": "I'd rather hear the range first."}]},
+        "interviewers": {"leaned_in_when": "You gave numbers.", "disengaged_when": "You rambled.",
+                         "quote_ids": ["Q1", "Q999"]},
+        "headline": "Close to the bar; lead with the answer."}
+
+
+def rubric_reply(base: int, comp_came_up: bool = False) -> dict:
+    from app.profile.rubric import RUBRIC
+    scores = [{"key": f"{g}.{s}", "score": (0 if g == "negotiation" and not comp_came_up else base),
+               "justification": f"{s} evidence", "quote": "I would shard by tenant"}
+              for g, subs in RUBRIC.items() for s in subs]
+    return {"company": "Acme", "company_stage": "series_a_b", "round_type": "system_design",
+            "outcome": "advanced", "outcome_evidence": "next round scheduled",
+            "overall_score": base, "scores": scores,
+            "do_next_time": ["Lead with the answer", "Quantify impact", "Ask about SLOs", "x"],
+            "question_feedback": [{"question": f"Q{i}", "went_well": "w", "improve": "i",
+                                   "model_answer_hint": "h"} for i in range(7)]}
+
+
+def meeting(title, turns=None, participants=("Priya", "Sam Rivera"), date="2026-09-01T10:00:00Z"):
     return {"source": "fathom", "id": title, "title": title, "date": date, "duration": 1800,
             "participants": list(participants), "vendor_summary": "summary",
             "turns": turns if turns is not None else
             [{"speaker": "Priya", "text": "Question?", "start": 0.0},
-             {"speaker": "Chirag Goel", "text": "Answer here.", "start": 4.0}]}
+             {"speaker": "Sam Rivera", "text": "Answer here.", "start": 4.0}]}
 
 
 def test_heuristic():
@@ -91,28 +134,28 @@ def test_heuristic():
 
 def test_classifier_skips_obvious_internal_meetings_and_uses_haiku_otherwise():
     llm = FakeLLM()
-    assert classify.classify(meeting("Daily standup"), llm, "claude-haiku-5-5", "Chirag")[
+    assert classify.classify(meeting("Daily standup"), llm, "claude-haiku-5-5", "Sam")[
         "stage"] == "heuristic"
     assert llm.calls == []
-    label = classify.classify(meeting("Catch up"), llm, "claude-haiku-5-5", "Chirag")
+    label = classify.classify(meeting("Catch up"), llm, "claude-haiku-5-5", "Sam")
     assert label["stage"] == "llm" and classify.is_owner_interview(label)
     assert llm.calls[0]["model"] == "claude-haiku-5-5" and llm.calls[0]["effort"] == "low"
-    assert "Chirag" in llm.calls[0]["system"]
+    assert "Sam" in llm.calls[0]["system"]
 
 
 def test_classifier_respects_owner_as_interviewer():
     llm = FakeLLM(label={"is_interview": True, "owner_is_candidate": False, "company": None,
                          "round_type": None, "confidence": 0.9, "reason": "he interviews"})
-    label = classify.classify(meeting("Interview: backend candidate"), llm, "m", "Chirag")
+    label = classify.classify(meeting("Interview: backend candidate"), llm, "m", "Sam")
     assert not classify.is_owner_interview(label)
 
 
 def test_speaking_metrics_measured_from_turns():
     turns = [{"speaker": "Priya", "text": "Q one", "start": 0.0},
-             {"speaker": "Chirag Goel", "text": "um so basically " + "word " * 57, "start": 5.0},
-             {"speaker": "Chirag Goel", "text": "more words here", "start": 30.0},
+             {"speaker": "Sam Rivera", "text": "um so basically " + "word " * 57, "start": 5.0},
+             {"speaker": "Sam Rivera", "text": "more words here", "start": 30.0},
              {"speaker": "Priya", "text": "ok", "start": 65.0}]
-    m = evaluate.speaking_metrics(turns, "Chirag")
+    m = evaluate.speaking_metrics(turns, "Sam")
     assert m["turns"] == 1  # merged consecutive turns
     assert m["fillers_per_100_words"] == pytest.approx(3.2, abs=0.1)
     assert m["words_per_minute"] == 63
@@ -125,7 +168,7 @@ def test_analyze_caps_quotes_drops_candidate_and_clamps_scores():
     raw["scores"]["technical_depth"]["score"] = 9
     llm = FakeLLM(analyses=[raw])
     out = evaluate.analyze_interview(meeting("Acme interview"), {"company": "Acme"}, llm,
-                                     "claude-sonnet-5-5", "Chirag")
+                                     "claude-sonnet-5-5", "Sam")
     assert len(out["strong_answers"][0]["quote"].rstrip("…").split()) == 20
     assert [i["name"] for i in out["interviewers"]] == ["Priya Interviewer"]
     assert out["scores"]["technical_depth"]["score"] == 5
@@ -157,7 +200,7 @@ def test_aggregate_brief_budget_and_trend_section():
     a1, a2 = analysis(base=2), analysis(base=4)
     a1.update(date="2026-08-20T10:00:00Z", source="f", id="1")
     a2.update(date="2026-10-01T10:00:00Z", source="f", id="2")
-    result = evaluate.aggregate([a1, a2], llm, "claude-sonnet-5-5", "Chirag")
+    result = evaluate.aggregate([a1, a2], llm, "claude-sonnet-5-5", "Sam")
     assert estimate_tokens(result["text"]) <= evaluate.BRIEF_TOKEN_LIMIT
     trend_text = result["text"].split("Trend: ")[1]
     assert estimate_tokens(trend_text) <= trend.TREND_TOKEN_LIMIT
@@ -166,15 +209,17 @@ def test_aggregate_brief_budget_and_trend_section():
 
 
 def test_aggregate_with_no_interviews():
-    assert evaluate.aggregate([], FakeLLM(), "m", "Chirag")["brief"] is None
+    assert evaluate.aggregate([], FakeLLM(), "m", "Sam")["brief"] is None
 
 
 def settings(tmp_path):
     return Settings(profile_path=tmp_path / "profile.json",
                     evaluation_path=tmp_path / "evaluation.json",
                     scores_path=tmp_path / "interview_scores.csv",
+                    performance_path=tmp_path / "performance.json",
+                    performance_csv=tmp_path / "performance_scores.csv",
                     compensation_path=tmp_path / "comp.json", cache_dir=tmp_path / "raw",
-                    candidate_name="Chirag", classifier_model="claude-haiku-5-5",
+                    candidate_name="Sam", classifier_model="claude-haiku-5-5",
                     evaluator_model="claude-sonnet-5-5")
 
 
@@ -243,6 +288,8 @@ def test_script_from_export_never_prints_comp(tmp_path, monkeypatch, capsys, cap
     for name, value in (("VALR_ENV_FILE", tmp_path / "none.env"),
                         ("VALR_EVALUATION_PATH", tmp_path / "e.json"),
                         ("VALR_SCORES_PATH", tmp_path / "s.csv"),
+                        ("VALR_PERFORMANCE_PATH", tmp_path / "perf.json"),
+                        ("VALR_PERFORMANCE_CSV", tmp_path / "perf.csv"),
                         ("VALR_RECORDINGS_CACHE", tmp_path / "raw"),
                         ("VALR_PROFILE_PATH", tmp_path / "p.json")):
         monkeypatch.setenv(name, str(value))
@@ -262,7 +309,7 @@ def test_script_from_export_never_prints_comp(tmp_path, monkeypatch, capsys, cap
 def test_briefing_prompt_block(tmp_path):
     from app.profile import briefing
     assert briefing.prompt_block(tmp_path / "none.json", tmp_path / "none2.json") == ""
-    (tmp_path / "p.json").write_text(json.dumps({"brief": "Chirag, Bengaluru."}))
+    (tmp_path / "p.json").write_text(json.dumps({"brief": "Sam, Bengaluru."}))
     (tmp_path / "e.json").write_text(json.dumps({"brief_text": "Trend: improving."}))
     block = briefing.prompt_block(tmp_path / "p.json", tmp_path / "e.json")
-    assert "## Profile\nChirag, Bengaluru." in block and "Trend: improving." in block
+    assert "## Profile\nSam, Bengaluru." in block and "Trend: improving." in block

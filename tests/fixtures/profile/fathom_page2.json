@@ -1,5 +1,5 @@
 {"limit": 1, "next_cursor": null, "items": [{
   "title": "Weekly team sync", "meeting_title": null, "recording_id": 222,
   "created_at": "2026-09-03T10:00:00Z", "recording_start_time": "2026-09-03T10:00:00Z", "recording_end_time": "2026-09-03T10:30:00Z",
-  "transcript": [], "default_summary": null, "calendar_invitees": [], "recorded_by": {"name": "Chirag Goel", "email": "owner@example.com"}
+  "transcript": [], "default_summary": null, "calendar_invitees": [], "recorded_by": {"name": "Sam Rivera", "email": "owner@example.com"}
 }]}

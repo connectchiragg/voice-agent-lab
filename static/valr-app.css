@@ -286,3 +286,58 @@ p { margin: 0.4em 0; }
 @media (prefers-reduced-motion: reduce) {
   .hero-globe canvas { cursor: default; }
 }
+
+/* Leads (valr-leads' data): the 3D globe's labels and temperature ramp, a lead's
+   temperature breakdown, timeline and corrections. Tokens read by static/leads-globe.js. */
+:root { --temp-cold: #3b7bff; --temp-cool: #8fd0ff; --temp-warm: #ffc46b; --temp-hot: #ff6a2b; --st-sourced: var(--ash); }
+.sw.st-sourced { background: var(--st-sourced); }
+.globe-labels { position: absolute; inset: 0; pointer-events: none; }
+.globe-label { position: absolute; left: 0; top: 0; margin: -22px 0 0 8px; white-space: nowrap; font: 500 0.6875rem/1 var(--mono);
+  letter-spacing: 0.08em; text-transform: uppercase; color: var(--bone); text-shadow: 0 1px 6px #05070c, 0 0 2px #05070c; transition: opacity 0.2s var(--ease); }
+.globe-label.is-back { opacity: 0.12; }
+.globe-label.is-dim { opacity: 0.18; }
+.globe-label.is-person { color: var(--ice); text-transform: none; letter-spacing: 0.02em; margin-top: 8px; }
+.globe-label.is-hidden { display: none; }
+.globe-key { display: flex; align-items: center; gap: 8px; margin: 10px 0 0; color: var(--ash); letter-spacing: 0.12em; text-transform: uppercase; }
+.ramp { display: inline-block; width: 96px; height: 6px; background: linear-gradient(90deg, var(--temp-cold), var(--temp-cool), var(--temp-warm), var(--temp-hot)); }
+.temp-num { font-variant-numeric: tabular-nums; font-weight: 500; }
+.temp-dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; vertical-align: 0; }
+.temp-parts { list-style: none; padding: 0; display: grid; gap: 10px; margin: 8px 0 0; }
+.temp-parts li { display: grid; grid-template-columns: 92px minmax(0, 1fr) 54px; gap: 2px 10px; align-items: center; }
+.tp-bar { height: 6px; background: var(--hairline); }
+.tp-bar i { display: block; height: 100%; background: var(--signal); }
+.tp-val { text-align: right; font-size: var(--fs-sm); }
+.tp-why { grid-column: 1 / -1; }
+.timeline { list-style: none; padding: 0; margin: 8px 0 0; border-left: 1px solid var(--hairline-strong); }
+.tl { padding: 0 0 12px 16px; position: relative; }
+.tl::before { content: ""; position: absolute; left: -4px; top: 6px; width: 7px; height: 7px; border-radius: 50%; background: var(--ash); }
+.tl-calendar::before { background: var(--signal); }
+.tl-recording::before, .tl-evaluation::before { background: var(--ice); }
+.tl-title { margin: 2px 0; overflow-wrap: anywhere; }
+.fix { margin-top: 16px; border-top: 1px solid var(--hairline); padding-top: 12px; }
+.fix > summary { cursor: pointer; }
+.fix-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; margin-top: 12px; }
+.fix-row select { min-height: 36px; background: var(--graphite); color: var(--bone); border: 1px solid var(--hairline-strong);
+  border-radius: 0; padding: 0 8px; font: inherit; font-size: var(--fs-sm); max-width: 100%; }
+.btn.danger { border-color: var(--bad); color: var(--bad); }
+.leads-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; margin: 0 0 12px; }
+.leads-table tr.expired { opacity: 0.6; }
+/* Folded numbers and cues: a summary that reads as a heading. */
+details.fold > summary, details.numbers > summary, details.neg > summary { list-style: none; cursor: pointer; display: flex;
+  flex-wrap: wrap; align-items: baseline; gap: 4px 12px; }
+details.fold > summary::-webkit-details-marker, details.numbers > summary::-webkit-details-marker { display: none; }
+details.fold > summary::after, details.numbers > summary::after { content: "+"; color: var(--signal); font-family: var(--mono); }
+details.fold[open] > summary::after, details.numbers[open] > summary::after { content: "−"; }
+details.numbers { margin: 28px 0; border-top: 1px solid var(--hairline); padding-top: 14px; }
+.moments-box { margin-top: 12px; }
+.todo.done a { color: var(--ash); text-decoration: line-through; }
+.todo-box.done { display: inline-flex; align-items: center; justify-content: center; color: var(--ok); }
+.costing { margin: 28px 0; }
+.costs { display: grid; gap: 14px; }
+@media (min-width: 720px) { .costs { grid-template-columns: 1fr 1fr; } }
+/* The reach toggle: two buttons in one segmented control. */
+.set-body .seg { display: inline-flex; border: 1px solid var(--hairline-strong); margin: 4px 0 8px; }
+.set-body .seg button { min-height: 36px; padding: 0 14px; border: 0; background: transparent; color: var(--ash); cursor: pointer;
+  font: 500 var(--fs-xs)/1 var(--mono); letter-spacing: 0.1em; text-transform: uppercase; }
+.set-body .seg button + button { border-left: 1px solid var(--hairline); }
+.set-body .seg button[aria-pressed="true"] { background: var(--glow); color: var(--bone); box-shadow: inset 0 -2px 0 var(--signal); }

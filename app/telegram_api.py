@@ -180,6 +180,19 @@ def deep_link(username: str, code: str) -> str:
     return f"https://t.me/{username}?start={code}"
 
 
+async def username(client: Bot | None = None) -> str:
+    """The bot's @username, "" if unknown (the notetakers branch's name for bot_username)."""
+    return await bot_username(client) or ""
+
+
+def start_link(name: str, code: str) -> str:
+    """deep_link, or "" for a bad username or payload (the notetakers branch's name)."""
+    try:
+        return deep_link(name, code)
+    except ValueError:
+        return ""
+
+
 # The owner link (Postgres).
 
 async def setup(connection: Any) -> None:

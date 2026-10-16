@@ -9,7 +9,9 @@ from typing import Any
 
 from app.valr_page import (CALL_STATUS, HEADS_UP, OUTCOME, PERSON, Clock, chip, countdown, e,
                            found_block, link, score, status_label)
+from app.interview_store import prep_item
 from app.valr_ui import attention, wording
+from app.valr_ui.performance import impression_html
 from app.valr_ui.shell import icon, page_head
 
 ACTIONS = ('<button class="btn small" type="button" data-action="sync">Sync calendar</button>'
@@ -173,8 +175,10 @@ def detail_page(view: dict[str, Any], block: dict[str, Any], slot: dict[str, Any
     source = "For this round"
     if not prep:
         prep, source = [f["action"] for f in perf.get("focus_this_week") or []], "From your recent interviews"
-    checklist = "".join(f'<li><label><input type="checkbox" data-check="{e(slot["ref"])}:{i}"> <span>{e(x)}</span></label></li>'
-                        for i, x in enumerate(prep)) or '<li class="muted small">Nothing yet.</li>'
+    ticked = set(slot.get("prep_done") or [])
+    checklist = "".join(f'<li><label><input type="checkbox" data-prep-ref="{e(slot["ref"])}"'
+                        f'{" checked" if prep_item(x) in ticked else ""}> <span>{e(x)}</span></label></li>'
+                        for x in prep) or '<li class="muted small">Nothing yet.</li>'
     notes = "".join(
         f"<li>{e(wording.written(n['fact'], owner))}"
         + (" " + chip("sensitive", "warn", "VALR only says this if you ask") if n["sensitive"] else "")
@@ -200,7 +204,7 @@ def detail_page(view: dict[str, Any], block: dict[str, Any], slot: dict[str, Any
     <section class="card" id="briefing"><h2 class="card-title">Your briefing</h2>{summary}</section>
     <section class="card" id="questions"><h2 class="card-title">Likely questions</h2>
       {f'<ol class="questions">{questions}</ol>' if questions else '<p class="muted small">Listed once VALR has researched this round.</p>'}</section>
-    <section class="card" id="prep"><h2 class="card-title">Prep checklist</h2><p class="muted small">{e(source)} · ticks stay on this device</p>
+    <section class="card" id="prep"><h2 class="card-title">Prep checklist</h2><p class="muted small">{e(source)} · ticks are saved, so Home shows them done</p>
       <ul class="checklist">{checklist}</ul></section>
   </div>
   <aside class="detail-side">
@@ -245,31 +249,35 @@ def find_past(view: dict[str, Any], slug: str) -> dict[str, Any] | None:
                  if attention.past_slug(iv) == slug), None)
 
 
-def recording_block(rec: dict[str, Any] | None) -> str:
+def recording_block(rec: dict[str, Any] | None, interview_id: str = "") -> str:
+    """The inline player (Fathom plays here when sharing allows it), a link, and the key
+    moments, which static/valr-app.js reads from /valr/api/recording when the page opens."""
+    moments = (f'<div class="moments-box" data-moments-id="{e(interview_id)}" aria-live="polite">'
+               '<div class="muted small" data-recording-body>Looking for key moments… (needs JavaScript)</div></div>'
+               if interview_id and ":" in interview_id else "")
+    if not rec and moments:  # Not stored yet: ask the notetaker (player, link and moments).
+        return (f'<div class="moments-box" data-moments-id="{e(interview_id)}" data-full aria-live="polite">'
+                '<div class="muted small" data-recording-body>Looking for the recording in your notetakers… '
+                '(needs JavaScript)</div></div>')
     if not rec:
-        return ('<div class="empty slim"><p class="muted">No recording linked to this interview.</p>'
+        return ('<div class="empty slim"><p class="muted">No recording linked to this interview yet.</p>'
                 '<a class="btn small" href="/valr/settings#notetakers">Notetaker settings</a></div>')
-    # The player (Fathom plays inline; valr-notetakers supplies embed_url). Until it does, the
-    # same 16:9 space holds a link, so the page doesn't jump when the player lands.
     frame = (f'<div class="embed"><iframe src="{e(rec["embed_url"])}" title="{e(rec["title"] or "Interview recording")}" '
              f'loading="lazy" referrerpolicy="no-referrer" allow="fullscreen; picture-in-picture" '
              f'sandbox="allow-scripts allow-same-origin allow-popups allow-presentation"></iframe></div>'
              if rec.get("embed_url") else
              f'<div class="embed embed-wait"><span class="muted small">{icon("play", 28)}'
-             f'The {e(rec["provider"])} player appears here.</span></div>')
+             f'This recording opens in {e(rec["provider"])}.</span></div>')
     open_ = link(rec["url"], f"Open in {rec['provider']}") if rec.get("url") else ""
-    return f'{frame}<p class="small">{open_}</p>'
+    hint = ("" if rec.get("embed_url") or rec["provider"] != "Fathom" else
+            '<p class="muted small">To play Fathom recordings here, set Fathom sharing to "Anyone with the link".</p>')
+    return f'{frame}<p class="small">{open_}</p>{hint}{moments}'
 
 
 def impression_block(imp: dict[str, Any] | None) -> str:
     if not imp:
         return '<p class="muted small">How you came across appears here once the coach has reviewed this interview.</p>'
-    tone = {"positive": ("ok", "+"), "negative": ("bad", "−"), "neutral": ("info", "·")}
-    cues = "".join(f'<li class="cue tone-{tone[c["tone"]][0]}"><span class="cue-mark mono" aria-hidden="true">{tone[c["tone"]][1]}</span>'
-                   f'<span><span class="cue-text">{e(c["cue"])}</span>'
-                   + (f'<span class="q-quote small">“{e(c["quote"])}”</span>' if c["quote"] else "")
-                   + f'<span class="sr-only"> ({e(c["tone"])})</span></span></li>' for c in imp["cues"])
-    return (f'<p class="lead-text">{e(imp["summary"])}</p>' if imp["summary"] else "") + (f'<ul class="cues">{cues}</ul>' if cues else "")
+    return impression_html(imp, open_=True)
 
 
 def past_detail_page(view: dict[str, Any], iv: dict[str, Any], clock: Clock) -> str:
@@ -294,12 +302,13 @@ def past_detail_page(view: dict[str, Any], iv: dict[str, Any], clock: Clock) -> 
 <div class="iv-meta">{chip(*OUTCOME[iv['outcome']], iv['outcome_evidence'])}<span class="score-md num">{score(iv['overall'])}<span class="of">/10</span></span></div>
 <div class="detail-grid">
   <div class="detail-main">
-    <section class="card" id="recording"><h2 class="card-title">Recording</h2>{recording_block(iv.get('recording'))}</section>
-    <section class="card" id="impression"><h2 class="card-title">How you came across</h2>{impression_block(iv.get('impression'))}</section>
+    <section class="card" id="recording"><h2 class="card-title">Recording</h2>{recording_block(iv.get('recording'), iv.get('id') or '')}</section>
+    <section class="card" id="impression"><h2 class="card-title">How the interviewer reacted</h2>{impression_block(iv.get('impression'))}</section>
     <section class="card" id="next"><h2 class="card-title">Next time</h2>{f'<ul class="points">{nxt}</ul>' if nxt else '<p class="muted small">No notes yet.</p>'}</section>
     {f'<section class="card" id="feedback"><h2 class="card-title">Question by question</h2><ul class="qlist">{qs}</ul></section>' if qs else ''}
   </div>
   <aside class="detail-side">
-    <section class="card"><h2 class="card-title">Scores</h2><p class="muted small">Out of 10; n/a = not tested in this round.</p><ul class="score-bars">{bars}</ul></section>
+    <details class="card fold" id="scores"><summary><h2 class="card-title">Scores</h2><span class="muted small">the numbers behind this round</span></summary>
+      <p class="muted small">Out of 10; n/a = not tested in this round.</p><ul class="score-bars">{bars}</ul></details>
   </aside>
 </div>"""

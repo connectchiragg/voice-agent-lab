@@ -9,8 +9,10 @@ from urllib.parse import parse_qs, urlsplit
 
 import httpx
 import pytest
-from fastapi.testclient import TestClient
-from starlette.websockets import WebSocketDisconnect
+
+pytest.importorskip("fastapi")  # The worker's venv has no web stack: these run in the app's.
+from fastapi.testclient import TestClient  # noqa: E402
+from starlette.websockets import WebSocketDisconnect  # noqa: E402
 
 from app import google_oauth, memory, research, valr_dashboard, valr_view
 from app.auth import core, gate, routes, store
@@ -434,12 +436,16 @@ def test_every_route_is_public_or_needs_the_owner():
     unclassified = sorted(path for path in paths if gate.classify(path) is None)
     assert not unclassified, f"Add these to app/auth/gate.py's PUBLIC or OWNER lists: {unclassified}"
     public = sorted(path for path in paths if gate.classify(path) == "public")
-    assert public == sorted({"/healthz", "/hooks/gcal", "/hooks/telegram", "/login", "/login/google",
+    assert public == sorted({"/healthz", "/hooks/fathom", "/hooks/gcal", "/hooks/gmail", "/hooks/granola",
+                             "/hooks/telegram", "/login", "/login/google",
                              "/logout", "/oauth/google/callback", "/private", "/static",
                              "/telnyx/webhook", "/ws/telnyx"}), public
     for path in ("/", "/call", "/ws/voice", "/webrtc/offer", "/webrtc/ice-servers", "/oauth/google/start",
-                 "/valr", "/valr/api/state", "/valr/api/dials", "/valr/interviews/{ref}", "/valr/context"):
-        assert gate.classify(path) == "owner", path
+                 "/valr", "/valr/api/state", "/valr/api/dials", "/valr/interviews/{ref}", "/valr/context",
+                 "/valr/api/reach", "/valr/api/prep", "/valr/api/leads", "/valr/api/leads/sync",
+                 "/valr/api/leads/{lead_id}/override", "/valr/api/recording", "/valr/api/past-interviews",
+                 "/valr/interviews/past/{slug}", "/valr/leads", "/valr/api/notetakers/{provider}/connect"):
+        assert path in paths and gate.classify(path) == "owner", path
     assert gate.classify("/valrx") is None and gate.classify("/staticx") is None
     assert gate.classify("/hooks/gmail") == "public" and gate.classify("/hooks/fathom") == "public"
 
@@ -469,6 +475,30 @@ def test_context_push_keeps_its_bearer_token(client, env, monkeypatch):
     assert wrong.status_code == 403  # The handler: wrong token and no owner.
     right = client.post("/valr/context", content=b"{}", headers={"Authorization": "Bearer push-secret"})
     assert right.status_code == 503  # Past the gate and the token check.
+
+
+def test_the_leads_page_and_its_json_accept_the_session_owner(client, env, monkeypatch):
+    fake_store, google = env
+    from app import leads_web
+    from app.valr_ui import contracts
+    from app.valr_ui import routes as page_routes
+    from tests.valr_sample_extras import sample_leads
+
+    async def collect(pool):
+        return sample_leads()
+
+    async def load_leads():
+        return contracts.leads(sample_leads())
+
+    monkeypatch.setattr(leads_web, "collect", collect)
+    monkeypatch.setattr(page_routes, "load_leads", load_leads)
+    for path in ("/valr/leads", "/valr/api/leads", "/valr/api/reach", "/valr/api/past-interviews"):
+        response = client.get(path)
+        assert response.status_code in (303, 401), path  # No one signed in.
+    done, _ = sign_in(client, google)
+    cookie = {"Cookie": f"{core.COOKIE}={cookie_of(done)}"}
+    assert client.get("/valr/leads", headers=cookie).status_code == 200
+    assert client.get("/valr/api/leads", headers=cookie).status_code == 200
 
 
 def test_the_gmail_grant_callback_still_needs_the_owner(client, env):

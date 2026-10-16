@@ -56,8 +56,8 @@ def test_fathom_normalisation_keeps_names_not_emails():
     meeting = recordings.normalize_fathom(item)
     assert meeting["title"] == "Acme interview - system design round"
     assert meeting["duration"] == 45 * 60
-    assert meeting["participants"] == ["Priya Interviewer", "Chirag Goel"]
-    assert meeting["turns"][1] == {"speaker": "Chirag Goel", "start": 12.0, "text": (
+    assert meeting["participants"] == ["Priya Interviewer", "Sam Rivera"]
+    assert meeting["turns"][1] == {"speaker": "Sam Rivera", "start": 12.0, "text": (
         "Um so basically I would start with a token bucket per tenant and keep counters in "
         "Redis with a TTL.")}
     assert "@" not in json.dumps(meeting)
@@ -96,8 +96,8 @@ def test_fireflies_lists_then_fetches_sentences_only_when_wanted(tmp_path):
     meetings = [recordings.normalize_fireflies(r) for r in raw]
     screen, standup = meetings
     assert screen["date"] == "2025-09-15T10:00:00Z" and screen["duration"] == 30.5 * 60
-    assert screen["participants"] == ["Chirag", "Rahul Recruiter"]  # email-only attendee dropped
-    assert [t["speaker"] for t in screen["turns"]] == ["Rahul Recruiter", "Chirag", "Chirag",
+    assert screen["participants"] == ["Sam", "Rahul Recruiter"]  # email-only attendee dropped
+    assert [t["speaker"] for t in screen["turns"]] == ["Rahul Recruiter", "Sam", "Sam",
                                                       "Rahul Recruiter"]
     assert standup["turns"] == []
 

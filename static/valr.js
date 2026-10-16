@@ -39,6 +39,7 @@ function openDrawer(ref, push = true) {
   if (!dialog || dialog.open) return;
   document.querySelectorAll("dialog.drawer[open]").forEach(d => d.close());
   dialog.showModal();
+  loadRecording(dialog);
   if (push) history.pushState({ref}, "", `#iv-${ref}`);
   setTimeout(() => dialog.querySelector(".close")?.focus(), 50);
 }
@@ -77,21 +78,19 @@ async function post(path, body = {}) {
   return data;
 }
 const BUSY = {sync: "Syncing…", refresh: "Starting…", dials: "Saving…", callnow: "Calling…", tgcode: "Getting a code…",
-              tglink: "Getting a link…", tgtest: "Sending…"};
+              tglink: "Getting a link…", tgtest: "Sending…", ntsync: "Checking…", ntdisconnect: "Disconnecting…",
+              reach: "Saving…"};
 
 // Telegram: one tap. The code comes with a t.me deep link (Telegram sends "/start <code>"
 // when he presses Start); a QR of the same link for scanning with the phone. Then wait for
 // the link to land and reload.
-const QR_SRC = "https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js";
-const QR_SRI = "sha384-mZT2gIty7ZDdOGkxfP6joZcYdMW1Jvj9dRlfpTmaJAKKXTqzygtB22k7FLe+KZC1";
+// qrcode-generator 1.4.4, vendored in static/ (no third-party script at run time).
+const QR_SRC = "/static/qrcode.min.js";
 function loadQr() {
   if (window.qrcode) return Promise.resolve(window.qrcode);
   return new Promise((resolve, reject) => {
     const script = document.createElement("script");
     script.src = QR_SRC;
-    script.integrity = QR_SRI;
-    script.crossOrigin = "anonymous";
-    script.referrerPolicy = "no-referrer";
     script.onload = () => resolve(window.qrcode);
     script.onerror = reject;
     document.head.append(script);
@@ -161,6 +160,14 @@ document.addEventListener("click", async event => {
         code.textContent = `${result.command} (valid ${result.expires_minutes} min)`;
         code.hidden = false;
       }
+    } else if (action === "ntsync") {
+      result = await post(`/valr/api/notetakers/${encodeURIComponent(button.dataset.provider)}/sync`);
+    } else if (action === "ntdisconnect") {
+      result = await post(`/valr/api/notetakers/${encodeURIComponent(button.dataset.provider)}/disconnect`);
+      setTimeout(() => location.reload(), 800);
+    } else if (action === "reach") {
+      result = await post("/valr/api/reach", {mode: button.dataset.mode});
+      setTimeout(() => location.reload(), 600);
     } else if (action === "dials") {
       result = await post("/valr/api/dials", {paused: button.dataset.paused === "true"});
       setTimeout(() => { rememberOpen(); location.reload(); }, 600);
@@ -176,18 +183,177 @@ document.addEventListener("click", async event => {
   }
 });
 
-// Prep checklists: ticks stay in this browser only.
-const CHECKS = "valr-checklist";
-function loadChecks() {
-  try { return JSON.parse(localStorage.getItem(CHECKS) ?? "{}"); } catch { return {}; }
+// Notetakers: the connect forms post the key to the server and forget it at once.
+function connectForm(name) {
+  return document.querySelector(`form[data-connect="${CSS.escape(name)}"]`);
 }
-const checks = loadChecks();
-document.querySelectorAll("[data-check]").forEach(box => {
-  const key = `${box.dataset.check.split(":")[0]}:${box.nextElementSibling?.textContent ?? ""}`;
-  box.checked = Boolean(checks[key]);
-  box.addEventListener("change", () => {
-    checks[key] = box.checked;
-    try { localStorage.setItem(CHECKS, JSON.stringify(checks)); } catch {}
+function openConnect(name) {
+  const form = connectForm(name);
+  if (!form) return;
+  document.querySelectorAll("dialog[open]").forEach(d => d.close());
+  form.closest("details")?.setAttribute("open", "");
+  form.hidden = false;
+  document.querySelectorAll(`[data-connect-open="${CSS.escape(name)}"][aria-controls]`).forEach(b => b.setAttribute("aria-expanded", "true"));
+  form.closest(".nt-card")?.scrollIntoView({behavior: reduceMotion ? "auto" : "smooth", block: "center"});
+  setTimeout(() => form.querySelector("input")?.focus(), reduceMotion ? 0 : 350);
+}
+document.addEventListener("click", event => {
+  const opener = event.target.closest("[data-connect-open]");
+  if (opener) {
+    event.preventDefault();
+    openConnect(opener.dataset.connectOpen);
+    return;
+  }
+  const cancel = event.target.closest("[data-connect-cancel]");
+  if (cancel) {
+    const form = connectForm(cancel.dataset.connectCancel);
+    if (form) { form.reset(); form.hidden = true; }
+  }
+});
+document.addEventListener("submit", async event => {
+  const form = event.target;
+  if (form.matches("form[data-connect]")) {
+    event.preventDefault();
+    const input = form.querySelector('input[name="api_key"]');
+    const key = input.value.trim();
+    input.value = "";  // The key leaves the page with this request and is never shown again.
+    const button = form.querySelector('button[type="submit"]');
+    button.disabled = true;
+    try {
+      const result = await post(`/valr/api/notetakers/${encodeURIComponent(form.dataset.connect)}/connect`, {api_key: key});
+      say(result.message);
+      setTimeout(() => location.reload(), 900);
+    } catch (error) {
+      say(error.message, false);
+    } finally {
+      button.disabled = false;
+    }
+  } else if (form.matches("form[data-import]")) {
+    event.preventDefault();
+    const file = form.querySelector('input[type="file"]').files[0];
+    if (!file) { say("Choose the export file first.", false); return; }
+    if (file.size > 3_000_000) { say("That export is too large (3 MB at most).", false); return; }
+    try {
+      const result = await post(`/valr/api/notetakers/${encodeURIComponent(form.dataset.import)}/import`,
+        {filename: file.name, export: await file.text()});
+      say(result.message);
+      form.reset();
+    } catch (error) {
+      say(error.message, false);
+    }
+  }
+});
+if (location.hash.startsWith("#nt-")) openConnect(location.hash.slice(4));
+
+// Past interviews: the recording (embedded when the provider allows it, else a link)
+// and the key moments as timestamp links. Built with DOM calls only; URLs come from
+// the server's allow-list and are checked again here.
+const EMBED_HOSTS = ["fathom.video", "app.fireflies.ai", "share.fireflies.ai"];
+function httpsUrl(url, hosts = null) {
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === "https:" && (!hosts || hosts.includes(parsed.hostname)) ? parsed.href : "";
+  } catch { return ""; }
+}
+function node(tag, attrs = {}, text = "") {
+  const element = document.createElement(tag);
+  for (const [key, value] of Object.entries(attrs)) element.setAttribute(key, value);
+  if (text) element.textContent = text;
+  return element;
+}
+function renderRecording(body, data) {
+  const out = [];
+  if (!data.found) {
+    out.push(node("p", {class: "muted small"}, "No recording found for this interview in your connected notetakers."));
+    const link = node("a", {class: "btn small", href: "#nt-fathom", "data-connect-open": "fathom"}, "Connect a notetaker");
+    out.push(link);
+    body.replaceChildren(...out);
+    return;
+  }
+  const verb = data.provider === "granola" ? `Open the note in ${data.label}` : `Watch on ${data.label}`;
+  const embed = httpsUrl(data.embed_url, EMBED_HOSTS);
+  if (embed) {
+    const frame = node("div", {class: "player"});
+    frame.append(node("iframe", {src: embed, title: `${data.label} recording: ${data.title || "interview"}`,
+      loading: "lazy", allow: "fullscreen; picture-in-picture", allowfullscreen: "", referrerpolicy: "strict-origin-when-cross-origin"}));
+    out.push(frame);
+    out.push(node("p", {class: "muted small"},
+      "If the player stays blank, the recording's sharing in Fathom isn't \u201cAnyone with the link\u201d; use the link below."));
+  }
+  const share = httpsUrl(data.share_url);
+  if (share) {
+    out.push(node("a", {class: `btn ${embed ? "small" : "primary"} watch`, href: share, target: "_blank",
+      rel: "noopener noreferrer"}, `${verb} ↗`));
+  }
+  if (data.moments?.length) {
+    out.push(node("h4", {class: "sub-title"}, "Key moments"));
+    const list = node("ol", {class: "moments"});
+    for (const moment of data.moments) {
+      const item = node("li");
+      const url = httpsUrl(moment.url);
+      item.append(url ? node("a", {class: "mono", href: url, target: "_blank", rel: "noopener noreferrer"}, moment.clock)
+                      : node("span", {class: "mono"}, moment.clock));
+      item.append(node("span", {}, ` ${moment.label}`));
+      list.append(item);
+    }
+    out.push(list);
+  }
+  if (data.note) out.push(node("p", {class: "muted small"}, data.note));
+  body.replaceChildren(...out);
+}
+async function fetchRecording(body, query) {
+  body.textContent = "Looking for the recording…";
+  try {
+    const response = await fetch(`/valr/api/recording?${query}`, {credentials: "same-origin", cache: "no-store"});
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(typeof data.detail === "string" ? data.detail : `HTTP ${response.status}`);
+    renderRecording(body, data);
+  } catch (error) {
+    body.textContent = `The recording couldn't be loaded: ${error.message}`;
+  }
+}
+function loadRecording(dialog) {
+  const section = dialog.querySelector("[data-recording-ref]");
+  if (!section || section.dataset.loaded) return;
+  section.dataset.loaded = "1";
+  fetchRecording(section.querySelector("[data-recording-body]"), `ref=${encodeURIComponent(section.dataset.recordingRef)}`);
+}
+// A past interview's page: the server shows the player; the key moments (or, when nothing is
+// stored yet, the whole recording) come from /valr/api/recording.
+document.querySelectorAll("[data-moments-id]").forEach(async box => {
+  const body = box.querySelector("[data-recording-body]");
+  if (box.hasAttribute("data-full")) {
+    fetchRecording(body, `id=${encodeURIComponent(box.dataset.momentsId)}`);
+    return;
+  }
+  try {
+    const response = await fetch(`/valr/api/recording?id=${encodeURIComponent(box.dataset.momentsId)}`,
+      {credentials: "same-origin", cache: "no-store"});
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || !data.found || !data.moments?.length) { box.hidden = true; return; }
+    renderRecording(body, {...data, embed_url: "", share_url: ""});
+  } catch { box.hidden = true; }
+});
+document.addEventListener("click", event => {
+  const button = event.target.closest("[data-recording-id]");
+  if (!button) return;
+  const dialog = document.getElementById("recording-dialog");
+  if (!dialog) return;
+  dialog.querySelector("#recording-title").textContent = button.closest(".card-score")?.querySelector("h4")?.firstChild?.textContent ?? "Recording";
+  if (!dialog.open) dialog.showModal();
+  fetchRecording(dialog.querySelector("[data-recording-body]"), `id=${encodeURIComponent(button.dataset.recordingId)}`);
+});
+
+// Prep checklists: each tick is saved on the server (so Home can show it done).
+document.querySelectorAll("input[data-prep-ref]").forEach(box => {
+  box.addEventListener("change", async () => {
+    const item = box.nextElementSibling?.textContent?.trim() ?? "";
+    try {
+      await post("/valr/api/prep", {ref: box.dataset.prepRef, item, done: box.checked});
+    } catch (error) {
+      box.checked = !box.checked;
+      say(error.message, false);
+    }
   });
 });
 
@@ -360,6 +526,8 @@ document.addEventListener("click", event => {
   drawChart();
 });
 drawChart();
+// The chart lives under "The numbers behind this" (folded): draw it when it opens.
+document.querySelector("details.numbers")?.addEventListener("toggle", event => { if (event.target.open) drawChart(); });
 let resizeTimer = null;
 addEventListener("resize", () => {
   clearTimeout(resizeTimer);

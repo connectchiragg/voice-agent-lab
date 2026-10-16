@@ -30,7 +30,7 @@ from app.valr_ui import (attention, contracts, home, interviews, leads, performa
 logger = logging.getLogger("uvicorn.error")
 router = APIRouter()
 # The leads branch's loader, "module:function" -> async fn(pool) -> its /valr/api/leads JSON.
-LEADS_SOURCE = "app.leads:collect"
+LEADS_SOURCE = "app.leads_web:collect"
 TITLES = {"home": "Home", "interviews": "Interviews", "interview": "Interview", "past": "Past interviews",
           "past_one": "Past interview", "leads": "Leads", "performance": "Performance",
           "settings": "Settings", "system": "System"}
@@ -51,6 +51,26 @@ async def load_leads() -> dict[str, Any]:
         return contracts.leads(None)
 
 
+async def load_recording(interview: dict[str, Any]) -> dict[str, Any] | None:
+    """A past interview's stored recording (valr-notetakers: webhooks and syncs store share and
+    embed links), by its performance.json id "<provider>:<id>"; None when there is none."""
+    provider, _, external_id = str(interview.get("id") or "").partition(":")
+    if not external_id or research.pool is None:
+        return None
+    try:
+        from app.notetakers import base, store
+        async with research.pool.connection() as connection:
+            await store.setup(connection)
+            row = await store.recording(connection, provider, external_id)
+    except Exception as error:  # noqa: BLE001 - the page still renders, with a link if it has one.
+        logger.warning("VALR recording lookup failed: %s", type(error).__name__)
+        return None
+    if not row:
+        return None
+    return {"provider": provider, "share_url": base.safe_link(row.get("share_url") or ""),
+            "embed_url": base.safe_embed(row.get("embed_url") or ""), "title": row.get("title") or ""}
+
+
 def not_found(what: str, back: str, label: str) -> str:
     return (shell.page_head("Not found", e_(what), crumb=f"{back}|{label}")
             + '<div class="empty"><p class="muted">It may have been moved or cancelled on your calendar.</p></div>')
@@ -61,7 +81,8 @@ def e_(text: str) -> str:
 
 
 async def render(request: Request, name: str, **params: str) -> HTMLResponse:
-    email = await valr_dashboard.viewer(request)
+    # The Leads page shows recruiters' addresses: owner only, like GET /valr/api/leads.
+    email = await (valr_dashboard.owner if name == "leads" else valr_dashboard.viewer)(request)
     try:
         view = await valr_dashboard.state_view()
     except Exception as error:  # noqa: BLE001 - a page that says so, not a stack trace or JSON.
@@ -89,13 +110,16 @@ async def render(request: Request, name: str, **params: str) -> HTMLResponse:
     elif name == "past_one":
         found = interviews.find_past(view, params["slug"])
         if found:
+            stored = contracts.recording(await load_recording(found), found)
+            if stored:
+                found = {**found, "recording": stored}
             body = interviews.past_detail_page(view, found, clock)
             title = found["company"] or title
         else:
             body, status = not_found("That interview isn't in your history.", "/valr/interviews/past", "Past interviews"), 404
     elif name == "leads":
         body = leads.page(view, clock, await load_leads(), query.get("stage", "")[:20],
-                          query.get("q", "")[:80], query.get("lead", "")[:64])
+                          query.get("q", "")[:80], query.get("lead", "")[:64], query.get("status", "")[:10])
     elif name == "performance":
         body = performance.page(view, clock)
     elif name == "settings":

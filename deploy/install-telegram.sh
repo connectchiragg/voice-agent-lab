@@ -69,7 +69,7 @@ printf 'TELEGRAM_BOT_TOKEN=%s\nTELEGRAM_WEBHOOK_SECRET=%s\n' "$token" "$secret" 
   | ssh -i "$KEY" -o BatchMode=yes "$VM" '
 cd voice-agent-lab && t=$(mktemp) && grep -vE "^TELEGRAM_(BOT_TOKEN|WEBHOOK_SECRET)=" .env > "$t" && cat >> "$t" && cat "$t" > .env && rm -f "$t" && chmod 600 .env
 echo "VM .env: $(grep -cE "^TELEGRAM_(BOT_TOKEN|WEBHOOK_SECRET)=" .env) Telegram settings"
-sudo -n docker rm -f voice-agent-lab >/dev/null && sudo -n docker run -d --name voice-agent-lab --restart unless-stopped --env-file .env --network voice-agent-lab -v /srv/valr-data:/data:ro -p 127.0.0.1:7860:7860 voice-agent-lab:latest >/dev/null
+sudo -n docker rm -f voice-agent-lab >/dev/null && sudo -n docker run -d --name voice-agent-lab --restart unless-stopped --env-file .env --network voice-agent-lab $(sh deploy/valr-data-live.sh app) -p 127.0.0.1:7860:7860 voice-agent-lab:latest >/dev/null
 DOCKER="sudo -n docker" sh deploy/research-setup.sh >/dev/null 2>&1
 sleep 8; echo "app health: $(curl -s -o /dev/null -w "%{http_code}" localhost:7860/healthz)"
 echo "webhook without the secret (expect 403): $(curl -s -o /dev/null -w "%{http_code}" -X POST -H "Content-Type: application/json" -d "{}" localhost:7860/hooks/telegram)"'
