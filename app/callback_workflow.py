@@ -37,7 +37,7 @@ RETRY_AFTER = timedelta(minutes=15)
 MAX_DIALS_PER_DAY = 5  # All callers together, per UTC day.
 # From dialling to the webhook's answer or hangup. Telnyx rings for
 # at most RING_TIMEOUT_S (the dial's timeout_secs); after this we count no answer.
-RING_TIMEOUT_S = 30
+RING_TIMEOUT_S = 60  # One briefing call, no retries: give the owner a full minute.
 RESULT_TIMEOUT = timedelta(minutes=3)
 MAX_REASON_CHARS = 120
 

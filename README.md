@@ -631,6 +631,16 @@ VALR_INTERVIEW_MONTH_USD; $0.40 per job, VALR_INTERVIEW_JOB_USD); briefing calls
 own 12 dials a day (VALR_BRIEFING_DIALS_PER_DAY), so callbacks cannot starve them.
 VALR_BRIEFING_DIAL=0 keeps everything but never dials; VALR_BRIEFINGS=0 turns the sweep off.
 
+**The briefing call** goes out once, 30 minutes before the block's first interview, and
+rings for 60 seconds (Telnyx `timeout_secs`); unanswered is final (the dashboard shows it).
+An interview added later is called as soon as its research is ready, if at least five
+minutes are left. Zoom Phone (the owner's number) must not forward to voicemail before 60
+seconds: a voicemail that picks up counts as answered. If a brief is already ready when he
+calls in and asks ("brief me", "my next interview"), it is given on that call
+(`get_briefing`); research and a callback are offered only for interviews without one.
+"Call me now" on the dashboard, or `python -m app.research_worker call-now [next|<slot>]`,
+calls him at once about his next interview (researching it first if needed).
+
 **The VALR page** (valr.haciensus.com, `/valr`, behind Cloudflare Access; `app/valr_view.py`
 gathers, `app/valr_page.py` renders, `static/valr.js` adds the live parts). Written for a
 user who did not build VALR: plain words, every time as "11:15 AM IST" (ASSISTANT_TIMEZONE)
