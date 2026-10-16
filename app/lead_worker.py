@@ -41,7 +41,16 @@ DEFERRED_PER_PASS = 40
 RECOVERY_QUERY = "newer_than:3d -in:chats"
 CONCURRENCY = 4
 FATHOM_MEETINGS = "https://api.fathom.ai/external/v1/meetings"
-DETAIL_URL = "/valr#performance"
+DETAIL_URL = "/valr#performance"  # When no recording is known.
+
+
+def detail_url(interview_id: str) -> str:
+    """The cockpit's scorecard anchor for an interview id like "fathom:1000", built as
+    valr-eval builds it (#past-fathom-1000); /valr#performance when there is none."""
+    interview_id = str(interview_id or "")
+    if ":" not in interview_id:
+        return DETAIL_URL
+    return "/valr#past-" + "".join(ch if ch.isalnum() else "-" for ch in interview_id)
 
 
 def enabled() -> bool:
@@ -82,7 +91,7 @@ def email_touch(email: Email, decision: Decision, owners: set[str]) -> Touch:
                  summary=decision.summary, direction="out" if outbound else "in",
                  sentiment=None if outbound else decision.sentiment, cue=decision.cue,
                  stage_hint=decision.stage_hint, next_step=decision.next_step,
-                 url=gmail_api.thread_url(email.thread_id), role=decision.role)
+                 url=gmail_api.thread_url(email.thread_id), role=decision.role, thread=email.thread_id)
 
 
 def beat() -> None:
@@ -107,9 +116,10 @@ class Budget:
 
 class LeadActivities:
     def __init__(self, http: httpx.AsyncClient | None = None,
-                 classify: Callable[[Email, set[str]], Decision] | None = None) -> None:
+                 classify: Callable[[Email, set[str]], Decision] | None = None, bot: Any = None) -> None:
         self.http = http or httpx.AsyncClient(timeout=30, follow_redirects=True)
         self._classify = classify
+        self._bot = bot
 
     def all(self) -> list[Any]:
         return [self.gmail_sync, self.leads_refresh, self.gmail_watch]
@@ -150,6 +160,8 @@ class LeadActivities:
             summary.error = f"Gmail {status}"
             await leads_store.save_state(connection, last_error=summary.error)
             logger.info("VALR leads: Gmail sync skipped (%s)", status)
+            if status == "reconnect needed":
+                await self.alert_reconnect(connection, state)
             return summary
         refs: list[dict[str, Any]]
         new_history: int | None = None
@@ -203,6 +215,9 @@ class LeadActivities:
         gate = asyncio.Semaphore(CONCURRENCY)
 
         async def decide(email: Email) -> Decision:
+            mine = lead_classify.own_mail(email, owners, email.thread_id in known)
+            if mine is not None:
+                return mine
             early = lead_classify.prefilter(email, email.thread_id in known)
             if early is not None:
                 return early
@@ -220,6 +235,10 @@ class LeadActivities:
             beat()
             await asyncio.wait([work], timeout=10)
         decisions = await work
+        ordered = sorted(emails, key=lambda e: e.at)
+        kept_now = {e.thread_id for e, d in zip(ordered, decisions) if d.keep}
+        decisions = [lead_classify.own_mail(e, owners, True) if d.reason == "own_mail" and e.thread_id in kept_now
+                     else d for e, d in zip(ordered, decisions)]  # His reply to a message kept in this pass.
         rows = []
         for email, decision in zip(sorted(emails, key=lambda e: e.at), decisions):
             usd = 0.0
@@ -246,6 +265,34 @@ class LeadActivities:
         if rows:
             summary.usd = await research_jobs.record_spend(
                 connection, f"leads-{datetime.now(timezone.utc):%Y-%m-%d}", rows)
+
+    async def alert_reconnect(self, connection: Any, state: dict[str, Any]) -> bool:
+        """Telegram, once per expiry (keyed by the token's connected_at), when the refresh
+        token was refused (invalid_grant: Testing mode's 7 days, or revoked)."""
+        from app import telegram_api
+        info = await google_oauth.status(connection)
+        expired = info.get("connected_at")
+        if info.get("state") != "reconnect_needed" or expired is None \
+                or state.get("reconnect_alerted_for") == expired:
+            return False
+        bot = self._bot or telegram_api.bot()
+        if bot is None:
+            logger.warning("VALR leads: Gmail needs reconnecting; Telegram is not set up to say so")
+            return False
+        await telegram_api.setup(connection)
+        chat = await telegram_api.owner_chat(connection)
+        if chat is None:
+            logger.warning("VALR leads: Gmail needs reconnecting; no linked Telegram chat")
+            return False
+        host = os.getenv("VALR_HOST", "valr.haciensus.com").strip()
+        try:
+            await bot.send(chat, f"Gmail disconnected — reconnect: https://{host}/oauth/google/start")
+        except telegram_api.TelegramError as error:
+            logger.warning("VALR leads: reconnect alert not sent: %s", error)
+            return False
+        await leads_store.save_state(connection, reconnect_alerted_for=expired)
+        logger.info("VALR leads: Gmail reconnect alert sent on Telegram")
+        return True
 
     @activity.defn(name="gmail_watch")
     async def gmail_watch(self, reason: str) -> WatchSummary:
@@ -287,7 +334,7 @@ class LeadActivities:
             for key in await cancelled_calendar_keys(connection):
                 await connection.execute("DELETE FROM lead_touchpoints WHERE id = %s", (f"cal:{key}",))
             everything = await leads_store.touches(connection)
-            built = leads.build(everything, now)
+            built = leads.build(everything, now, await leads_store.overrides(connection))
             await leads_store.save_leads(connection, built, everything, now)
         summary.leads, summary.touches = len(built), len(everything)
         summary.active = sum(1 for lead in built if lead.status == "active")
@@ -301,7 +348,8 @@ class LeadActivities:
         from app import calendar_sync
         await calendar_sync.setup(connection)
         events = await calendar_sync.upcoming(connection, now - timedelta(days=60), now + timedelta(days=60))
-        return calendar_to_touches(events, owner_emails())
+        known = {p.email for t in await leads_store.touches(connection) if t.kind == "email" for p in t.people if p.email}
+        return calendar_to_touches(events, owner_emails(), known)
 
     async def fathom_touches(self, now: datetime) -> list[Touch]:
         key = os.getenv("FATHOM_API_KEY", "").strip()
@@ -322,31 +370,45 @@ class LeadActivities:
 
 # Source -> touchpoints (pure, tested).
 
-def calendar_to_touches(events: list[Any], owners: set[str]) -> list[Touch]:
-    from app.interview_types import INTERVIEW, attendee_role, event_noun
+INTRO = re.compile(r"\bintro|introduct|recruit|\bscreen", re.I)
+SCREEN_ONLY = re.compile(r"\bscreen", re.I)
+
+
+def calendar_to_touches(events: list[Any], owners: set[str], known: set[str] = frozenset()) -> list[Touch]:
+    """Calendar events that belong to the job search:
+    - interviews (title says interview, round, technical, coding...) with a company or an
+      outside attendee;
+    - recruiter intro chats: the title says intro, recruiter or screen, with an outside attendee;
+    - any meeting where the organizer or an attendee is already a contact on a Gmail lead
+      (`known`: their email addresses)."""
+    from app.interview_types import INTERVIEW, Person, attendee_role, event_noun
     out = []
     for event in events:
         if event.all_day or event.declined or event.status == "cancelled":
             continue
-        interview = bool(INTERVIEW.search(event.title))
-        if not (event.company and (interview or event.company_domain)):
-            continue
-        people = []
         everyone = list(event.attendees)
         if event.organizer_email and all(p.email != event.organizer_email for p in everyone):
-            from app.interview_types import Person
             everyone.append(Person(event.organizer_email, event.organizer_name, organizer=True))
+        people = []
         for person in everyone:
             role = attendee_role(person, owners)
             if role in ("candidate", "recruiter"):
                 people.append(Contact(person.email.lower(), person.name,
                                       "interviewer" if role == "candidate" else "recruiter"))
-        noun = event_noun(event.title)
+        outside = bool(people)
+        interview = bool(INTERVIEW.search(event.title)) and event_noun(event.title) == "interview"
+        intro = bool(INTRO.search(event.title)) and outside
+        contact = any(p.email.lower() in known for p in everyone if p.email)
+        if not ((interview and (event.company or outside)) or intro or contact):
+            continue
+        screen_only = bool(SCREEN_ONLY.search(event.title)) and not INTERVIEW.search(SCREEN_ONLY.sub("", event.title))
+        hint = "interviewing" if interview and not screen_only else "screening"
+        kind = "Interview" if hint == "interviewing" else "Recruiter chat"
         out.append(Touch(id=f"cal:{event.key}", kind="calendar",
                          at=datetime.fromisoformat(event.start_utc), company=event.company,
                          domain=event.company_domain, people=people, title=event.title[:140],
-                         summary=f"{noun.capitalize()} on the calendar" + (f" with {len(people)} people" if people else ""),
-                         stage_hint="interviewing" if noun == "interview" else ""))
+                         summary=f"{kind} on the calendar" + (f" with {len(people)} people" if people else ""),
+                         stage_hint=hint))
     return out
 
 
@@ -380,7 +442,7 @@ def fathom_to_touches(items: list[dict[str, Any]], owners: set[str]) -> list[Tou
                          company=match.group("c").strip() if match else "",
                          domain=next((d for d in domains if d), ""), people=people,
                          title=f"Recording: {title[:120]}", summary=" ".join(summary.split()[:30]),
-                         url=url if url.startswith("https://") else "", detail_url=DETAIL_URL))
+                         url=url if url.startswith("https://") else "", detail_url=detail_url(f"fathom:{recording}")))
     return out
 
 
@@ -411,7 +473,7 @@ def performance_touches(perf: dict[str, Any] | None) -> list[Touch]:
                          summary={"advanced": "Outcome: advanced.", "rejected": "Outcome: rejected."}.get(outcome, ""),
                          stage_hint={"rejected": "closed-lost"}.get(outcome, "interviewing"),
                          cue={"advanced": "positive", "rejected": "negative"}.get(outcome, "none"),
-                         score=score, detail_url=DETAIL_URL))
+                         score=score, detail_url=detail_url(str(item.get("interview_id") or ""))))
     return out
 
 

@@ -17,7 +17,7 @@ from dataclasses import asdict
 from datetime import datetime
 from typing import Any
 
-from app.leads import Contact, Lead, Touch
+from app.leads import Contact, Lead, Overrides, Touch
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS gmail_state (
@@ -77,15 +77,58 @@ CREATE TABLE IF NOT EXISTS leads (
     archived_at   timestamptz,
     updated_at    timestamptz NOT NULL DEFAULT now()
 );
+CREATE TABLE IF NOT EXISTS lead_overrides (
+    id          bigserial PRIMARY KEY,
+    lead_id     text NOT NULL,
+    kind        text NOT NULL,             -- dismiss | stage | merge
+    value       text NOT NULL DEFAULT '',  -- the stage ('' clears), or the lead merged into
+    touch_ids   jsonb NOT NULL DEFAULT '[]',  -- dismiss: its touchpoints then
+    threads     jsonb NOT NULL DEFAULT '[]',  -- dismiss: its Gmail threads then
+    created_by  text NOT NULL DEFAULT '',
+    created_at  timestamptz NOT NULL DEFAULT now()
+);
+ALTER TABLE gmail_state ADD COLUMN IF NOT EXISTS reconnect_alerted_for timestamptz;
 """
 STATE_COLUMNS = ("account", "history_id", "watch_expires", "watch_renewed_at", "last_push_at",
                  "last_sync_at", "backfill_started_at", "backfill_done_at", "backfill_count",
-                 "last_error")
+                 "last_error", "reconnect_alerted_for")
 
 
 async def setup(connection: Any) -> None:
     await connection.execute(SCHEMA)
     await connection.execute("INSERT INTO gmail_state (id) VALUES (1) ON CONFLICT DO NOTHING")
+
+
+# The owner's corrections.
+
+async def add_override(connection: Any, lead_id: str, kind: str, value: str = "",
+                       touch_ids: list[str] | None = None, threads: list[str] | None = None,
+                       by: str = "") -> None:
+    if kind not in ("dismiss", "stage", "merge"):
+        raise ValueError(kind)
+    await connection.execute(
+        "INSERT INTO lead_overrides (lead_id, kind, value, touch_ids, threads, created_by) "
+        "VALUES (%s, %s, %s, %s::jsonb, %s::jsonb, %s)",
+        (lead_id, kind, value, json.dumps(touch_ids or []), json.dumps(threads or []), by))
+
+
+async def overrides(connection: Any) -> Overrides:
+    """Replayed in order: the latest stage per lead wins ('' clears), merges accumulate."""
+    cursor = await connection.execute(
+        "SELECT lead_id, kind, value, touch_ids, threads FROM lead_overrides ORDER BY id")
+    out = Overrides()
+    for lead_id, kind, value, touch_ids, threads in await cursor.fetchall():
+        if kind == "dismiss":
+            out.dismissed_touches.update(touch_ids or [])
+            out.dismissed_threads.update(threads or [])
+        elif kind == "stage":
+            if value:
+                out.stages[lead_id] = value
+            else:
+                out.stages.pop(lead_id, None)
+        elif kind == "merge" and value and value != lead_id:
+            out.merges[lead_id] = value
+    return out
 
 
 async def load_state(connection: Any) -> dict[str, Any]:

@@ -106,6 +106,7 @@ class Touch:
     detail_url: str = ""  # The VALR interview detail
     score: float | None = None  # 0-10 (evaluation)
     role: str = ""  # The job title, when the touchpoint names it
+    thread: str = ""  # Gmail thread id (emails)
     lead_id: str = ""
 
 
@@ -125,6 +126,7 @@ class Lead:
     last_touch_at: datetime | None = None
     next_step: str = ""
     next_step_at: datetime | None = None
+    stage_manual: bool = False  # The owner set the stage.
 
 
 # Names and domains.
@@ -207,6 +209,7 @@ class Index:
         self.leads: dict[str, Lead] = {}
         self.by_email: dict[str, str] = {}
         self.by_domain: dict[str, str] = {}
+        self.by_thread: dict[str, str] = {}
 
     def add(self, lead: Lead) -> Lead:
         self.leads[lead.id] = lead
@@ -216,7 +219,10 @@ class Index:
 
     def find(self, touch: Touch) -> Lead | None:
         """Its company by name, else by its own domain; people only when it names no company
-        (an agency recruiter pitching two clients must not merge them)."""
+        (an agency recruiter pitching two clients must not merge them). A Gmail thread
+        already on a lead keeps its later messages there."""
+        if touch.thread and touch.thread in self.by_thread:
+            return self.leads[self.by_thread[touch.thread]]
         key = company_key(touch.company)
         if key:
             for lead in self.leads.values():
@@ -241,6 +247,8 @@ class Index:
     def attach(self, lead: Lead, touch: Touch) -> None:
         touch.lead_id = lead.id
         lead.touches.append(touch)
+        if touch.thread:
+            self.by_thread.setdefault(touch.thread, lead.id)
         domain = own_domain(touch)
         if domain and not lead.domain:
             lead.domain = domain
@@ -273,10 +281,48 @@ def new_lead_for(touch: Touch) -> Lead | None:
     return Lead(id=lead_id_for(key), company=name, key=key, domain=own_domain(touch))
 
 
-def build(touches: list[Touch], now: datetime) -> list[Lead]:
-    """All leads from all touchpoints (time order); then stage, status and temperature."""
+@dataclass
+class Overrides:
+    """The owner's corrections (table lead_overrides), applied on every rebuild.
+
+    dismissed: touchpoint ids and Gmail threads of dismissed leads; they never count again
+    (a new thread or event can still start the lead afresh). stages: lead id -> stage,
+    kept until cleared. merges: lead id -> the lead it was merged into."""
+    dismissed_touches: set[str] = field(default_factory=set)
+    dismissed_threads: set[str] = field(default_factory=set)
+    stages: dict[str, str] = field(default_factory=dict)
+    merges: dict[str, str] = field(default_factory=dict)
+
+    def dismissed(self, touch: Touch) -> bool:
+        return touch.id in self.dismissed_touches or bool(touch.thread and touch.thread in self.dismissed_threads)
+
+    def target(self, lead_id: str) -> str:
+        seen = {lead_id}
+        while lead_id in self.merges and self.merges[lead_id] not in seen:
+            lead_id = self.merges[lead_id]
+            seen.add(lead_id)
+        return lead_id
+
+
+def merge_into(target: Lead, source: Lead) -> None:
+    for touch in source.touches:
+        touch.lead_id = target.id
+        target.touches.append(touch)
+    for key, contact in source.contacts.items():
+        target.contacts.setdefault(key, contact)
+    target.role = target.role or source.role
+    target.domain = target.domain or source.domain
+
+
+def build(touches: list[Touch], now: datetime, overrides: Overrides | None = None) -> list[Lead]:
+    """All leads from all touchpoints (time order), the owner's merges applied; then
+    stage (or his stage), status and temperature. Dismissed touchpoints count nowhere."""
+    overrides = overrides or Overrides()
     index = Index()
     for touch in sorted(touches, key=lambda t: (t.at, t.id)):
+        if overrides.dismissed(touch):
+            touch.lead_id = ""
+            continue
         lead = index.find(touch)
         if lead is None and touch.kind in CREATES_LEADS:
             lead = new_lead_for(touch)
@@ -286,8 +332,12 @@ def build(touches: list[Touch], now: datetime) -> list[Lead]:
             index.attach(lead, touch)
         else:
             touch.lead_id = ""
+    for source_id in list(index.leads):
+        target_id = overrides.target(source_id)
+        if target_id != source_id and target_id in index.leads:
+            merge_into(index.leads[target_id], index.leads.pop(source_id))
     for lead in index.leads.values():
-        evaluate(lead, now)
+        evaluate(lead, now, overrides.stages.get(lead.id, ""))
     return sorted(index.leads.values(), key=lambda l: (-l.temperature, l.company.lower()))
 
 
@@ -314,7 +364,7 @@ def upcoming(lead: Lead, now: datetime) -> list[Touch]:
     return sorted((t for t in lead.touches if t.kind == "calendar" and t.at > now), key=lambda t: t.at)
 
 
-def evaluate(lead: Lead, now: datetime) -> None:
+def evaluate(lead: Lead, now: datetime, manual_stage: str = "") -> None:
     past = [t for t in lead.touches if t.at <= now]
     lead.last_touch_at = max((t.at for t in past), default=None)
     future = upcoming(lead, now)
@@ -322,7 +372,8 @@ def evaluate(lead: Lead, now: datetime) -> None:
     idle = now - lead.last_touch_at if lead.last_touch_at else EXPIRE_AFTER
     if stage not in CLOSED and not future and idle > GHOSTED_AFTER:
         stage = "ghosted"
-    lead.stage = stage
+    lead.stage = manual_stage if manual_stage in STAGES else stage
+    lead.stage_manual = manual_stage in STAGES
     lead.status = "active" if future or idle <= EXPIRE_AFTER else "expired"
     if future:
         lead.next_step, lead.next_step_at = f"Interview: {future[0].title or 'on the calendar'}", future[0].at
@@ -357,7 +408,8 @@ def temperature(lead: Lead, now: datetime) -> tuple[int, dict[str, Any]]:
     parts = {
         "recency": {"points": round(recency, 1), "max": 35,
                     "why": f"last touch {days:.0f} days ago (halves every 7 days)" if days is not None else "no touch yet"},
-        "stage": {"points": round(stage, 1), "max": 25, "why": f"stage {lead.stage}"},
+        "stage": {"points": round(stage, 1), "max": 25,
+                  "why": f"stage {lead.stage}" + (" (set by you)" if lead.stage_manual else "")},
         "momentum": {"points": round(frequency + next_part, 1), "max": 20,
                      "why": f"{recent} touches in 14 days" + ("; interview scheduled" if scheduled else "")},
         "quality": {"points": round(perf + sentiment + cue, 1), "max": 20,
@@ -395,7 +447,7 @@ def graph(leads: list[Lead], now: datetime) -> dict[str, Any]:
         recent = sum(1 for t in lead.touches if t.at <= now and now - t.at <= EXPIRE_AFTER)
         out.append({
             "id": lead.id, "company": lead.company, "role": lead.role, "domain": lead.domain,
-            "stage": lead.stage, "status": lead.status, "temperature": lead.temperature,
+            "stage": lead.stage, "stage_manual": lead.stage_manual, "status": lead.status, "temperature": lead.temperature,
             "parts": lead.parts, "activity": recent, "touches": len(lead.touches),
             "last_touch_at": iso(lead.last_touch_at), "next_step": lead.next_step,
             "next_step_at": iso(lead.next_step_at),

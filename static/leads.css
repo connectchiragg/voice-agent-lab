@@ -96,3 +96,9 @@
   .leads-stage:has(.lead-panel[hidden]) { grid-template-columns: minmax(0, 1fr); }
   .leads-stage:has(.lead-panel[hidden]) .lead-panel { display: none; }
 }
+
+.fix { margin-top: 24px; border-top: 1px solid var(--hairline); padding-top: 14px; }
+.fix > summary { cursor: pointer; }
+.fix-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; margin-top: 12px; }
+.fix-row select { min-height: 36px; background: var(--graphite); color: var(--bone); border: 1px solid var(--hairline-strong); border-radius: 0; padding: 0 8px; font: inherit; font-size: var(--fs-sm); max-width: 100%; }
+.btn.danger { border-color: var(--bad); color: var(--bad); }

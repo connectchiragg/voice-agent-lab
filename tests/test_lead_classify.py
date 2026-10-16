@@ -15,11 +15,20 @@ OWNERS = {OWNER}
 
 @pytest.mark.parametrize("email,item", EMAILS, ids=[item["id"] for _, item in EMAILS])
 def test_heuristics_drop_bulk_and_job_boards_and_pass_the_rest(email, item):
-    early = lead_classify.prefilter(email)
+    early = lead_classify.own_mail(email, OWNERS, False) or lead_classify.prefilter(email)
     if item["step"] == "heuristic":
         assert early is not None and not early.keep and early.method == "heuristic"
     else:
         assert early is None, f"{item['id']} should reach the model, got {early}"
+
+
+def test_his_own_mail_is_kept_only_in_a_lead_thread_and_never_asks_the_model():
+    sent = next(e for e, item in EMAILS if item["id"] == "e17")
+    asked = []
+    dropped = lead_classify.decide(sent, OWNERS, False, asked.append)
+    kept = lead_classify.decide(sent, OWNERS, True, asked.append)
+    assert (dropped.keep, dropped.reason) == (False, "own_mail")
+    assert (kept.keep, kept.category, kept.method) == (True, "own_reply", "heuristic") and asked == []
 
 
 def test_a_reply_in_a_kept_thread_always_reaches_the_model():

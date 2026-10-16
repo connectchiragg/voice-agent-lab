@@ -11,6 +11,10 @@
 - `GET /valr/api/leads`: {leads, contacts, links, stages, generated_at, gmail}: every lead
   rebuilt from the stored touchpoints at request time (temperatures are "now").
 - `POST /valr/api/leads/sync`: a sync now (owner, CSRF, same-origin JSON like the cockpit).
+- `POST /valr/api/leads/<id>/override` {action: dismiss | stage | merge, stage?, into?}: the
+  owner's corrections, stored in `lead_overrides` and applied by every rebuild. Dismiss hides
+  the lead and its touchpoints and Gmail threads for good (a new thread or event may start it
+  again); a stage stays until set back to automatic (""); merge folds it into another lead.
 
 The page and its JSON need the owner's Access login (app/valr_dashboard.owner).
 """
@@ -22,10 +26,11 @@ import json
 import logging
 import os
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse
+from pydantic import BaseModel, ConfigDict, ValidationError
 from temporalio.common import WorkflowIDConflictPolicy
 from temporalio.service import RPCError
 
@@ -98,7 +103,7 @@ async def gmail_push(request: Request) -> Response:
     subscription = os.getenv("VALR_GMAIL_SUBSCRIPTION", "").strip()
     account = os.getenv("VALR_GMAIL_ACCOUNT", "").strip().lower()
     if (subscription and data["subscription"] != subscription) or (account and data["email"] != account):
-        logger.warning("Gmail push ignored: another subscription or account")
+        logger.warning("Gmail push ignored: another subscription or account")  # Acked: no retry, no alert.
         return Response(status_code=204)
     if os.getenv("VALR_LEADS", "0") != "1":
         return Response(status_code=204)
@@ -109,14 +114,18 @@ async def gmail_push(request: Request) -> Response:
 
 # The page and its data.
 
+async def current(connection: Any, now: datetime) -> list[leads.Lead]:
+    await leads_store.setup(connection)
+    return leads.build(await leads_store.touches(connection), now, await leads_store.overrides(connection))
+
+
 async def collect(pool: Any, now: datetime | None = None) -> dict[str, Any]:
     now = now or datetime.now(timezone.utc)
     async with pool.connection() as connection:
-        await leads_store.setup(connection)
-        touches = await leads_store.touches(connection)
+        built = await current(connection, now)
         state = await leads_store.load_state(connection)
         counts = await leads_store.decision_counts(connection)
-    view = leads.graph(leads.build(touches, now), now)
+    view = leads.graph(built, now)
     view["gmail"] = gmail_view(state, counts, now)
     return view
 
@@ -153,6 +162,57 @@ async def leads_page_route(request: Request) -> HTMLResponse:
 async def leads_json(request: Request) -> JSONResponse:
     await valr_dashboard.owner(request)
     return JSONResponse(await view_or_503(), headers=valr_dashboard.NO_CACHE)
+
+
+class OverrideRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    action: Literal["dismiss", "stage", "merge"]
+    stage: str = ""  # For "stage": one of leads.STAGES, or "" for automatic again.
+    into: str = ""  # For "merge": the lead to merge into.
+
+
+async def apply_override(connection: Any, lead_id: str, body: OverrideRequest, email: str,
+                         now: datetime) -> str:
+    """Store one correction; -> the message for the page. ValueError when it does not apply."""
+    built = {lead.id: lead for lead in await current(connection, now)}
+    lead = built.get(lead_id)
+    if lead is None:
+        raise LookupError("Unknown lead.")
+    if body.action == "dismiss":
+        await leads_store.add_override(connection, lead_id, "dismiss",
+                                       touch_ids=[t.id for t in lead.touches],
+                                       threads=sorted({t.thread for t in lead.touches if t.thread}), by=email)
+        return f"{lead.company} dismissed."
+    if body.action == "stage":
+        if body.stage and body.stage not in leads.STAGES:
+            raise ValueError("Unknown stage.")
+        await leads_store.add_override(connection, lead_id, "stage", body.stage, by=email)
+        return f"{lead.company}: stage set to {body.stage}." if body.stage else f"{lead.company}: stage is automatic again."
+    if body.into == lead_id or body.into not in built:
+        raise ValueError("Pick another lead to merge into.")
+    await leads_store.add_override(connection, lead_id, "merge", body.into, by=email)
+    return f"{lead.company} merged into {built[body.into].company}."
+
+
+@router.post("/valr/api/leads/{lead_id}/override")
+async def lead_override(request: Request, lead_id: str) -> JSONResponse:
+    """The owner's corrections from the lead panel: dismiss, set stage, merge into another lead."""
+    email = await valr_dashboard.action_owner(request)
+    try:
+        body = OverrideRequest.model_validate_json(await request.body())
+    except ValidationError as error:
+        raise HTTPException(400, "Expected {action: dismiss|stage|merge, stage?, into?}.") from error
+    if research.pool is None:
+        raise HTTPException(503, "Postgres is unavailable.")
+    try:
+        async with research.pool.connection() as connection:
+            message = await apply_override(connection, lead_id[:40], body, email, datetime.now(timezone.utc))
+    except LookupError as error:
+        raise HTTPException(404, str(error)) from error
+    except ValueError as error:
+        raise HTTPException(400, str(error)) from error
+    logger.info("VALR lead override: %s", body.action)
+    return JSONResponse({"ok": True, "message": message}, headers=valr_dashboard.NO_CACHE)
 
 
 @router.post("/valr/api/leads/sync")
