@@ -10,10 +10,14 @@ A provider (app/notetakers/fathom.py, fireflies.py, granola.py) offers:
   {source, id, title, date, duration, participants, turns, vendor_summary}).
 
 A Recording also carries the links the dashboard needs: `share_url` (a deep link
-that opens the recording at the provider), `embed_url` (an iframe source, "" when
-the provider has none), and `attendee_emails`, used only in memory to match a
-recording to a calendar event; they are never stored or shown.
+that opens the recording at the provider; the video itself plays from the provider's
+official download API, app/notetakers/media.py), and `attendee_emails`, used only in
+memory to match a recording to a calendar event; they are never stored or shown.
+`company`, `company_domain`, `interviewers` and `invitee_hashes` come from the external
+invitees (`invitee_details`) and are stored, so a past interview keeps its company and
+people after the calendar forgets the event. `embed_url` is kept empty (the old iframe).
 """
+import hashlib
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -45,12 +49,17 @@ class Recording:
     embed_url: str = ""
     attendee_emails: list[str] = field(default_factory=list)
     meeting: dict[str, Any] | None = None  # The importer's normalised meeting, when fetched.
+    company: str = ""
+    company_domain: str = ""
+    interviewers: list[str] = field(default_factory=list)
+    invitee_hashes: list[str] = field(default_factory=list)
 
     def public(self) -> dict[str, Any]:
         """What may be stored and shown: no emails, no transcript."""
         return {"provider": self.provider, "external_id": self.external_id, "title": self.title,
                 "start": self.start, "end": self.end, "share_url": self.share_url,
-                "embed_url": self.embed_url}
+                "embed_url": self.embed_url, "company": self.company, "company_domain": self.company_domain,
+                "interviewers": self.interviewers, "invitee_hashes": self.invitee_hashes}
 
 
 def check(response: httpx.Response, provider: str) -> httpx.Response:
@@ -84,14 +93,89 @@ def with_query(url: str, **params: Any) -> str:
     return urlunsplit(parts._replace(query=urlencode(query)))
 
 
-# Embeds: only these hosts may become an iframe on the dashboard.
+# The company and people of a recording, from its calendar invitees.
 
-EMBED_HOSTS = {"fathom.video", "app.fireflies.ai", "share.fireflies.ai"}
+FREEMAIL = {"gmail.com", "googlemail.com", "outlook.com", "hotmail.com", "live.com", "yahoo.com",
+            "yahoo.co.in", "icloud.com", "me.com", "proton.me", "protonmail.com", "aol.com", "zoho.com",
+            "rediffmail.com", "gmx.com", "mail.com", "yandex.com", "msn.com"}
+TOOL_DOMAINS = ("calendar.google.com", "google.com", "fathom.video", "fireflies.ai", "granola.ai",
+                "zoom.us", "calendly.com", "resource.calendar.google.com")
+SUFFIXES = {"com", "co", "in", "io", "ai", "net", "org", "dev", "tech", "app", "us", "uk", "de", "so",
+            "xyz", "inc", "global", "group", "careers", "jobs", "hr", "mail", "team", "security", "example"}
+# Words that are never a company on their own: round labels and title filler.
+NOT_COMPANY = {"me", "you", "round", "interview", "interviews", "call", "meeting", "min", "mins", "and", "with",
+               "screen", "screening", "intro", "chat", "sync", "level", "technical", "tech", "hr", "final",
+               "onsite", "loop", "panel", "discussion", "for", "the", "of", "at", "x", "vs", "catch", "up",
+               "followup", "follow", "first", "second", "third", "system", "design", "coding", "hiring",
+               "manager", "culture", "fit", "behavioral", "behavioural", "test", "unknown", "fathom",
+               "fireflies", "granola", "zoom", "google", "teams", "meet"}
+ROUND_TOKEN = re.compile(r"^(?:l|r|round|level|lvl|stage)\d{1,2}$|^\d{1,2}$")
 
 
-def safe_embed(url: str) -> str:
-    parts = urlsplit(url or "")
-    return url if parts.scheme == "https" and parts.hostname in EMBED_HOSTS else ""
+def email_hash(email: str) -> str:
+    """A short, one-way tag of an address: matches a lead's contact without storing the email."""
+    return hashlib.sha256(email.strip().lower().encode()).hexdigest()[:16]
+
+
+def owner_words() -> set[str]:
+    """The owner's own name words (VALR_OWNER_NAME / VALR_CANDIDATE_NAME / the profile's name)."""
+    import os
+    raw = " ".join(os.getenv(k, "") for k in ("VALR_OWNER_NAME", "VALR_CANDIDATE_NAME"))
+    try:
+        from app.profile.config import settings
+        raw += " " + (settings().candidate_name or "")
+    except Exception:  # noqa: BLE001 - no profile config here: env only.
+        pass
+    return {w for w in re.findall(r"[a-z0-9]+", raw.lower()) if len(w) > 1}
+
+
+def is_company(name: str, owner: set[str] | None = None) -> bool:
+    """False for "", a round label ("L2", "Round 2", "Interview") or the owner's own name."""
+    owner = owner_words() if owner is None else owner
+    words = re.findall(r"[a-z0-9]+", (name or "").lower())
+    rest = [w for w in words if w not in NOT_COMPANY and w not in owner and not ROUND_TOKEN.match(w)]
+    return bool(rest)
+
+
+def company_from_domain(domain: str) -> str:
+    """"talent.quillworks.co.in" -> "Quillworks"; "" for a free-mail or tool domain."""
+    domain = (domain or "").lower().strip(".")
+    if not domain or domain in FREEMAIL or domain.endswith(TOOL_DOMAINS):
+        return ""
+    parts = domain.split(".")
+    while len(parts) > 1 and parts[-1] in SUFFIXES:
+        parts.pop()
+    core = parts[-1] if parts else ""
+    return core.replace("-", " ").title() if core and core not in SUFFIXES else ""
+
+
+def invitee_details(invitees: list[dict[str, Any]], owner_emails: set[str] | None = None) -> dict[str, Any]:
+    """Fathom's `calendar_invitees` -> {company, company_domain, interviewers, invitee_hashes}.
+
+    The external invitees (`is_external`, else not the owner's address or domain) are the
+    interviewers; the most common non-free-mail domain among them names the company."""
+    owner_emails = {e.lower() for e in (owner_emails or set())}
+    owner_domains = {e.rpartition("@")[2] for e in owner_emails} - FREEMAIL
+    people, domains = [], []
+    for invitee in invitees or []:
+        if not isinstance(invitee, dict):
+            continue
+        email = str(invitee.get("email") or "").strip().lower()
+        domain = email.rpartition("@")[2]
+        if email in owner_emails or (domain and domain in owner_domains):
+            continue
+        if invitee.get("is_external") is False:  # The recorder's own side.
+            continue
+        if domain.endswith(TOOL_DOMAINS):
+            continue
+        people.append((str(invitee.get("name") or "").strip(), email))
+        if domain and domain not in FREEMAIL:
+            domains.append(domain)
+    domain = max(set(domains), key=domains.count) if domains else ""
+    names = [n for n, email in people if n and "@" not in n]
+    return {"company": company_from_domain(domain), "company_domain": domain,
+            "interviewers": list(dict.fromkeys(names))[:8],
+            "invitee_hashes": [email_hash(e) for _, e in people if e][:12]}
 
 
 def safe_link(url: str) -> str:

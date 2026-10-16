@@ -9,22 +9,28 @@
 - Normalisation reuses the profile importer's `normalize_fathom` (names, no emails).
 - Links: `url` (https://fathom.video/calls/<id>, the owner's own view) is the deep link;
   timestamps use `?timestamp=<seconds>` as in the API's `recording_playback_url`.
-- Embed: not in the developer docs. Fathom's release notes (Jan 2025) say recordings can
-  be embedded from share links; the player is `https://fathom.video/embed/<token>` for a
-  share link `https://fathom.video/share/<token>` (format seen on Iframely, not in
-  Fathom's docs). It is expected to play only while the recording's share setting is
-  "Anyone with the link". The owner approved embedding (2026-10-16; the dashboard is
-  behind Cloudflare Access): every recording with a share token is embedded, with the
-  deep link under it; one without a share token gets the "Watch on Fathom" link only.
+- Video: the official download API (developers.fathom.ai, "Request a download" and "Get
+  download status"): `POST /recordings/{id}/download` -> 202 RecordingDownload
+  {download_id, recording_id, status: processing|completed|failed|expired, video?|audio?:
+  {url, content_type, file_size_bytes, expires_at}, failure_reason?}; then
+  `GET /recordings/{id}/downloads/{download_id}`. Only the API client that made a
+  download can read it. Errors: 403 (limited-access share), 404, 422 (no downloadable
+  media), 429. Video is generated in the background; audio-only completes at once.
+  Measured 2026-10-16: video from streamkit.storage.googleapis.com, audio-only from
+  fathom-recording-data.storage.googleapis.com, both `Accept-Ranges: bytes`, signed for
+  24 h. The old `fathom.video/embed/<token>` iframe (undocumented) is gone: Fathom's
+  pages send `frame-ancestors 'self'`. Caching and the player: app/notetakers/media.py.
+- Company and people: `calendar_invitees` ({name, email, is_external}) give the
+  interviewers and the company's domain (base.invitee_details).
 - Webhook: Standard Webhooks signature; the payload is the same Meeting object.
 """
+import os
 from datetime import datetime
 from typing import Any
-from urllib.parse import urlsplit
 
 import httpx
 
-from app.notetakers.base import Recording, check, safe_link, utc, with_query
+from app.notetakers.base import Recording, check, invitee_details, safe_link, utc, with_query
 from app.profile.recordings import normalize_fathom
 
 NAME = "fathom"
@@ -36,21 +42,6 @@ def headers(key: str) -> dict[str, str]:
     return {"X-Api-Key": key, "Accept": "application/json"}
 
 
-def embed_url(share_url: str) -> str:
-    """https://fathom.video/share/<token> -> https://fathom.video/embed/<token>; else ""."""
-    parts = urlsplit(share_url or "")
-    path = parts.path.rstrip("/").split("/")
-    if parts.scheme == "https" and parts.hostname == "fathom.video" and len(path) == 3 and path[1] == "share":
-        return f"https://fathom.video/embed/{path[2]}"
-    return ""
-
-
-def share_link(embed: str) -> str:
-    """https://fathom.video/embed/<token> -> https://fathom.video/share/<token>."""
-    return embed.replace("https://fathom.video/embed/", "https://fathom.video/share/", 1) \
-        if embed.startswith("https://fathom.video/embed/") else ""
-
-
 def timestamp_url(share_url: str, seconds: int) -> str:
     return with_query(share_url, timestamp=int(seconds)) if share_url else ""
 
@@ -59,15 +50,21 @@ def recording(item: dict[str, Any], with_meeting: bool = False) -> Recording:
     share = safe_link(str(item.get("share_url") or ""))
     start = item.get("recording_start_time") or item.get("scheduled_start_time") or item.get("created_at")
     end = item.get("recording_end_time") or item.get("scheduled_end_time")
-    emails = [str(i.get("email") or "").lower() for i in item.get("calendar_invitees") or []
-              if isinstance(i, dict) and i.get("email")]
+    invitees = [i for i in item.get("calendar_invitees") or [] if isinstance(i, dict)]
+    emails = [str(i.get("email") or "").lower() for i in invitees if i.get("email")]
+    details = invitee_details(invitees, owner_emails())
     return Recording(
         provider=NAME, external_id=str(item.get("recording_id") or ""),
         title=str(item.get("title") or item.get("meeting_title") or ""),
         start=utc(start), end=utc(end),
         share_url=safe_link(str(item.get("url") or "")) or share,
-        embed_url=embed_url(share), attendee_emails=emails,
-        meeting=normalize_fathom(item) if with_meeting else None)
+        attendee_emails=emails, meeting=normalize_fathom(item) if with_meeting else None, **details)
+
+
+def owner_emails() -> set[str]:
+    """The owner's addresses (as app.interview_worker.owner_emails, without importing Temporal)."""
+    return {e.strip().lower() for e in os.getenv("VALR_OWNER_EMAILS", "").split(",") if e.strip()} \
+        | ({os.getenv("VALR_GMAIL_ACCOUNT", "").strip().lower()} - {""})
 
 
 async def verify(key: str, http: httpx.AsyncClient) -> str:
@@ -109,3 +106,14 @@ async def get_recording(key: str, external_id: str, http: httpx.AsyncClient,
 def payload_recording(payload: dict[str, Any]) -> Recording:
     """A webhook body (the same Meeting object as the list) -> Recording with its meeting."""
     return recording(payload, with_meeting=bool(payload.get("transcript") or payload.get("default_summary")))
+
+
+# Downloads (the official API). Each returns the raw response: app/notetakers/media.py maps
+# the status codes to what the owner reads.
+
+async def request_download(key: str, external_id: str, http: httpx.AsyncClient) -> httpx.Response:
+    return await http.post(f"{API}/recordings/{external_id}/download", headers=headers(key), json={})
+
+
+async def download_status(key: str, external_id: str, download_id: str, http: httpx.AsyncClient) -> httpx.Response:
+    return await http.get(f"{API}/recordings/{external_id}/downloads/{download_id}", headers=headers(key))

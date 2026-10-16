@@ -52,10 +52,14 @@ def client(monkeypatch):
     async def load_leads():
         return box["leads"]()
 
-    async def load_recording(interview):  # fathom:1000 none stored, 1006 a link only, others a player.
+    async def load_recording(interview):  # fathom:1000 none stored; the others play here.
         if interview["id"] == "fathom:1000":
             return None
-        return sample_recording_row(interview["id"], embed=interview["id"] != "fathom:1006")
+        return sample_recording_row(interview["id"])
+
+    async def load_rows(interviews_):  # Fathom's invitee details for two of them (made up).
+        return {"fathom:1003": sample_recording_row("fathom:1003", "", "juniper.example", ("Asha Rao",)),
+                "fathom:1006": sample_recording_row("fathom:1006", "Nimbus", "", ("Jo Park", "Lee Wu"))}
 
     async def setup(connection):
         return None
@@ -63,6 +67,7 @@ def client(monkeypatch):
     monkeypatch.setattr(valr_view, "collect", collect)
     monkeypatch.setattr(routes, "load_leads", load_leads)
     monkeypatch.setattr(routes, "load_recording", load_recording)
+    monkeypatch.setattr(routes, "load_rows", load_rows)
     monkeypatch.setattr(interview_store, "setup", setup)
     monkeypatch.setattr(research, "pool", Pool())
     monkeypatch.setattr(valr_dashboard, "verifier", Verifier())
@@ -221,10 +226,12 @@ def test_interview_detail_is_written_for_reading(client, monkeypatch):
 
 def test_past_interview_recording_and_impression(client):
     page = html.unescape(client.get("/valr/interviews/past/fathom-1006", headers=GOOD).text)
-    assert "<iframe" not in page and "This recording opens in Fathom" in page and "Open in Fathom" in page
+    assert "<iframe" not in page and "Open in Fathom" in page  # The link stays as the fallback.
     assert 'data-moments-id="fathom:1006"' in page  # Key moments load from /valr/api/recording.
+    assert "With Jo Park, Lee Wu" in page  # Fathom's external invitees.
     player = client.get("/valr/interviews/past/fathom-1005", headers=GOOD).text
-    assert '<iframe src="https://fathom.video/embed/sample-1005"' in player and "sandbox=" in player
+    assert '<div class="player-box" data-player="fathom:1005">' in player
+    assert '<video controls preload="metadata" playsinline' in player and "fathom.video/embed" not in player
     assert "How the interviewer reacted" in player and "They dug in when you put numbers on the design." in player
     assert "How did you keep the queue from growing" in player  # A cue with its quote.
     assert player.index("Leaned in") < player.index("Impression score")  # Narrative first, numbers folded.
@@ -479,7 +486,8 @@ def test_view_labels_stages_and_recorders():
 
 
 def test_contracts_tolerate_partial_data():
-    assert contracts.recording({"url": "https://fathom.video/x", "embed_url": "https://evil.example/x"})["embed_url"] == ""
+    assert "embed_url" not in contracts.recording({"url": "https://fathom.video/x", "embed_url": "https://evil.example/x"})
+    assert contracts.recording({"url": "https://app.fireflies.ai/view/x", "provider": "fireflies"})["player"] is False
     assert contracts.recording({"url": "http://insecure.example"}) is None
     assert contracts.recording({"share_url": "https://fathom.video/share/x", "provider": "fathom"})["provider"] == "Fathom"
     leads = contracts.leads({"leads": [{"id": "a b", "company": "Acme", "stage": "closed-lost",
@@ -594,3 +602,64 @@ def test_no_owner_name_in_the_code_only_in_settings(monkeypatch):
     assert {"sam", "rivera"} <= calendar_ics.not_company_words()
     monkeypatch.setenv("VALR_OWNER_NAME", "Alex")
     assert interviews.owner_name() == "Alex"
+
+
+# Past interviews filled in: company, interviewers and outcome (app/valr_ui/past.py).
+
+def test_past_list_takes_outcome_and_people_from_leads_and_recordings(client):
+    page = html.unescape(client.get("/valr/interviews/past", headers=GOOD).text)
+    juniper = page.split("/valr/interviews/past/fathom-1003", 1)[1].split("</li>", 1)[0]
+    assert "Interviewing" in juniper and "Outcome unknown" not in juniper  # Lead matched by the invitees' domain.
+    assert "with Asha Rao" in juniper
+    nimbus = page.split("/valr/interviews/past/fathom-1006", 1)[1].split("</li>", 1)[0]
+    assert "Screening" in nimbus  # Lead matched by name.
+    tessel = page.split("/valr/interviews/past/fathom-1005", 1)[1].split("</li>", 1)[0]
+    assert "Not advanced" in tessel  # The scorecard's own outcome wins over the lead's stage.
+
+
+def test_enrich_never_uses_a_round_label_or_the_owner_as_company():
+    from app.valr_ui import past
+    leads = [{"company": "Quillworks", "domain": "quillworks.example", "stage": "closed", "stage_raw": "ghosted",
+              "stage_label": "Gone quiet", "contacts": [{"email": "maya@gmail.com"}]},
+             {"company": "Orbit Labs", "domain": "", "stage": "offer", "stage_raw": "offer", "stage_label": "Offer",
+              "contacts": []}]
+    iv = {"id": "fathom:1", "company": "L2- Sam", "outcome": "unknown"}
+    row = {"company": "", "event_company": "Interview -L2- Sam", "company_domain": "",
+           "invitee_hashes": json.dumps([past.base.email_hash("maya@gmail.com")]), "interviewers": '["Maya Lin"]'}
+    out = past.enrich(iv, row, leads, owner={"sam"})
+    assert out["company"] == "Quillworks"  # Junk refused; the lead found through a contact's (hashed) address.
+    assert out["outcome_chip"][:2] == ("Ghosted", "warn") and out["interviewers"] == ["Maya Lin"]
+    plain = past.enrich({"id": "fathom:2", "company": "", "outcome": "unknown"}, None, leads, owner={"sam"})
+    assert plain["company"] == "" and "outcome_chip" not in plain  # Nothing to go on: "Outcome unknown".
+    offer = past.enrich({"id": "fathom:3", "company": "Orbit Labs Inc", "outcome": "unknown"}, None, leads, owner=set())
+    assert offer["outcome_chip"][:2] == ("Offer", "ok")
+    assert past.lead_outcome({"stage_raw": "closed-lost", "stage": "closed"})[0] == "Rejected"
+
+
+def test_calendar_titles_with_round_labels_are_not_companies(monkeypatch):
+    from app import calendar_ics
+    monkeypatch.setenv("VALR_OWNER_NAME", "Sam")
+    assert not calendar_ics.is_company_name("L2- Sam")
+    assert not calendar_ics.is_company_name("Round 2")
+    assert calendar_ics.is_company_name("Quillworks")
+
+
+def test_missing_impressions_come_from_the_read_only_copy(tmp_path, monkeypatch):
+    live = {"schema_version": 3, "interviews": [
+        {"interview_id": "fathom:1", "date": "2026-10-01", "impression": None},
+        {"interview_id": "fathom:2", "date": "2026-10-02", "impression": {"coverage": "transcript", "score": 7.0, "cues": []}},
+        {"interview_id": "fathom:3", "date": "2026-10-03"}]}  # A round the worker added since.
+    seed = {"schema_version": 3, "coach": {"where_you_stand": "Steady."}, "interviews": [
+        {"interview_id": "fathom-1", "impression": {"coverage": "transcript", "score": 6.0, "cues": [], "leaned_in": "Numbers."}},
+        {"interview_id": "fathom:2", "impression": {"coverage": "transcript", "score": 1.0, "cues": []}}]}
+    (tmp_path / "live.json").write_text(json.dumps(live))
+    (tmp_path / "seed.json").write_text(json.dumps(seed))
+    monkeypatch.setenv("VALR_PERFORMANCE_PATH", str(tmp_path / "live.json"))
+    monkeypatch.setenv("VALR_PERFORMANCE_FALLBACK", str(tmp_path / "seed.json"))
+    perf, _ = valr_view.profile_files()
+    by_id = {iv["interview_id"]: iv for iv in perf["interviews"]}
+    assert by_id["fathom:1"]["impression"]["score"] == 6.0  # Filled in (the slug form of the id matches).
+    assert by_id["fathom:2"]["impression"]["score"] == 7.0  # The live one is kept.
+    assert "impression" not in by_id["fathom:3"] and perf["coach"] == {"where_you_stand": "Steady."}
+    shown = valr_view.performance(perf)["interviews"][0]["impression"]
+    assert shown and shown["leaned_in"] == "Numbers."

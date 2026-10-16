@@ -2,7 +2,8 @@
 light/dark, a slim banner for anything broken, the footer and the mobile tab bar.
 
 Server-rendered; static/valr.js (countdowns, actions, refresh, chart) and
-static/valr-app.js (theme, globe, filters, the attention popover) enhance it.
+static/valr-app.js (theme, globe, filters, the attention popover) and static/valr-player.js
+(past interviews: the recording player and key moments) enhance it.
 """
 import hashlib
 from datetime import datetime
@@ -126,6 +127,7 @@ def layout(view: dict[str, Any], email: str, csrf: str, active: str, title: str,
 <link rel="stylesheet" href="{asset('valr-app.css')}"><link rel="stylesheet" href="{asset('valr-auth.css')}">
 <script type="module" src="{asset('valr.js')}"></script>
 <script type="module" src="{asset('valr-app.js')}"></script>
+<script type="module" src="{asset('valr-player.js')}"></script>
 </head><body class="app page-{e(active)}">
 <a class="sr-only skip" href="#main">Skip to content</a>
 <header class="appbar">
