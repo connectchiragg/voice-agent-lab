@@ -76,6 +76,8 @@ def main() -> None:
         if path == "/preview-media.mp4" and args.media and valr_dashboard.is_preview_request(request):
             from fastapi.responses import FileResponse
             return FileResponse(args.media, media_type="video/mp4")
+        if path.startswith(("/valr/api/notifications", "/valr/api/phone/")):
+            return await preview_notify(request, path)
         if path.startswith(("/valr/api/notetakers/", "/valr/api/leads/")) or path in (
                 "/valr/api/recording", "/valr/api/recording/media", "/valr/api/telegram/code", "/valr/api/reach", "/valr/api/prep"):
             return await preview_api(request, path)
@@ -131,6 +133,45 @@ def main() -> None:
         if action == "sync":
             return JSONResponse({"ok": True, "found": 3, "new": 1, "message": f"{label}: 3 recordings in the last 7 days, 1 new."})
         return JSONResponse({"ok": True, "message": f"{label}: 2 notes read, 2 new."})
+
+    notes = {"read": set(), "switches": {"immediate": True, "digest": True, "quiet": True}}
+
+    async def preview_notify(request, path):
+        """Fictional notifications, alert switches and phone-recording status (nothing stored)."""
+        import json
+        from datetime import datetime, timedelta, timezone
+        from fastapi.responses import JSONResponse
+        if not valr_dashboard.is_preview_request(request):
+            return JSONResponse({"detail": "Preview only."}, status_code=403)
+        now = datetime.now(timezone.utc)
+        raw = [(1, "reply_needed", "immediate", "Fableworks asked you to share your availability", "Fableworks", 0.2),
+               (2, "offer", "immediate", "Arcworks sent an offer", "Arcworks", 2),
+               (3, "stage", "digest", "Glintworks moved to Interviewing", "Glintworks", 5),
+               (4, "reply", "digest", "Juniper replied", "Juniper", 6),
+               (5, "interview", "immediate", "Juniper wants to schedule an interview", "Juniper", 7),
+               (6, "rejection", "digest", "Tessel: not moving forward", "Tessel", 30),
+               (7, "new_lead", "digest", "New: Quillworks reached out", "Quillworks", 60)]
+        items = [{"id": i, "kind": k, "label": k.replace("_", " ").capitalize(), "importance": imp, "title": t,
+                  "body": "", "company": c, "link": "/valr/leads", "gmail_url": "https://mail.google.com/mail/#all/x",
+                  "created_at": (now - timedelta(hours=h)).isoformat(),
+                  "day": "Today" if h < 12 else "Yesterday" if h < 40 else "Earlier", "read": i in notes["read"]}
+                 for i, k, imp, t, c, h in raw]
+        if request.method == "POST":
+            body = json.loads(await request.body() or b"{}")
+            if path.endswith("/read"):
+                notes["read"] |= {i["id"] for i in items} if body.get("all") else set(body.get("ids") or [])
+            elif path.endswith("/settings"):
+                notes["switches"].update({k: v for k, v in body.items() if k in notes["switches"]})
+            elif path == "/valr/api/phone/token":
+                return JSONResponse({"ok": True, "token": "preview-token-not-real", "message": "Copy it now."})
+        if path == "/valr/api/phone/status":
+            return JSONResponse({"ok": True, "token": True, "last_upload_at": (now - timedelta(hours=3)).isoformat(),
+                                 "last_status": "done", "waiting": 0, "audio_days": 7})
+        unread = sum(1 for i in items if i["id"] not in notes["read"])
+        if request.query_params.get("unread") == "1":
+            items = [i for i in items if not i["read"]]
+        return JSONResponse({"ok": True, "unread": unread, "items": items, "switches": notes["switches"],
+                             "marked": 1})
 
     real = None
     if args.performance:

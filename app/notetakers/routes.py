@@ -49,7 +49,7 @@ MAX_IMPORT_BYTES = 3_000_000
 
 
 def provider_or_404(provider: str) -> str:
-    if provider not in notetakers.PROVIDERS:
+    if not notetakers.connectable(provider):
         raise HTTPException(404, "Unknown notetaker.")
     return provider
 
@@ -197,6 +197,9 @@ async def recording_media(request: Request, id: str = "", refresh: int = 0) -> J
     """The signed video of a recording to stream in the page (owner only; never logged)."""
     await valr_dashboard.owner(request)
     provider, external_id = parse_id(id)
+    if provider == "phone":  # VALR's own audio (app/phone_web.py), no provider to ask.
+        from app.notetakers import phone
+        return JSONResponse({"ok": True, **phone.media_answer(external_id)}, headers=NO_CACHE)
     try:
         async with pool().connection() as connection, notetakers.http_client() as http:
             key = await notetakers.api_key(connection, provider)

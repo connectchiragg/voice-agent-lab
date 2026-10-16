@@ -16,6 +16,9 @@
   and scored interviews (performance.json) become touchpoints; then every lead is rebuilt
   (app/leads.build) and saved.
 - `gmail_watch`: users.watch on VALR_GMAIL_TOPIC, daily.
+- Notifications (app/notifications.py): a kept inbound email in an incremental pass becomes a
+  bell item (`notify_email`); after each rebuild, stage changes, "waiting on you" and gone-quiet
+  leads do too, and anything due goes out on Telegram (`notify_rebuild`).
 
 Settings: VALR_LEADS=1 turns the schedules on; VALR_GMAIL_TOPIC; VALR_LEADS_BACKFILL_DAYS (30),
 VALR_LEADS_BACKFILL_MAX (500), VALR_LEADS_LLM_PER_DAY (300), VALR_LEADS_POLL_MINUTES (30),
@@ -119,6 +122,33 @@ def email_touch(email: Email, decision: Decision, owners: set[str]) -> Touch:
                  url=gmail_api.thread_url(email.thread_id), role=decision.role, thread=email.thread_id,
                  category=decision.category, action_requested=None if outbound else decision.action_requested,
                  action="" if outbound else decision.action)
+
+
+NOTIFY_MODES = ("history", "recovery")
+
+
+async def notify_email(connection: Any, email: Email, decision: Decision, touch: Touch, new_thread: bool) -> None:
+    """A kept email -> the bell (app/notifications.py). Never fails the sync."""
+    from app import notifications
+    try:
+        store = notifications.Store(connection)
+        await store.setup()
+        await notifications.from_email(store, email, decision, touch, new_thread, datetime.now(timezone.utc))
+    except Exception as error:  # noqa: BLE001 - a missed notification must not lose the email
+        logger.warning("VALR notification not created: %s", type(error).__name__)
+
+
+async def notify_rebuild(connection: Any, built: list[Any], bot: Any = None) -> None:
+    """After a lead rebuild: lead events, then Telegram for anything due. Never fails the refresh."""
+    from app import notifications
+    try:
+        store = notifications.Store(connection)
+        await store.setup()
+        now = datetime.now(timezone.utc)
+        await notifications.after_rebuild(store, built, now)
+        await notifications.run_dispatch(connection, now, bot)
+    except Exception as error:  # noqa: BLE001
+        logger.warning("VALR notifications after the rebuild: %s", type(error).__name__)
 
 
 def beat() -> None:
@@ -341,8 +371,10 @@ class LeadActivities:
                         decision.category if decision.method == "llm" else decision.reason, decision.confidence)
             if verdict == "keep":
                 summary.kept += 1
-                await leads_store.upsert_touch(connection, email_touch(email, decision, owners),
-                                               snippet_cipher(email))
+                touch = email_touch(email, decision, owners)
+                await leads_store.upsert_touch(connection, touch, snippet_cipher(email))
+                if summary.mode in NOTIFY_MODES:  # Never the first backfill: old mail is not news.
+                    await notify_email(connection, email, decision, touch, email.thread_id not in known)
             elif verdict == "drop":
                 summary.dropped += 1
             else:
@@ -433,6 +465,7 @@ class LeadActivities:
             built = leads.build(everything, now, corrections)
             await leads_store.move_overrides(connection, corrections.aliases)  # Renamed leads keep his corrections.
             await leads_store.save_leads(connection, built, everything, now)
+            await notify_rebuild(connection, built, self._bot)
         summary.leads, summary.touches = len(built), len(everything)
         summary.active = sum(1 for lead in built if lead.status == "active")
         summary.expired = sum(1 for lead in built if lead.status == "expired")  # Closed leads are neither.
