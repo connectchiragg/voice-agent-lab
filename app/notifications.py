@@ -58,12 +58,13 @@ KEEP_FOR = timedelta(days=30)
 QUIET_AFTER = timedelta(days=14)
 LOCK = 7_202_610_31
 
-IMMEDIATE = ("offer", "interview", "reply_needed", "take_home")
+IMMEDIATE = ("offer", "interview", "reply_needed", "take_home", "recording")
 DIGEST = ("rejection", "new_lead", "reply", "update", "stage", "waiting", "quiet")
 KINDS = IMMEDIATE + DIGEST
 LABELS = {"offer": "Offer", "interview": "Interview invite", "reply_needed": "Asked for something",
           "take_home": "Take-home", "rejection": "Not moving forward", "new_lead": "New lead",
-          "reply": "Reply", "update": "Update", "stage": "Stage change", "waiting": "Your move", "quiet": "Gone quiet"}
+          "reply": "Reply", "update": "Update", "stage": "Stage change", "waiting": "Your move", "quiet": "Gone quiet",
+          "recording": "Call recording"}
 RANK = {"immediate": 2, "digest": 1}
 
 SCHEMA = """
@@ -522,6 +523,18 @@ async def add(store: Any, note: dict[str, Any], now: datetime) -> int | None:
                 await store.update(earlier["id"], read_at=None)  # A new email: the dot comes back.
             return None
     return await store.insert(note)
+
+
+async def from_recording(store: Any, provider: str, external_id: str, company: str, other: str,
+                         now: datetime) -> int | None:
+    """A processed call recording -> one notification linking to its past-interview page."""
+    who = name_of(company) or (other or "").strip()[:60]
+    note = {"source_id": f"{provider}:{external_id}", "kind": "recording",
+            "title": f"Call with {who} is ready" if who else "Your call recording is ready",
+            "body": "Transcript and coach review are in Past interviews.", "company": (company or "")[:120],
+            "link": f"/valr/interviews/past/{provider}-{external_id}", "gmail_url": "", "thread_id": None,
+            "action": ""}
+    return await add(store, note, now)
 
 
 async def from_email(store: Any, email: Any, decision: Any, touch: Any, new_thread: bool, now: datetime) -> int | None:

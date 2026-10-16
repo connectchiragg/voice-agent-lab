@@ -670,6 +670,13 @@ class Processor:
         await mark(connection, upload_id, status="done", processed_at=now, error=None,
                    delete_after=now + timedelta(days=audio_days()))
         logger.info("VALR phone recording processed (%d turns, %.0f s)", len(meeting["turns"]), duration)
+        try:
+            from app import notifications
+            store = notifications.Store(connection)
+            await store.setup()
+            await notifications.from_recording(store, PROVIDER, upload_id, company, row.get("other_name") or "", now)
+        except Exception as error:  # noqa: BLE001 - the recording is processed either way.
+            logger.warning("VALR phone recording notification failed: %s", type(error).__name__)
 
     async def company(self, connection: Any, recording: Any, meeting: dict, event: dict | None,
                       other_name: str, candidate: str = "") -> tuple[str, str]:

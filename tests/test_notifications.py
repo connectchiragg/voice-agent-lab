@@ -339,3 +339,15 @@ def test_the_api_is_owner_only_and_marks_read(client):
 def test_the_bell_replaces_the_attention_pill(client):
     page = client.get("/valr", headers=client.good).text
     assert "data-notif" in page and "valr-notify.js" in page and 'class="att-badge' not in page
+
+
+def test_a_processed_call_recording_is_one_immediate_item_linking_to_its_past_interview():
+    store = MemoryStore()
+    got = run(n.from_recording(store, "phone", "ab12", "Northwind Labs", "Sam", NOW))
+    row = store.rows[0]
+    assert got == row["id"] and row["kind"] == "recording" and row["importance"] == "immediate"
+    assert row["title"] == "Call with Northwind Labs is ready"
+    assert row["link"] == "/valr/interviews/past/phone-ab12"
+    assert run(n.from_recording(store, "phone", "ab12", "Northwind Labs", "Sam", NOW)) is None  # Once per recording.
+    run(n.from_recording(store, "phone", "cd34", "", "Sam", NOW))
+    assert store.rows[-1]["title"] == "Call with Sam is ready"
