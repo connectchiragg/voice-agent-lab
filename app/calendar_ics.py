@@ -298,6 +298,13 @@ NOT_COMPANIES = frozenset("me you round r1 r2 r3 interview call meeting min and 
 
 
 
+def is_company_name(name: str) -> bool:
+    """False for round labels and filler ("L2- Alex", "Round 2", "Interview") or the owner's name."""
+    words = re.findall(r"[a-z0-9]+", name.lower())
+    skip = not_company_words()
+    return any(w not in skip and not re.fullmatch(r"(?:l|r|round|level)?\d{1,2}", w) for w in words)
+
+
 def not_company_words() -> frozenset[str]:
     """Generic title words, plus the owner's own name (VALR_OWNER_NAME / VALR_CANDIDATE_NAME)."""
     own = {w.lower() for key in ("VALR_OWNER_NAME", "VALR_CANDIDATE_NAME") for w in os.getenv(key, "").split()}
@@ -311,7 +318,7 @@ def company_name(event: CalEvent) -> str:
         if match:
             name = match.group("c").strip(" -|:,.")
             name = re.sub(r"\s+(Software )?(Private|Pvt\.?)( Limited| Ltd\.?)?$", "", name, flags=re.I)
-            if len(name) >= 2 and not set(name.lower().split()) <= not_company_words():
+            if len(name) >= 2 and is_company_name(name):
                 return name
     domain = company_domain(event)
     if domain:

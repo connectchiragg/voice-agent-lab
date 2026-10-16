@@ -190,7 +190,14 @@ p { margin: 0.4em 0; }
 .embed { position: relative; aspect-ratio: 16 / 9; background: var(--carbon); border: 1px solid var(--hairline); margin-bottom: 10px; }
 .embed-wait { display: grid; place-items: center; text-align: center; }
 .embed-wait .muted { display: grid; justify-items: center; gap: 8px; }
-.embed iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; }
+.player-box { position: relative; aspect-ratio: 16 / 9; background: #000; border: 1px solid var(--hairline); margin-bottom: 10px; overflow: hidden; }
+.player-box video { position: absolute; inset: 0; width: 100%; height: 100%; background: #000; }
+.player-box video[hidden] { display: none; }
+.player-wait { position: absolute; inset: 0; display: grid; place-content: center; justify-items: center; gap: 8px; padding: 16px; text-align: center; background: var(--carbon); }
+.player-wait[hidden] { display: none; }
+.player-alt { margin: 0 0 4px; }
+.moment-seek { flex: none; min-width: 4.5ch; padding: 0; border: 0; background: none; color: var(--ice, inherit); font: inherit; text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
+.moment-seek:hover, .moment-seek:focus-visible { text-decoration-thickness: 2px; }
 .lead-text { font-size: 1.0625rem; }
 .cues { list-style: none; padding: 0; margin: 10px 0 0; display: grid; gap: 10px; }
 .cue { display: grid; grid-template-columns: 22px minmax(0, 1fr); gap: 8px; }

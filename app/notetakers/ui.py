@@ -12,7 +12,7 @@ STATE = {  # -> (label, tone)
     "connected": ("Connected", "ok"), "server": ("Connected · server key", "ok"),
     "refused": ("Key refused · reconnect", "bad"), "not_connected": ("Not connected", "muted"),
 }
-VIDEO = {"embed": "Plays the recording right here", "link": "Opens the recording in Fireflies",
+VIDEO = {"player": "Plays the recording right here", "link": "Opens the recording in Fireflies",
          "none": "Notes and transcript only (Granola keeps no recording)"}
 ORDER = ("fathom", "fireflies", "granola")
 
@@ -77,9 +77,7 @@ def cards(notetakers: dict[str, dict[str, Any]]) -> str:
     <div class="nt-row"><button class="btn small primary" type="submit">Save and test key</button>
     <button class="btn small ghost" type="button" data-connect-cancel="{name}">Cancel</button></div>
   </form>"""
-        hint = (f'<p class="small nt-hint">{e(s["share_hint"])} <a class="src" href="{e(s["share_help"])}" '
-                f'target="_blank" rel="noopener noreferrer">Fathom sharing settings ↗</a></p>'
-                if s.get("share_hint") else "")
+        hint = ""
         if s.get("optional"):
             hint += '<p class="small nt-hint">API connect: needs a Granola Business or Enterprise plan.</p>'
         upload = ""
@@ -102,7 +100,7 @@ def cards(notetakers: dict[str, dict[str, Any]]) -> str:
 
 
 def recording_section(ref: str) -> str:
-    """A past interview's recording; static/valr.js fills it when the detail view opens."""
+    """A past interview's recording; static/valr-player.js fills it when the detail view opens."""
     return (f'<section class="d-sec recording" data-recording-ref="{e(ref)}" aria-live="polite">'
             '<h3>Recording</h3><p class="muted small" data-recording-body>Looking for the recording in your '
             'notetakers… (needs JavaScript)</p></section>')

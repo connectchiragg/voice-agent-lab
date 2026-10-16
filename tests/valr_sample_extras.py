@@ -19,12 +19,16 @@ def sample_leads(now: datetime | None = None, gmail: bool = True) -> dict:
     return view
 
 
-def sample_recording_row(interview_id: str, embed: bool = True) -> dict:
-    """A stored recording (app/notetakers/store.py's fields the page uses), made-up links."""
+def sample_recording_row(interview_id: str, company: str = "", domain: str = "",
+                         interviewers: tuple[str, ...] = ()) -> dict:
+    """A stored recording (app/notetakers/store.py's fields the page uses), made-up links and people."""
+    import json
     provider, _, external_id = interview_id.partition(":")
-    return {"provider": provider, "title": "Interview recording",
-            "share_url": f"https://fathom.video/share/sample-{external_id}",
-            "embed_url": f"https://fathom.video/embed/sample-{external_id}" if embed else ""}
+    return {"provider": provider, "external_id": external_id, "title": "Interview recording",
+            "share_url": f"https://fathom.video/calls/{external_id}",
+            "company": company, "company_domain": domain,
+            "interviewers": json.dumps(list(interviewers)) if interviewers else "", "invitee_hashes": "",
+            "event_company": ""}
 
 
 def with_extras(perf: dict) -> dict:

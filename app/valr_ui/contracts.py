@@ -17,8 +17,8 @@ the owner sees them) and returns a small, stable dict the pages render.
 - Coach and impressions (valr-eval, performance.json schema 3): mapped by
   app/valr_view.coach_view and impression_view (not here).
 - Recording (valr-notetakers, a stored row of app/notetakers/store.py): {"provider",
-  "share_url" | "url", "embed_url", "title"}; the embed is used only from an allow-listed
-  https host.
+  "share_url" | "url", "title"}; an https link only. A Fathom recording plays in the page
+  from Fathom's download API (GET /valr/api/recording/media, static/valr-player.js).
 - Notetakers (valr-notetakers, view["connections"]["notetakers"] = notetakers.status_view):
   {"fathom" | "fireflies" | "granola": {"label", "state": connected | server | refused |
   not_connected, "account", "connected_at", "last_ok_at", "optional", ...}}.
@@ -26,7 +26,6 @@ the owner sees them) and returns a small, stable dict the pages render.
 import re
 from datetime import datetime, timezone
 from typing import Any
-from urllib.parse import urlsplit
 
 EMAIL = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
 PHONE = re.compile(r"\+\d[\d\s().-]{7,}\d|\(\d{3}\)\s?\d{3}[-.\s]\d{4}|\b\d{3}[-.\s]\d{3}[-.\s]\d{4}\b"
@@ -39,8 +38,6 @@ STAGE_ALIASES = {"new": "sourced", "lead": "sourced", "screen": "screening", "re
                  "rejected": "closed", "declined": "closed", "withdrawn": "closed", "archived": "closed"}
 STAGE_LABELS = {"closed-won": "Won", "closed-lost": "Not moving forward", "ghosted": "Gone quiet"}
 WAITING_DAYS = 10  # Their email is the latest touch and is this recent: the ball is in his court.
-EMBED_HOSTS = {"fathom.video", "app.fireflies.ai", "share.fireflies.ai", "app.granola.ai",
-               "notes.granola.ai"}
 NOTETAKER_STATE = {"connected": "connected", "server": "connected", "refused": "error",
                    "not_connected": "not_connected"}
 NOTETAKERS = [("fathom", "Fathom"), ("fireflies", "Fireflies"), ("granola", "Granola")]
@@ -191,17 +188,14 @@ def leads(raw: Any, now: datetime | None = None) -> dict[str, Any]:
 
 
 def recording(raw: Any, interview: dict[str, Any] | None = None) -> dict[str, Any] | None:
-    """A link to the recording, and an embed URL only from a known notetaker host."""
+    """A link to the recording (https only), its provider's label and whether it plays here."""
     raw = raw if isinstance(raw, dict) else {}
     url = https(raw.get("url") or raw.get("share_url") or (interview or {}).get("recording_url"))
-    embed = https(raw.get("embed_url"))
-    if embed and (urlsplit(embed).hostname or "") not in EMBED_HOSTS:
-        embed = ""
-    if not (url or embed):
+    if not url:
         return None
     provider = text(raw.get("provider") or (interview or {}).get("source"), 30).lower()
     return {"provider": dict(NOTETAKERS).get(provider, provider.capitalize() or "Recording"),
-            "url": url, "embed_url": embed, "title": text(raw.get("title"), 120)}
+            "url": url, "title": text(raw.get("title"), 120), "player": provider == "fathom"}
 
 
 def account(value: Any) -> str:

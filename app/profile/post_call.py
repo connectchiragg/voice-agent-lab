@@ -234,6 +234,11 @@ def add_to_performance(cfg: Settings, scored: dict, llm: JsonLLM | None,
         perf = json.loads(source.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         perf = {}
+    if source != cfg.performance_fallback and cfg.performance_fallback is not None:
+        try:  # Impressions added to the read-only copy after the live one was seeded.
+            perf = impressions.merge_missing(perf, json.loads(cfg.performance_fallback.read_text(encoding="utf-8")))
+        except (OSError, ValueError):
+            pass
     interviews_ = [iv for iv in perf.get("interviews") or [] if iv.get("interview_id") != scored["interview_id"]]
     new = performance.build(interviews_ + [scored], perf.get("recurring_weak_topics") or [])
     new = performance.with_coach(new, llm, cfg.evaluator_model, cfg.candidate_name, comp,

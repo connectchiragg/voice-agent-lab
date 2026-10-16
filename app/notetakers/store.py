@@ -9,7 +9,13 @@
   calendar event it matched (its key, title, company and start are copied here, because
   calendar_events keeps only 3 days of the past), and the evaluation hand-off status. `sealed` holds the
   normalised meeting (transcript included) as Fernet ciphertext only until the
-  evaluation took it; `clear_sealed` drops it.
+  evaluation took it; `clear_sealed` drops it. Fathom's calendar invitees add `company`,
+  `company_domain` and `interviewers` (the external invitees' names), kept here because
+  the calendar keeps only 3 days of the past; `invitee_hashes` holds a short SHA-256 of
+  each external invitee's email (never the address), to match a Gmail lead's contacts.
+- `recording_media`: the provider's signed download of a recording (Fathom's official
+  download API, app/notetakers/media.py): its status and the signed URL, sealed with
+  VALR_TOKEN_KEY like the keys, until it expires.
 """
 import json
 from datetime import datetime
@@ -46,13 +52,31 @@ CREATE TABLE IF NOT EXISTS notetaker_recordings (
 ALTER TABLE notetaker_recordings ADD COLUMN IF NOT EXISTS event_title text;
 ALTER TABLE notetaker_recordings ADD COLUMN IF NOT EXISTS event_company text;
 ALTER TABLE notetaker_recordings ADD COLUMN IF NOT EXISTS event_start timestamptz;
+ALTER TABLE notetaker_recordings ADD COLUMN IF NOT EXISTS company text;
+ALTER TABLE notetaker_recordings ADD COLUMN IF NOT EXISTS company_domain text;
+ALTER TABLE notetaker_recordings ADD COLUMN IF NOT EXISTS interviewers text;    -- JSON list of names
+ALTER TABLE notetaker_recordings ADD COLUMN IF NOT EXISTS invitee_hashes text;  -- JSON list
+CREATE TABLE IF NOT EXISTS recording_media (
+    provider      text NOT NULL,
+    external_id   text NOT NULL,
+    download_id   text,
+    status        text NOT NULL,            -- processing | completed | failed | expired | unavailable
+    url           text,                     -- Fernet ciphertext (VALR_TOKEN_KEY) of the signed URL
+    content_type  text,
+    size          bigint,
+    expires_at    timestamptz,
+    error         text,
+    updated_at    timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (provider, external_id)
+);
 CREATE INDEX IF NOT EXISTS notetaker_recordings_by_start ON notetaker_recordings (started_at);
 CREATE INDEX IF NOT EXISTS notetaker_recordings_by_event ON notetaker_recordings (event_key);
 """
 
 FIELDS = ("provider", "external_id", "title", "started_at", "ended_at", "share_url", "embed_url",
           "event_key", "origin", "received_at", "eval_status", "eval_detail", "event_title",
-          "event_company", "event_start")
+          "event_company", "event_start", "company", "company_domain", "interviewers", "invitee_hashes")
+DETAILS = ("company", "company_domain", "interviewers", "invitee_hashes")
 
 
 async def setup(connection: Any) -> None:
@@ -112,20 +136,42 @@ async def upsert_recording(connection: Any, recording: dict[str, Any], origin: s
     """Insert or refresh one recording's links; True when it is new."""
     cursor = await connection.execute(
         "INSERT INTO notetaker_recordings (provider, external_id, title, started_at, ended_at, share_url, "
-        "embed_url, origin, sealed) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) "
+        "embed_url, origin, sealed, company, company_domain, interviewers, invitee_hashes) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
         "ON CONFLICT (provider, external_id) DO UPDATE SET title = excluded.title, "
         "started_at = COALESCE(excluded.started_at, notetaker_recordings.started_at), "
         "ended_at = COALESCE(excluded.ended_at, notetaker_recordings.ended_at), "
         "share_url = COALESCE(NULLIF(excluded.share_url, ''), notetaker_recordings.share_url), "
         "embed_url = COALESCE(NULLIF(excluded.embed_url, ''), notetaker_recordings.embed_url), "
+        + "".join(f"{c} = COALESCE(NULLIF(excluded.{c}, ''), notetaker_recordings.{c}), " for c in DETAILS) +
         "sealed = CASE WHEN notetaker_recordings.eval_status = 'handed_off' THEN NULL "
         "ELSE COALESCE(excluded.sealed, notetaker_recordings.sealed) END "
         "RETURNING (xmax = 0)",
         (recording["provider"], recording["external_id"], recording.get("title", "")[:300],
          _dt(recording.get("start")), _dt(recording.get("end")), recording.get("share_url", ""),
-         recording.get("embed_url", ""), origin, sealed))
+         recording.get("embed_url", ""), origin, sealed, *details_values(recording)))
     row = await cursor.fetchone()
     return bool(row and row[0])
+
+
+def details_values(recording: dict[str, Any]) -> tuple[str, str, str, str]:
+    """(company, company_domain, interviewers JSON, invitee_hashes JSON); "" when unknown."""
+    names, hashes = recording.get("interviewers") or [], recording.get("invitee_hashes") or []
+    return (str(recording.get("company") or "")[:120], str(recording.get("company_domain") or "")[:120],
+            json.dumps(names[:8]) if names else "", json.dumps(hashes[:12]) if hashes else "")
+
+
+async def set_details(connection: Any, recording: dict[str, Any]) -> bool:
+    """Fill the invitee details of a recording VALR already stores (backfill); True when updated."""
+    values = details_values(recording)
+    if not any(values):
+        return False
+    cursor = await connection.execute(
+        "UPDATE notetaker_recordings SET "
+        + ", ".join(f"{c} = COALESCE(NULLIF(%s, ''), {c})" for c in DETAILS)
+        + " WHERE provider = %s AND external_id = %s",
+        (*values, recording["provider"], recording["external_id"]))
+    return bool(getattr(cursor, "rowcount", 0))
 
 
 def _dt(value: Any) -> datetime | None:
@@ -170,6 +216,26 @@ async def recording(connection: Any, provider: str, external_id: str) -> dict[st
     return dict(zip(FIELDS, row)) if row else None
 
 
+async def many(connection: Any, keys: list[tuple[str, str]]) -> dict[tuple[str, str], dict[str, Any]]:
+    """Stored rows for these (provider, external_id) pairs, by pair."""
+    if not keys:
+        return {}
+    cursor = await connection.execute(
+        f"SELECT {', '.join(FIELDS)} FROM notetaker_recordings "
+        "WHERE (provider || ':' || external_id) = ANY(%s)", ([f"{p}:{i}" for p, i in keys],))
+    rows = [dict(zip(FIELDS, row)) for row in await cursor.fetchall()]
+    return {(r["provider"], r["external_id"]): r for r in rows}
+
+
+def names(row: dict[str, Any] | None, field: str = "interviewers") -> list[str]:
+    """A JSON list column -> list of strings ([] when empty or unreadable)."""
+    try:
+        value = json.loads((row or {}).get(field) or "[]")
+    except ValueError:
+        return []
+    return [str(x) for x in value if isinstance(x, str)] if isinstance(value, list) else []
+
+
 async def by_event(connection: Any, event_key: str) -> dict[str, Any] | None:
     cursor = await connection.execute(
         f"SELECT {', '.join(FIELDS)} FROM notetaker_recordings WHERE event_key = %s "
@@ -201,3 +267,27 @@ async def sealed_meeting(connection: Any, token_key: str, provider: str, externa
 async def clear_sealed(connection: Any, provider: str, external_id: str) -> None:
     await connection.execute("UPDATE notetaker_recordings SET sealed = NULL "
                              "WHERE provider = %s AND external_id = %s", (provider, external_id))
+
+
+# Recording media (signed downloads).
+
+MEDIA_FIELDS = ("download_id", "status", "url", "content_type", "size", "expires_at", "error", "updated_at")
+
+
+async def get_media(connection: Any, provider: str, external_id: str) -> dict[str, Any] | None:
+    """The stored download (url still sealed), or None."""
+    cursor = await connection.execute(
+        f"SELECT {', '.join(MEDIA_FIELDS)} FROM recording_media WHERE provider = %s AND external_id = %s",
+        (provider, external_id))
+    row = await cursor.fetchone()
+    return dict(zip(MEDIA_FIELDS, row)) if row else None
+
+
+async def save_media(connection: Any, provider: str, external_id: str, media: dict[str, Any]) -> None:
+    """Insert or replace one download; `media["url"]` must already be sealed (or None)."""
+    values = [media.get(k) for k in MEDIA_FIELDS[:-1]]
+    await connection.execute(
+        f"INSERT INTO recording_media (provider, external_id, {', '.join(MEDIA_FIELDS[:-1])}, updated_at) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, now()) ON CONFLICT (provider, external_id) DO UPDATE SET "
+        + ", ".join(f"{k} = excluded.{k}" for k in MEDIA_FIELDS[:-1]) + ", updated_at = now()",
+        (provider, external_id, *values))
