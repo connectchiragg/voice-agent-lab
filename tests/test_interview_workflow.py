@@ -229,14 +229,13 @@ async def start_block(env, start: datetime, on_demand=False) -> WorkflowHandle:
                                            task_queue=TASK_QUEUE)
 
 
-def test_block_calls_at_t15_t10_t5_then_stops():
+def test_block_calls_once_at_t30_with_no_retries():
     async def test(env, fakes):
         now = await env.get_current_time()
         start = now + timedelta(hours=1)
         status = await (await start_block(env, start)).result()
-        assert status.state == "unanswered" and len(fakes.dials) == 3
-        offsets = [round((start - at).total_seconds() / 60) for at, _ in fakes.dials]
-        assert offsets == [15, 10, 5]
+        assert status.state == "unanswered" and status.detail == "no answer" and len(fakes.dials) == 1
+        assert round((start - fakes.dials[0][0]).total_seconds() / 60) == 30
         assert {b.budget for b in fakes.budgets} == {"briefing"}
         assert {b.limit for b in fakes.budgets} == {12}
         assert fakes.dials[0][1].research_job == "block:briefing-x"
@@ -247,9 +246,31 @@ def test_block_stops_after_an_answer():
     async def test(env, fakes):
         start = await env.get_current_time() + timedelta(hours=1)
         status = await drive(env, await start_block(env, start), fakes)
-        assert status.state == "briefed" and len(fakes.dials) == 2
+        assert status.state == "briefed" and len(fakes.dials) == 1
         assert fakes.records[-1].state == "briefed"
-    run(test, answer_on=2)
+    run(test, answer_on=1)
+
+
+def test_a_late_interview_is_called_once_research_is_ready_with_five_minutes_left():
+    async def test(env, fakes):
+        now = await env.get_current_time()
+        start = now + timedelta(minutes=20)  # Added after T-30.
+        handle = await start_block(env, start)
+        await env.sleep(timedelta(minutes=3))
+        assert fakes.dials == []  # Research not ready yet.
+        fakes.is_ready = True
+        status = await drive(env, handle, fakes)
+        assert status.state == "briefed" and len(fakes.dials) == 1
+        assert timedelta(minutes=15) <= start - fakes.dials[0][0] <= timedelta(minutes=17, seconds=30)
+    run(test, ready=False, answer_on=1)
+
+
+def test_no_call_with_under_five_minutes_left():
+    async def test(env, fakes):
+        now = await env.get_current_time()
+        status = await (await start_block(env, now + timedelta(minutes=8))).result()
+        assert status.state == "missed" and fakes.dials == []
+    run(test, ready=False)
 
 
 def test_cancelled_block_never_dials():
@@ -312,16 +333,16 @@ def test_paused_automatic_calls_never_dial():
     run(test, paused=True)
 
 
-def test_resuming_before_t5_still_calls():
+def test_resuming_before_t30_still_calls():
     async def test(env, fakes):
         start = await env.get_current_time() + timedelta(hours=1)
         handle = await start_block(env, start)
-        await env.sleep(timedelta(minutes=47))  # Past T-15 (skipped while paused).
+        await env.sleep(timedelta(minutes=10))
         fakes.paused = False
         status = await drive(env, handle, fakes)
         assert status.state == "briefed" and len(fakes.dials) == 1
-        assert round((start - fakes.dials[0][0]).total_seconds() / 60) == 10
-    run(test, paused=True, answer_on=2)
+        assert round((start - fakes.dials[0][0]).total_seconds() / 60) == 30
+    run(test, paused=True, answer_on=1)
 
 
 def test_pause_does_not_stop_a_callback_the_owner_asked_for():
@@ -331,3 +352,41 @@ def test_pause_does_not_stop_a_callback_the_owner_asked_for():
         status = await drive(env, handle, fakes)
         assert status.state == "briefed" and len(fakes.dials) == 1
     run(test, paused=True, answer_on=1)
+
+
+def test_call_now_signals_at_once_and_picks_the_next_interview():
+    from app import call_now
+
+    class Client:
+        def __init__(self):
+            self.started, self.signals = [], []
+
+        async def start_workflow(self, run, request, **kwargs):
+            self.started.append((kwargs["id"], request))
+            client = self
+
+            class Handle:
+                async def signal(self, signal, *args, **kw):
+                    client.signals.append(kwargs["id"])
+            return Handle()
+
+        def get_workflow_handle(self, workflow_id):
+            client = self
+
+            class Handle:
+                async def signal(self, signal, *args, **kw):
+                    client.signals.append(workflow_id)
+            return Handle()
+
+    now = datetime(2026, 10, 16, 6, 0, tzinfo=timezone.utc)
+    past, soon, later = (event(now - timedelta(hours=1)), event(now + timedelta(hours=2)),
+                         event(now + timedelta(hours=5)))
+    soon.key, later.key, past.key = "soon", "later", "past"
+    assert call_now.pick([later, past, soon], "next", now).key == "soon"
+    assert call_now.pick([later, soon], "later", now).key == "later"
+    client = Client()
+    workflow_id = asyncio.run(call_now.call_now(client, soon, OWNER, OWNER.removeprefix("tel:"), False))
+    ids = [i for i, _ in client.started]
+    assert ids[0].startswith("slot-") and ids[1] == workflow_id  # Research first, then the call.
+    request = client.started[1][1]
+    assert request.on_demand and request.ready_keys == ["soon"] and workflow_id in client.signals

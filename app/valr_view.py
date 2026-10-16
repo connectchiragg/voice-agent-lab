@@ -24,7 +24,7 @@ from typing import Any
 from app import calendar_sync, google_oauth, interview_store, interviews, research_jobs
 from app.interview_types import (TOOL_DOMAINS, SlotEvent, attendee_role, group_blocks, people,
                                  slot_workflow_id)
-from app.interview_workflow import CALL_LEADS, RESEARCH_LEAD
+from app.interview_workflow import MIN_LEFT_TO_CALL, RESEARCH_LEAD, SINGLE_CALL_LEAD
 
 logger = logging.getLogger("uvicorn.error")
 LOOK_BACK = timedelta(hours=12)
@@ -132,6 +132,18 @@ def strings(values: Any, limit: int) -> list[str]:
     return [scrub(v) for v in (values or []) if isinstance(v, str) and v.strip()][:limit]
 
 
+def questions(values: Any, limit: int) -> list[str]:
+    """likely_questions: [{question, why_likely, source_url?}] (or plain strings) -> lines."""
+    out = []
+    for value in values or []:
+        if isinstance(value, dict) and str(value.get("question") or "").strip():
+            why = str(value.get("why_likely") or "").strip()
+            out.append(scrub(value["question"] + (f" ({why})" if why else "")))
+        elif isinstance(value, str) and value.strip():
+            out.append(scrub(value))
+    return out[:limit]
+
+
 def interview_detail(parts: dict[str, Any], company: dict[str, Any] | None) -> dict[str, Any]:
     """What one interview's detail view shows, in the owner's terms.
 
@@ -156,12 +168,14 @@ def interview_detail(parts: dict[str, Any], company: dict[str, Any] | None) -> d
         url = str(pay_range.get("source_url") or "")
         pay_range = {"min": pay_range.get("min"), "max": pay_range.get("max"),
                      "unit": scrub(pay_range.get("unit") or ""), "currency": scrub(pay_range.get("currency") or ""),
+                     "level": scrub(pay_range.get("level") or ""),
+                     "confidence": scrub(pay_range.get("confidence") or ""),
                      "source_url": url if url.startswith(("https://", "http://")) else ""}
     return {"from_you": findings(parts.get("private")),
             "round": findings(parts.get("round")),
             "people": merged([findings(b) for b in (parts.get("interviewers_by_email") or {}).values()]),
             "company": found_company,
-            "likely_questions": strings(raw_round.get("likely_questions"), 8),
+            "likely_questions": questions(raw_round.get("likely_questions"), 8),
             "prep": strings(raw_round.get("prep"), 6),
             "pay": {"range": pay_range, "claims": pay_claims}}
 
@@ -208,16 +222,17 @@ def cache_hits(jobs: list[dict[str, Any]]) -> list[str]:
 
 
 def next_call(blocks: list[dict[str, Any]], now: datetime, paused: bool) -> dict[str, Any] | None:
-    """The next automatic briefing dial (T-15, else the next of T-10/T-5 still ahead)."""
+    """The next automatic briefing dial: one call at T-30 (no retries); a block added
+    later than that is called once its research is ready, while 5 minutes are left."""
     for block in blocks:
         if block["state"] in FINAL_BLOCK or paused:
             continue
         start = parse(block["start"])
-        for lead in CALL_LEADS:
-            due = start - lead
-            if due > now:
-                return {"block": block["id"], "at": iso(due), "label": block["label"],
-                        "attempt": CALL_LEADS.index(lead) + 1}
+        due = start - SINGLE_CALL_LEAD
+        if due > now:
+            return {"block": block["id"], "at": iso(due), "label": block["label"], "attempt": 1}
+        if start - MIN_LEFT_TO_CALL > now:
+            return {"block": block["id"], "at": iso(now), "label": block["label"], "attempt": 1}
     return None
 
 
@@ -514,7 +529,7 @@ def build_blocks(events: list[SlotEvent], recorded: dict[str, dict[str, Any]],
             r["company"] or r["title"] for r in rows)[:120]
         blocks.append({"id": plan.block_id, "start": iso(parse(plan.start_utc)),
                        "end": iso(parse(plan.end_utc)), "label": label,
-                       "state": state, "call_at": iso(parse(plan.start_utc) - CALL_LEADS[0]),
+                       "state": state, "call_at": iso(parse(plan.start_utc) - SINGLE_CALL_LEAD),
                        "paused": paused, "slots": rows})
     return blocks
 

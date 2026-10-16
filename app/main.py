@@ -142,6 +142,12 @@ async def home(request: Request) -> FileResponse | RedirectResponse:
     return FileResponse(ROOT / "static/index.html")
 
 
+@app.get("/call", response_model=None)
+async def call_page() -> FileResponse:
+    """The browser call page, on any host (valr.haciensus.com/call after voice.* goes)."""
+    return FileResponse(ROOT / "static/index.html")
+
+
 @app.get("/healthz")
 async def health() -> dict[str, bool]:
     """Liveness for container hosts; `speech` is false without a Deepgram key."""

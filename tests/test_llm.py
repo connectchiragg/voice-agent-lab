@@ -266,3 +266,19 @@ def test_time_note_in_twelve_hour_form():
     from zoneinfo import ZoneInfo
     note = llm.time_note(datetime(2026, 10, 12, 20, 9, tzinfo=ZoneInfo("Asia/Kolkata")))
     assert note.endswith("Monday, 12 October 2026, 8:09 PM (Asia/Kolkata).")
+
+def test_a_fetched_brief_stays_in_the_conversation_append_only():
+    history = [turn("user", "brief me"),
+               turn("model", "", tool_calls=[{"id": "b1", "name": "get_briefing", "arguments": "{}"}]),
+               turn("tool", '{"ready": ["brief"]}', tool_call_id="b1"),
+               turn("model", "Here is your brief."),
+               turn("user", "what was the pay range?")]
+    first = llm.to_chat_messages(history[:3])
+    later = llm.to_chat_messages(history)
+    # The brief's call and result are still there, at the same position.
+    assert later[:3] == first[:2] + [later[2]] and later[2]["role"] == "assistant"
+    assert later[3] == {"role": "tool", "tool_call_id": "b1", "content": '{"ready": ["brief"]}'}
+    assert first[1:2] == later[1:2]
+    # Other tools' results still drop after their turn.
+    history[1]["tool_calls"][0]["name"] = "get_weather"
+    assert all(m["role"] != "tool" for m in llm.to_chat_messages(history))

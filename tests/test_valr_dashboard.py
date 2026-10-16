@@ -192,8 +192,10 @@ def test_builders():
     assert "@" not in json.dumps(rows)
     blocks = [{"id": "b", "start": start.isoformat(), "state": "waiting", "label": "L"}]
     nxt = valr_view.next_call(blocks, start - timedelta(hours=1), paused=False)
-    assert nxt["at"] == (start - timedelta(minutes=15)).isoformat() and nxt["attempt"] == 1
-    assert valr_view.next_call(blocks, start - timedelta(minutes=12), False)["attempt"] == 2
+    assert nxt["at"] == (start - timedelta(minutes=30)).isoformat() and nxt["attempt"] == 1
+    late = start - timedelta(minutes=12)  # Past T-30: as soon as research is ready.
+    assert valr_view.next_call(blocks, late, False)["at"] == late.isoformat()
+    assert valr_view.next_call(blocks, start - timedelta(minutes=4), False) is None
     assert valr_view.next_call(blocks, start - timedelta(hours=1), paused=True) is None
     assert valr_view.cache_hits([{"status": "done", "detail": "cache: company"},
                                  {"status": "cached", "detail": "slot research reused"}]) == \

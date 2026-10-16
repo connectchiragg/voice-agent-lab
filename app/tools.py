@@ -211,6 +211,16 @@ TOOLS = {tool.name: tool for tool in (
              "type": "string", "description": "today, tomorrow, a weekday, or YYYY-MM-DD"}},
           "required": ["day"]},
          interviews.get_calendar, takes_call=True, owner_only=True),
+    Tool("get_briefing",
+         "The owner's ready interview briefs (brief, notes, likely questions, prep, market pay) "
+         "for his next interview, a day, or a company, to give on this call. Use it first when he "
+         "asks about an interview or to be briefed.",
+         {"type": "object", "properties": {
+             "day": {"type": "string", "description": "next (default), today, tomorrow, a weekday, "
+                     "or YYYY-MM-DD"},
+             "company": {"type": "string", "description": "Only this company's interview, if named"}},
+          "required": []},
+         interviews.get_briefing, takes_call=True, owner_only=True),
     Tool("research_interviews",
          "Research the owner's interviews on a day (optionally only one company) after this call "
          "and call him back with a briefing; or refresh research already done. Two steps: call it "

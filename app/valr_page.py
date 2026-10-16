@@ -150,7 +150,7 @@ def next_call_card(view: dict[str, Any], clock: Clock) -> str:
     if not nxt:
         return ('<div class="feature"><p class="mono label">Next briefing call</p><p class="feature-big">None yet</p>'
                 '<p class="muted">No interviews in the next 8 days. When an invite lands on your calendar, '
-                'VALR plans a call for 15 minutes before it.</p></div>')
+                'VALR plans a call for 30 minutes before it.</p></div>')
     block = next((b for b in view["blocks"] if b["id"] == nxt["block"]), None)
     n = len(block["slots"]) if block else 1
     who = ", ".join(dict.fromkeys(s["company"] or s["title"] for s in block["slots"])) if block else nxt["label"]
@@ -181,11 +181,13 @@ def hero(view: dict[str, Any], clock: Clock) -> str:
   <div class="hero-copy">
     {eyebrow("00", "Interview copilot")}
     <h1 id="hero-title">Walk into every interview <span class="dim">already briefed<span class="accent">.</span></span></h1>
-    <p class="lede">VALR calls you 15 minutes before each interview with a researched briefing: who you're
+    <p class="lede">VALR calls you 30 minutes before each interview with a researched briefing: who you're
     meeting, what this round is like, the pay band, and what to practise.</p>
     <div class="actions">
       <a class="btn primary" href="tel:{e(number)}"><span aria-hidden="true">☎</span> Call VALR now <span class="btn-sub num">{e(phone_label(number))}</span></a>
       {pause}
+      <button class="btn" type="button" data-action="callnow">Call me now</button>
+      <a class="btn" href="/call">Talk in the browser</a>
       <button class="btn" type="button" data-action="sync">Sync calendar</button>
     </div>
   </div>

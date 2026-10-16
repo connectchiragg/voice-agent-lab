@@ -36,6 +36,9 @@ SYSTEM_PROMPT = (
 # chunks, so the prefix changes rarely.
 MAX_CALL_MESSAGES = 80
 TRIM_CHUNK = 40
+# Tool results the rest of the call needs (a brief, its notes): kept after their turn, in
+# place, so the history stays append-only. Other tools' results are dropped after their turn.
+KEEP_RESULTS = frozenset({"get_briefing", "research_interviews"})
 CUT_OFF_NOTE = "\n[Your reply was cut off here; the user heard only this much.]"
 DEFAULT_MODEL = "openai/gpt-oss-120b"
 # Hedge for stalled requests: a separate Groq rate-limit bucket, same prompt and tool format.
@@ -80,6 +83,13 @@ def time_note(now: datetime | None = None) -> str:
     return f"The user's local time is {now:%A, %d %B %Y}, {hour}:{now:%M %p} ({zone})."
 
 
+def kept_answered(turns: list[Any], kept: set[str]) -> set[str]:
+    """Kept calls whose assistant message is still in the window (a trimmed call's result
+    must go too: the API rejects a result without its call)."""
+    present = {call["id"] for turn in turns for call in turn.get("tool_calls", [])}
+    return kept & present
+
+
 def window(earlier: list[Any]) -> list[Any]:
     """Every earlier dialogue message, unless the call is very long: then the oldest go in
     chunks of TRIM_CHUNK, so the cached prefix changes once per chunk, not every turn."""
@@ -107,8 +117,12 @@ def to_chat_messages(history: Sequence[Any], caller_memory: str = "",
     # Drop earlier tool exchanges whole, including words said before a call such as
     # "Let me check that.": kept alone, they teach the model to promise a lookup
     # and answer without calling a tool.
+    kept = {call["id"] for turn in history[:current] for call in turn.get("tool_calls", [])
+            if call["name"] in KEEP_RESULTS}
     earlier = [turn for turn in history[:current]
-               if turn["role"] != "tool" and not turn.get("tool_calls")]
+               if (turn["role"] != "tool" and not turn.get("tool_calls"))
+               or (turn["role"] == "tool" and turn.get("tool_call_id") in kept)
+               or any(call["id"] in kept for call in turn.get("tool_calls", []))]
     turns = window(earlier) + list(history[current:])
     answered = {turn["tool_call_id"] for turn in turns if turn["role"] == "tool"}
     system = system_prompt() + (f"\n\n{caller_memory}" if caller_memory else "")
@@ -117,7 +131,8 @@ def to_chat_messages(history: Sequence[Any], caller_memory: str = "",
     for index, turn in enumerate(turns):
         text = turn["parts"][0]["text"]
         if turn["role"] == "tool":
-            messages.append({"role": "tool", "tool_call_id": turn["tool_call_id"], "content": text})
+            if index >= first_current or turn["tool_call_id"] in kept_answered(turns, kept):
+                messages.append({"role": "tool", "tool_call_id": turn["tool_call_id"], "content": text})
             continue
         if turn["role"] == "user":
             messages.append({"role": "user", "content": text})
@@ -127,8 +142,8 @@ def to_chat_messages(history: Sequence[Any], caller_memory: str = "",
         if turn.get("status") == "interrupted":
             text += CUT_OFF_NOTE
         message: dict[str, Any] = {"role": "assistant", "content": text}
-        calls = [call for call in turn.get("tool_calls", []) if call["id"] in answered] \
-            if index >= first_current else []
+        calls = [call for call in turn.get("tool_calls", []) if call["id"] in answered
+                 and (index >= first_current or call["id"] in kept)]
         if calls:
             message["tool_calls"] = [{"id": call["id"], "type": "function", "function": {
                 "name": call["name"], "arguments": call["arguments"]}} for call in calls]

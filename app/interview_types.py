@@ -188,3 +188,23 @@ def group_blocks(events: list[SlotEvent]) -> list[BlockPlan]:
                                     [event.key]))
             end = stop
     return blocks
+
+
+def fingerprint(event: SlotEvent, owners: set[str] | frozenset[str] = frozenset()) -> str:
+    """Changes whenever an input to the research changes (stored with the research)."""
+    text = "|".join([event.key, event.company, event.company_domain, event.start_utc, event.title,
+                     " ".join(event.description.split()),
+                     ",".join(sorted(p.email.lower() for p in people(event, owners)))])
+    return hashlib.sha256(text.encode()).hexdigest()[:16]
+
+
+def brief_is_current(event: SlotEvent, slot: dict, owners: set[str] | frozenset[str] = frozenset()) -> bool:
+    """A finished brief whose inputs are unchanged. A time-only move does not need new
+    research, so the check uses the start the research was done for."""
+    if not slot or slot.get("status") not in ("done", "partial") or not slot.get("spoken"):
+        return False
+    start = slot.get("start_utc")
+    researched_start = start.isoformat() if hasattr(start, "isoformat") else str(start or event.start_utc)
+    from dataclasses import replace
+    stored = (slot.get("parts") or {}).get("_fingerprint")
+    return stored == fingerprint(replace(event, start_utc=researched_start), owners)
