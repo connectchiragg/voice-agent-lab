@@ -6,11 +6,12 @@ calendar state, the pause flag; Temporal: today's dial counts; the private data 
 the self-evaluation and the score table). Each source fails on its own: a missing
 one becomes an "unavailable" section, never a 500.
 
-Privacy: attendee emails and phone numbers never leave this module. Interviewers are
-shown by name (or "Attendee n"), slots by an opaque reference (the slot workflow's
-hashed id), and every free text shown is passed through `scrub`, which hides
-anything shaped like an email address or a phone number. Comp figures in the
-research notes are shown as stored: the page is owner-only behind Access.
+Privacy: the page is owner-only (Access + JWT) and the events are the owner's, so the
+interview detail lists each attendee's name (or "Attendee n") and email address. Phone
+numbers never leave this module: slots go by an opaque reference (the slot workflow's
+hashed id), and every free text shown (titles, research notes) is passed through
+`scrub`, which hides anything shaped like a phone number or an email address. Comp
+figures in the research notes are shown as stored; none of this is logged.
 """
 import asyncio
 import json
@@ -57,7 +58,7 @@ def parse(text: str) -> datetime:
 
 def interviewer_rows(event: SlotEvent, researched: set[str], research_ran: bool,
                      owners: set[str]) -> list[dict[str, str]]:
-    """Who is on the invite and what VALR did about them, by name only.
+    """Who is on the invite and what VALR did about them: name and email address.
 
     role: interviewer (researched / not an interviewer per the classifier / pending),
     hr (skipped by the recruiting/HR guard). Owner, rooms and tools are left out.
@@ -91,7 +92,7 @@ def interviewer_rows(event: SlotEvent, researched: set[str], research_ran: bool,
             status = "skipped_classifier"
         else:
             status = "pending"
-        rows.append({"name": name, "status": status})
+        rows.append({"name": name, "email": email, "status": status})
     return rows
 
 

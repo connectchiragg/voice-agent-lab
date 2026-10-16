@@ -96,6 +96,7 @@ ul, ol { margin: 0; }
 .person { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
 .avatar { width: 32px; height: 32px; display: grid; place-items: center; border: 1px solid var(--hairline-strong); font: 500 var(--fs-sm)/1 var(--mono); color: var(--ice); flex: none; }
 .who { font-weight: 500; }
+.person .email { color: var(--ash); overflow-wrap: anywhere; }
 .facts, .questions { padding-left: 20px; display: grid; gap: 8px; margin-top: 10px; }
 .facts li, .questions li { overflow-wrap: anywhere; }
 .questions { list-style: none; padding-left: 0; counter-reset: q; }
