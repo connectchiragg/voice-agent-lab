@@ -324,10 +324,10 @@ def test_page_leads_with_the_narrative_and_folds_the_numbers():
     from app.valr_ui import interviews as interview_pages, performance as performance_page
     clock = valr_page.Clock("UTC", datetime(2026, 10, 16, tzinfo=timezone.utc))
     html = performance_page.page(view, clock)
-    order = [html.index(x) for x in ("Where you stand", "What's working", "What's costing you",
-                                     "This week's focus", "The numbers behind this", 'id="perf-chart"')]
+    order = [html.index(x) for x in ('id="chart-overall"', "Where you stand", "What's working", "This week's focus",
+                                     "What's costing you", "All the numbers")]
     assert order == sorted(order)
-    assert '<details class="numbers" id="numbers">' in html  # folded when there is a coach read
+    assert '<details class="numbers" id="numbers">' in html  # the numbers stay folded
     assert "1 post-call report pending" in html and 'href="/valr/interviews/past/fathom-901"' in html
     past = interview_pages.past_detail_page(view, view["performance"]["interviews"][-1], clock)
     assert "How the interviewer reacted" in past
