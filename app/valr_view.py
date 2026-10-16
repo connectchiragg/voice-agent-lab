@@ -328,6 +328,7 @@ def performance(perf: dict[str, Any] | None) -> dict[str, Any]:
             "questions": [{"question": scrub(q.get("question")), "went_well": scrub(q.get("went_well") or ""),
                            "improve": scrub(q.get("improve") or ""), "hint": scrub(q.get("model_answer_hint") or "")}
                           for q in iv.get("question_feedback") or [] if isinstance(q, dict)][:6],
+            "impression": impression_view(iv.get("impression")),
         })
     callouts = perf.get("callouts") if isinstance(perf.get("callouts"), dict) else {}
     most, risk = callouts.get("most_improved"), callouts.get("biggest_risk")
@@ -356,7 +357,90 @@ def performance(perf: dict[str, Any] | None) -> dict[str, Any]:
         "trend_text": scrub(perf.get("trend_text") or ""),
         "generated_at": perf.get("generated_at"),
         "available": bool(interviews),
+        "coach": coach_view(perf.get("coach")),
+        "impressions": impressions_overview(perf.get("impressions")),
     }
+
+
+IMPRESSION_KINDS = {  # cue kind -> plain label
+    "follow_up_probe": "Follow-up question", "deep_dive": "Dug deeper", "warm_acknowledgement": "Warm reaction",
+    "flat_acknowledgement": "Flat reaction", "interruption": "Cut in", "explicit_praise": "Praise",
+    "future_framing": "Talked as if you'd join", "team_or_logistics": "Team or logistics",
+    "selling_company": "Sold the company", "rushing": "Rushing", "cut_short": "Cut short",
+    "clarification_request": "Asked you to clarify", "skepticism": "Doubted the answer",
+    "brush_off_close": "Generic goodbye", "concrete_next_step": "Clear next step",
+    "vague_next_step": "Vague next step",
+}
+NEXT_STEP = {"concrete": "Clear next step", "vague": "Vague next step", "brush_off": "No next step, generic goodbye",
+             "none": "No next step mentioned"}
+
+
+def _text(value: Any, limit: int = 600) -> str:
+    return scrub(value if isinstance(value, str) else "")[:limit]
+
+
+def impression_view(raw: Any) -> dict[str, Any] | None:
+    """One interview's interviewer impression (performance.json schema 3), for display."""
+    if not isinstance(raw, dict) or raw.get("coverage") not in ("transcript", "derived"):
+        return None
+    parts = raw.get("components") if isinstance(raw.get("components"), dict) else {}
+    metrics = raw.get("metrics") if isinstance(raw.get("metrics"), dict) else {}
+    cues = []
+    for c in raw.get("cues") or []:
+        if not isinstance(c, dict) or c.get("kind") not in IMPRESSION_KINDS:
+            continue
+        cues.append({"kind": IMPRESSION_KINDS[c["kind"]], "tone": "ok" if c.get("polarity") == "+" else "bad",
+                     "quote": _text(c.get("quote"), 200), "at": _text(c.get("timestamp"), 8),
+                     "after": _text(c.get("after"), 200)})
+    share = number(metrics.get("candidate_talk_share"))
+    return {"coverage": raw["coverage"], "score": number(raw.get("score")),
+            "components": {k: number(parts.get(k)) for k in ("engagement", "positive", "negative", "next_steps", "balance")},
+            "talk_share": share, "next_step": NEXT_STEP.get(raw.get("next_step") or "none", ""),
+            "leaned_in": _text(raw.get("leaned_in")), "disengaged": _text(raw.get("disengaged")),
+            "follow_ups": metrics.get("follow_ups") if isinstance(metrics.get("follow_ups"), int) else None,
+            "length_vs_slot": number(metrics.get("length_vs_slot")), "cues": cues[:14]}
+
+
+def _quote(raw: Any) -> dict[str, Any] | None:
+    if not isinstance(raw, dict) or not raw.get("quote"):
+        return None
+    return {"quote": _text(raw.get("quote"), 300), "date": str(raw.get("date") or "")[:10],
+            "company": _text(raw.get("company"), 80), "speaker": "interviewer" if raw.get("speaker") == "interviewer" else "you",
+            "at": _text(raw.get("timestamp"), 8)}
+
+
+def coach_view(raw: Any) -> dict[str, Any] | None:
+    """The coach's read (app/profile/coach.py) for the page; None when absent."""
+    if not isinstance(raw, dict) or not raw.get("where_you_stand"):
+        return None
+    rows = lambda key: [r for r in raw.get(key) or [] if isinstance(r, dict)]  # noqa: E731
+    neg = raw.get("negotiation") if isinstance(raw.get("negotiation"), dict) else {}
+    ivs = raw.get("interviewers") if isinstance(raw.get("interviewers"), dict) else {}
+    return {
+        "where_you_stand": _text(raw["where_you_stand"], 900),
+        "working": [{"headline": _text(w.get("headline"), 160), "detail": _text(w.get("detail")),
+                     "example": _quote(w.get("example"))} for w in rows("whats_working")][:3],
+        "costing": [{k: _text(c.get(k)) for k in ("headline", "plain_meaning", "why_it_matters", "what_happened",
+                                                   "do_instead", "model_rephrase")}
+                    | {"example": _quote(c.get("example"))} for c in rows("whats_costing_you")][:2],
+        "focus": [{k: _text(f.get(k)) for k in ("drill", "how", "done_when")} for f in rows("this_weeks_focus")][:3],
+        "negotiation": {"read": _text(neg.get("read")),
+                        "scripts": [{"moment": _text(x.get("moment"), 120), "say": _text(x.get("say"))}
+                                    for x in neg.get("scripts") or [] if isinstance(x, dict)][:4]},
+        "interviewers": {"leaned_in": _text(ivs.get("leaned_in_when")), "disengaged": _text(ivs.get("disengaged_when")),
+                         "examples": [q for q in (_quote(x) for x in ivs.get("examples") or []) if q][:3]},
+        "generated_at": raw.get("generated_at"), "stale": bool(raw.get("stale")),
+    }
+
+
+def impressions_overview(raw: Any) -> dict[str, Any] | None:
+    if not isinstance(raw, dict) or not raw.get("n_scored"):
+        return None
+    by = raw.get("by_outcome") if isinstance(raw.get("by_outcome"), dict) else {}
+    return {"n": raw.get("n_scored"),
+            "by_outcome": {k: {"n": (by.get(k) or {}).get("n"), "mean": number((by.get(k) or {}).get("mean"))}
+                           for k in ("advanced", "rejected", "unknown")},
+            "r_with_score": number(raw.get("r_with_rubric_overall")), "note": _text(raw.get("note"), 300)}
 
 
 def _fallback_series(interviews: list[dict[str, Any]], value: Any) -> dict[str, Any]:
@@ -413,13 +497,13 @@ def read_json(path: Path) -> dict[str, Any] | None:
 def profile_files() -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
     """(performance, pay target) from the private data dir; None if missing.
 
-    performance.json (VALR_PERFORMANCE_PATH, default /data/performance.json, schema 2);
+    performance.json (VALR_PERFORMANCE_PATH, default /data/performance.json, schema 2 or 3);
     only when it is missing, the old interview_scores.json + evaluation.json, adapted.
     """
     from app.profile.config import settings
     cfg = settings()
     perf = read_json(Path(os.getenv("VALR_PERFORMANCE_PATH") or "/data/performance.json").expanduser())
-    if not (perf and perf.get("schema_version") == 2):
+    if not (perf and isinstance(perf.get("schema_version"), int) and perf["schema_version"] >= 2):
         perf = performance_from_v1(read_json(cfg.scores_path.with_suffix(".json")),
                                    read_json(cfg.evaluation_path))
     profile = read_json(cfg.profile_path) or {}
@@ -631,6 +715,16 @@ async def collect(pool: Any, now: datetime | None = None) -> dict[str, Any]:
         except Exception as error:  # noqa: BLE001
             logger.warning("VALR notetakers unavailable: %s", type(error).__name__)
             notetaker_status = {}
+        try:
+            from app import post_call
+            reports = await post_call.overview(connection)
+            view["post_call"] = {"pending": reports["pending"], "queued": reports["queued"],
+                                 "failed": reports["failed"],
+                                 "recent": [{"title": scrub(r["title"]), "status": r["status"],
+                                             "updated_at": iso(r["updated_at"])} for r in reports["recent"]]}
+        except Exception as error:  # noqa: BLE001
+            logger.warning("VALR post-call reports unavailable: %s", type(error).__name__)
+            view["post_call"] = None
     # telegram: a heads-up at T-30 and calls only on request; call: the automatic T-30 dial.
     view["mode"] = "call" if telegram_api.auto_dial() else "telegram"
     # The next T-30 step (a heads-up, or the dial; VALR_BRIEFING_DIAL=0 stops only the dial).

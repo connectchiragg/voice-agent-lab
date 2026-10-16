@@ -92,8 +92,97 @@ def _series(interviews: list, value) -> dict:
     return out
 
 
+def _impression(i: int, round_type: str) -> dict:
+    """A made-up interviewer impression (schema 3); the first interview has no transcript."""
+    if i == 0:
+        return {"coverage": "derived", "score": None, "components": {"balance": 8.0},
+                "metrics": {"candidate_talk_share": 0.7}, "cues": [], "next_step": "none",
+                "leaned_in": "", "disengaged": "", "source_hash": ""}
+    warm = i % 2 == 1
+    cues = [
+        {"group": "engagement", "kind": "follow_up_probe", "polarity": "+", "strength": 2,
+         "quote": "Interesting. How did you keep the queue from growing when the consumer fell behind?",
+         "timestamp": "14:05", "after": "You sized the ingest at 100 MB/s before picking a queue.", "origin": "llm"},
+        {"group": "engagement", "kind": "flat_acknowledgement", "polarity": "-", "strength": 1,
+         "quote": "Okay. Let's move to the next one.", "timestamp": "31:40",
+         "after": "A four-minute answer about a past migration with no result.", "origin": "llm"},
+        {"group": "positive", "kind": "future_framing", "polarity": "+", "strength": 2,
+         "quote": "You'd own the realtime pipeline from day one.", "timestamp": "48:12",
+         "after": "You described the barge-in classifier you shipped.", "origin": "llm"},
+        {"group": "next_step", "kind": "concrete_next_step", "polarity": "+", "strength": 3,
+         "quote": "The recruiter will set up the system design round for next week.", "timestamp": "55:30",
+         "after": "", "origin": "llm"},
+    ] if warm else [
+        {"group": "negative", "kind": "rushing", "polarity": "-", "strength": 2,
+         "quote": "In the interest of time, let's skip ahead.", "timestamp": "22:10",
+         "after": "A long preamble before the design.", "origin": "llm"},
+        {"group": "negative", "kind": "brush_off_close", "polarity": "-", "strength": 2,
+         "quote": "Thanks for your time, we'll get back to you.", "timestamp": "44:02", "after": "", "origin": "measured"},
+    ]
+    parts = ({"engagement": 7.4, "positive": 6.3, "negative": 1.5, "next_steps": 10.0, "balance": 9.0} if warm else
+             {"engagement": 3.1, "positive": 0.0, "negative": 6.3, "next_steps": 1.0, "balance": 5.5})
+    return {"coverage": "transcript", "score": 8.1 if warm else 3.0, "components": parts,
+            "metrics": {"candidate_talk_share": 0.62 if warm else 0.84, "follow_ups": 5 if warm else 0,
+                        "length_vs_slot": 1.0 if warm else 0.7},
+            "cues": cues, "next_step": "concrete" if warm else "brush_off",
+            "leaned_in": "They dug in when you put numbers on the design." if warm else "",
+            "disengaged": "" if warm else "They moved on after a long preamble.", "source_hash": f"h{i}"}
+
+
+def _impressions(interviews: list) -> dict:
+    return {"n_scored": len(interviews) - 1, "n_derived_only": 1,
+            "by_outcome": {"advanced": {"n": 3, "mean": 7.2}, "rejected": {"n": 2, "mean": 3.4},
+                           "unknown": {"n": 1, "mean": 5.0}},
+            "r_with_rubric_overall": 0.41, "point_biserial_advanced": 0.78,
+            "note": "Correlation of impression with advancing: r=0.78 (n=5)."}
+
+
+def _coach(interviews: list) -> dict:
+    last = interviews[-1]
+    quote = lambda text, speaker="you", at="": {"id": "Q1", "quote": text, "date": last["date"],  # noqa: E731
+                                                "company": last["company"], "speaker": speaker, "timestamp": at,
+                                                "context": ""}
+    return {
+        "input_hash": "sample", "model": "claude-sonnet-5-5", "generated_at": "2026-10-15T08:00:00Z",
+        "where_you_stand": ("You are at the bar for senior platform roles and moving up: your system design answers "
+                            "now start with numbers. What still costs you offers is folding under pushback."),
+        "whats_working": [{"headline": "You size the problem first",
+                           "detail": "Interviewers ask sharper follow-ups once you put numbers on the table.",
+                           "example": quote("Ten thousand robots at fifty hertz is about a hundred megabytes a second.")}],
+        "whats_costing_you": [
+            {"headline": "You give ground too fast when challenged",
+             "plain_meaning": "Holding your design when an interviewer pushes back, or changing it for a reason.",
+             "why_it_matters": "Interviewers push to see judgement. Folding in a minute reads as guessing.",
+             "example": quote("Yeah, you're right, we can just drop the queue then."),
+             "what_happened": "The interviewer questioned the queue; you removed it without saying why.",
+             "do_instead": "Restate their concern, then keep or change the design with one reason.",
+             "model_rephrase": "Good point on cost. I'd still keep the queue: it absorbs bursts. If cost matters more, we batch writes."},
+            {"headline": "Your salary answer comes too early",
+             "plain_meaning": "Revealing your current or expected salary before they share their range.",
+             "why_it_matters": "The first number sets the range, and theirs is usually higher.",
+             "example": quote("Currently I'm at [amount], so I'd expect something above that."),
+             "what_happened": "The recruiter asked once and you answered with your current pay.",
+             "do_instead": "Ask for their band first, then answer with a range tied to scope.",
+             "model_rephrase": "I'd love to hear the band you've set for this level first."}],
+        "this_weeks_focus": [
+            {"drill": "Pushback reps", "how": "Ask a friend to challenge three of your designs.",
+             "done_when": "You restate and answer with a reason every time."},
+            {"drill": "Salary script out loud", "how": "Say the band-first line ten times.", "done_when": "It feels natural."},
+            {"drill": "60-second answers", "how": "Record five answers with a timer.", "done_when": "All under 60 seconds."}],
+        "negotiation": {"read": "You stay friendly but give the first number.",
+                        "scripts": [{"moment": "Asked for current salary",
+                                     "say": "I'd rather focus on this role. What band have you set for it?"},
+                                    {"moment": "A low offer",
+                                     "say": "Thank you. That's below [your target]; given the scope, can we get closer?"}]},
+        "interviewers": {"leaned_in_when": "Interviewers leaned in when you put numbers on a design.",
+                         "disengaged_when": "They disengaged after long preambles.",
+                         "examples": [quote("Interesting. How did you keep the queue from growing?", "interviewer", "14:05")]},
+        "headline": "At the bar and rising; hold your ground under pushback and ask for the band first.",
+        "numbers": {}}
+
+
 def performance_file(now: datetime) -> dict:
-    """A made-up performance.json (schema 2), the exact shape the profile importer writes."""
+    """A made-up performance.json (schema 3), the exact shape the profile importer writes."""
     interviews = []
     for i, (company, stage, round_type) in enumerate(ROUNDS):
         scores = {}
@@ -131,12 +220,14 @@ def performance_file(now: datetime) -> dict:
                  "improve": "Gave a number before hearing their band." if i < 3 else "Good deferral; could tie the range to scope.",
                  "model_answer_hint": "Ask for the band first; tie your range to the role's scope."},
             ][: 2 + i % 2],
-            "transcript_used": True})
+            "transcript_used": True,
+            "impression": _impression(i, round_type)})
     trends = {"overall": _series(interviews, lambda iv: iv["overall_score"]),
               "dimensions": {d: _series(interviews, lambda iv, d=d: iv["dimension_scores"][d]) for d in RUBRIC},
               "subdimensions": {f"{d}.{s}": _series(interviews, lambda iv, d=d, s=s: iv["scores"][d][s]["score"])
                                 for d, subs in RUBRIC.items() for s in subs}}
-    return {"schema_version": 2, "generated_at": (now - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    return {"schema_version": 3, "coach": _coach(interviews), "impressions": _impressions(interviews),
+            "generated_at": (now - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "scale": {"min": 1, "max": 10, "na": None}, "rubric": RUBRIC,
             "badge_rule": {"metric": "fitted_change", "threshold": 1.0, "min_points": 3,
                            "values": ["improving", "flat", "declining", "insufficient_data"]},
@@ -313,6 +404,10 @@ def sample_view(now: datetime | None = None, paused: bool = False, scenario: str
         },
         "dials": {"briefing": {"used": 2, "limit": 12}, "callback": {"used": 1, "limit": 5}},
         "performance": valr_view.performance(performance_file(now)),
+        "post_call": {"pending": 1, "queued": 0, "failed": 0, "recent": [
+            {"title": "Nimbus · system design", "status": "pending_telegram",
+             "updated_at": (now - timedelta(hours=3)).isoformat()},
+            {"title": "Tessel · technical", "status": "sent", "updated_at": (now - timedelta(days=4)).isoformat()}]},
         "pay_target": {"min": 50, "max": 65, "unit": "LPA", "currency": "INR"},
         "setup": {"phone_on_file": True, "test_call_done": True, "valr_number": "+12288888007"},
     }
