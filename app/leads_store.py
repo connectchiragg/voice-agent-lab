@@ -81,8 +81,8 @@ CREATE TABLE IF NOT EXISTS leads (
 CREATE TABLE IF NOT EXISTS lead_overrides (
     id          bigserial PRIMARY KEY,
     lead_id     text NOT NULL,
-    kind        text NOT NULL,             -- dismiss | stage | merge
-    value       text NOT NULL DEFAULT '',  -- the stage ('' clears), or the lead merged into
+    kind        text NOT NULL,             -- dismiss | stage | merge | rename
+    value       text NOT NULL DEFAULT '',  -- the stage ('' clears), the lead merged into, or the company
     touch_ids   jsonb NOT NULL DEFAULT '[]',  -- dismiss: its touchpoints then
     threads     jsonb NOT NULL DEFAULT '[]',  -- dismiss: its Gmail threads then
     created_by  text NOT NULL DEFAULT '',
@@ -105,7 +105,7 @@ async def setup(connection: Any) -> None:
 async def add_override(connection: Any, lead_id: str, kind: str, value: str = "",
                        touch_ids: list[str] | None = None, threads: list[str] | None = None,
                        by: str = "") -> None:
-    if kind not in ("dismiss", "stage", "merge"):
+    if kind not in ("dismiss", "stage", "merge", "rename"):
         raise ValueError(kind)
     await connection.execute(
         "INSERT INTO lead_overrides (lead_id, kind, value, touch_ids, threads, created_by) "
@@ -129,6 +129,11 @@ async def overrides(connection: Any) -> Overrides:
                 out.stages.pop(lead_id, None)
         elif kind == "merge" and value and value != lead_id:
             out.merges[lead_id] = value
+        elif kind == "rename":
+            if value:
+                out.names[lead_id] = value
+            else:
+                out.names.pop(lead_id, None)
     return out
 
 

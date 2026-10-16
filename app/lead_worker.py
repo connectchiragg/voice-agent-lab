@@ -37,7 +37,7 @@ import httpx
 import psycopg
 from temporalio import activity
 
-from app import gmail_api, google_oauth, lead_classify, leads, leads_store, research_jobs
+from app import company_names, company_resolver, gmail_api, google_oauth, lead_classify, leads, leads_store, research_jobs
 from app.lead_classify import Decision, Email
 from app.lead_workflow import GmailSyncInput, GmailSyncSummary, RefreshSummary, WatchSummary
 from app.leads import Contact, Touch
@@ -105,7 +105,12 @@ def email_touch(email: Email, decision: Decision, owners: set[str]) -> Touch:
     domain = "" if outbound else lead_classify.sender_domain(email)
     if outbound and people:
         domain = leads.domain_of(people[0].email)
-    return Touch(id=f"gmail:{email.id}", kind="email", at=email.at, company=decision.company,
+    found = company_names.resolve(attendees=[p.email for p in people] if outbound else [],
+                                  sender_email="" if outbound else email.from_email, sender_name=email.from_name,
+                                  title=email.subject, stated=decision.company, owner_emails=owners)
+    return Touch(id=f"gmail:{email.id}", kind="email", at=email.at, company=found.name,
+                 stated=decision.company[:80], company_how=company_resolver.HOW.get(found.source, "").format(
+                     domain=found.domain),
                  domain=domain, people=people, title=email.subject[:140],
                  summary=decision.summary, direction="out" if outbound else "in",
                  sentiment=None if outbound else decision.sentiment, cue=decision.cue,
@@ -413,6 +418,11 @@ class LeadActivities:
             for key in await cancelled_calendar_keys(connection):
                 await connection.execute("DELETE FROM lead_touchpoints WHERE id = %s", (f"cal:{key}",))
             everything = await leads_store.touches(connection)
+            try:  # Rules, then the cached or capped Haiku review for the unclear ones.
+                await resolve_touches(connection, everything, company_resolver.default_resolver(owner_emails()),
+                                      limit=int(os.getenv("VALR_COMPANY_LLM_PER_RUN", "10")))
+            except Exception as error:  # noqa: BLE001 - the rebuild still runs on the rules' names.
+                logger.warning("VALR leads: company review skipped (%s)", type(error).__name__)
             built = leads.build(everything, now, await leads_store.overrides(connection))
             await leads_store.save_leads(connection, built, everything, now)
         summary.leads, summary.touches = len(built), len(everything)
@@ -483,9 +493,12 @@ def calendar_to_touches(events: list[Any], owners: set[str], known: set[str] = f
         screen_only = bool(SCREEN_ONLY.search(event.title)) and not INTERVIEW.search(SCREEN_ONLY.sub("", event.title))
         hint = "interviewing" if interview and not screen_only else "screening"
         kind = "Interview" if hint == "interviewing" else "Recruiter chat"
+        found = company_names.resolve(attendees=[p.email for p in people], title=event.title,
+                                      stated=event.company, owner_emails=owners)
         out.append(Touch(id=f"cal:{event.key}", kind="calendar",
-                         at=datetime.fromisoformat(event.start_utc), company=event.company,
-                         domain=event.company_domain, people=people, title=event.title[:140],
+                         at=datetime.fromisoformat(event.start_utc), company=found.name, stated=event.company[:80],
+                         company_how=company_resolver.HOW.get(found.source, "").format(domain=found.domain),
+                         domain=found.domain or event.company_domain, people=people, title=event.title[:140],
                          summary=f"{kind} on the calendar" + (f" with {len(people)} people" if people else ""),
                          stage_hint=hint))
     return out
@@ -494,9 +507,6 @@ def calendar_to_touches(events: list[Any], owners: set[str], known: set[str] = f
 async def cancelled_calendar_keys(connection: Any) -> list[str]:
     cursor = await connection.execute("SELECT key FROM calendar_events WHERE status = 'cancelled'")
     return [row[0] for row in await cursor.fetchall()]
-
-
-TITLE_COMPANY = re.compile(r"(?:with|@|at|x|<>|/|-|:)\s*(?P<c>[A-Z][\w&.\- ]{1,40}?)\s*(?:\(|$|-|\||:|interview|round)", re.I)
 
 
 def fathom_to_touches(items: list[dict[str, Any]], owners: set[str]) -> list[Touch]:
@@ -514,12 +524,17 @@ def fathom_to_touches(items: list[dict[str, Any]], owners: set[str]) -> list[Tou
         domains = [leads.company_domain(leads.domain_of(p.email)) for p in people]
         summary = ((item.get("default_summary") or {}).get("markdown_formatted") or "")
         summary = re.sub(r"\s+", " ", re.sub(r"[#*_\[\]()>]", " ", summary)).strip()
-        match = TITLE_COMPANY.search(title)
+        recorder = item.get("recorded_by") if isinstance(item.get("recorded_by"), dict) else {}
+        mine = [str(recorder.get("name") or "")] + [str(p.get("name") or "") for p in item.get("calendar_invitees") or []
+                                                    if p.get("is_external") is False]
+        found = company_names.resolve(attendees=[p.email for p in people], title=title, owner_emails=owners,
+                                      owner_names=[m for m in mine if m])
         url = str(item.get("share_url") or item.get("url") or "")
         out.append(Touch(id=f"fathom:{recording}", kind="recording",
                          at=datetime.fromisoformat(str(when).replace("Z", "+00:00")),
-                         company=match.group("c").strip() if match else "",
-                         domain=next((d for d in domains if d), ""), people=people,
+                         company=found.name, company_how=company_resolver.HOW.get(found.source, "").format(
+                             domain=found.domain),
+                         domain=found.domain or next((d for d in domains if d), ""), people=people,
                          title=f"Recording: {title[:120]}", summary=" ".join(summary.split()[:30]),
                          url=url if url.startswith("https://") else "", detail_url=detail_url(f"fathom:{recording}")))
     return out
@@ -547,13 +562,119 @@ def performance_touches(perf: dict[str, Any] | None) -> list[Touch]:
         outcome = item.get("outcome")
         round_type = str(item.get("round_type") or "interview").replace("_", " ")
         out.append(Touch(id=f"perf:{item.get('interview_id') or item['date'] + ':' + item['company']}",
-                         kind="evaluation", at=at, company=str(item["company"])[:80],
+                         kind="evaluation", at=at, company=company_names.clean(str(item["company"]))[:80],
+                         stated=str(item["company"])[:80],
                          title=f"{round_type.capitalize()} scored" + (f" {score:.1f}/10" if score is not None else ""),
                          summary={"advanced": "Outcome: advanced.", "rejected": "Outcome: rejected."}.get(outcome, ""),
                          stage_hint={"rejected": "closed-lost"}.get(outcome, "interviewing"),
                          cue={"advanced": "positive", "rejected": "negative"}.get(outcome, "none"),
                          score=score, detail_url=detail_url(str(item.get("interview_id") or ""))))
     return out
+
+
+# Company names: re-derive them with the one resolver (rules, cache, Haiku review, one web
+# search), store what changed. Idempotent: the same evidence gives the same name.
+
+def touch_evidence(touch: Touch, owners: set[str], snippet: str = "") -> company_resolver.Evidence:
+    people = [(p.name, p.email) for p in touch.people if p.email.lower() not in owners]
+    inbound = touch.kind == "email" and touch.direction == "in" and people
+    return company_resolver.Evidence(
+        kind=touch.kind, title=touch.title.removeprefix("Recording: "),
+        people=people[1:] if inbound else people, domains=[touch.domain] if touch.domain else [],
+        sender_name=people[0][0] if inbound else "", sender_email=people[0][1] if inbound else "",
+        snippet=snippet, stated=touch.stated or touch.company, role=touch.role)
+
+
+async def snippets(connection: Any) -> dict[str, str]:
+    """Stored email snippets, decrypted in memory only (first 300 characters)."""
+    key = os.getenv("VALR_TOKEN_KEY", "").strip()
+    if not key:
+        return {}
+    cursor = await connection.execute("SELECT id, snippet_enc FROM lead_touchpoints WHERE snippet_enc IS NOT NULL")
+    out = {}
+    for touch_id, sealed in await cursor.fetchall():
+        try:
+            out[touch_id] = google_oauth.decrypt(key, sealed)[:300]
+        except google_oauth.ReconnectNeeded:
+            continue
+    return out
+
+
+async def resolve_touches(connection: Any, touches: list[Touch], resolver: company_resolver.Resolver,
+                          limit: int | None = None, dry_run: bool = False) -> list[tuple[str, str, str]]:
+    """Each email/calendar/recording touch's company, re-derived; changed ones are stored (in
+    place on `touches` too). `limit`: model resolutions this pass. -> [(touch id, before, after)]."""
+    await company_resolver.setup(connection)
+    owners = resolver.owner_emails
+    texts = await snippets(connection)
+    changes = []
+    for touch in touches:
+        if touch.kind not in ("email", "calendar", "recording"):
+            continue
+        if limit is not None and resolver.calls >= limit:
+            resolver.client = None  # Rules and cache only for the rest of this pass.
+        beat()
+        ev = touch_evidence(touch, owners, texts.get(touch.id, ""))
+        decision = await resolver.resolve(connection, ev)
+        before = touch.company
+        if not touch.stated and touch.company:
+            touch.stated = touch.company
+        if (decision.company, decision.how) != (touch.company, touch.company_how):
+            changes.append((touch.id, before, decision.company))
+            touch.company, touch.company_how = decision.company, decision.how
+            if decision.domain:
+                touch.domain = decision.domain
+            if not dry_run:
+                await leads_store.upsert_touch(connection, touch)
+    return changes
+
+
+async def repair_recordings(connection: Any, resolver: company_resolver.Resolver,
+                            dry_run: bool = False) -> list[tuple[str, str, str]]:
+    """Stored notetaker recordings' company, re-derived (their invitee domain, titles, names)."""
+    from app.notetakers import store
+    await store.setup(connection)
+    cursor = await connection.execute(
+        "SELECT provider, external_id, title, event_title, company, company_domain, event_company, interviewers "
+        "FROM notetaker_recordings")
+    changes = []
+    for provider, external_id, title, event_title, company, domain, event_company, people in await cursor.fetchall():
+        beat()
+        ev = company_resolver.Evidence(
+            kind="recording", title=event_title or title or "", domains=[domain] if domain else [],
+            people=[(n, "") for n in store.names({"interviewers": people})], stated=company or event_company or "")
+        decision = await resolver.resolve(connection, ev, entity_id=f"interview:{provider}:{external_id}")
+        if decision.company != (company or ""):
+            changes.append((f"{provider}:{external_id}", company or event_company or "", decision.company))
+            if not dry_run:
+                await connection.execute(
+                    "UPDATE notetaker_recordings SET company = %s, company_how = %s "
+                    "WHERE provider = %s AND external_id = %s",
+                    (decision.company, decision.how[:200], provider, external_id))
+    return changes
+
+
+async def repair_companies(dry_run: bool = False) -> dict[str, Any]:
+    """`python -m app.lead_worker repair-companies [--dry-run]`: names only, before -> after."""
+    now = datetime.now(timezone.utc)
+    resolver = company_resolver.default_resolver(owner_emails())
+    async with await connect() as connection:
+        await leads_store.setup(connection)
+        everything = await leads_store.touches(connection)
+        before = leads.build([leads_store.touch_from_row(t.id, t.kind, t.at, t.lead_id, leads_store.touch_data(t))
+                              for t in everything], now, await leads_store.overrides(connection))
+        touches = await resolve_touches(connection, everything, resolver, dry_run=dry_run)
+        recordings = await repair_recordings(connection, resolver, dry_run=dry_run)
+        after = leads.build(everything, now, await leads_store.overrides(connection))
+        if not dry_run:
+            await leads_store.save_leads(connection, after, everything, now)
+    return {"dry_run": dry_run, "model_calls": resolver.calls, "usd": round(resolver.usd, 4),
+            "leads_before": len(before), "leads_after": len(after),
+            "not_identified_before": sum(1 for l in before if l.company == company_names.NOT_IDENTIFIED),
+            "not_identified_after": sum(1 for l in after if l.company == company_names.NOT_IDENTIFIED),
+            "lead_names_before": sorted({l.company for l in before}), "lead_names_after": sorted({l.company for l in after}),
+            "touches": [f"{a or '-'} -> {b or company_names.NOT_IDENTIFIED}" for _, a, b in touches],
+            "recordings": [f"{a or '-'} -> {b or company_names.NOT_IDENTIFIED}" for _, a, b in recordings]}
 
 
 # Schedules (the research worker calls this at start) and a small CLI.
@@ -589,10 +710,14 @@ async def ensure_lead_schedules(client: Any) -> None:
 
 
 async def cli(command: str) -> None:
-    """`python -m app.lead_worker sync|watch|stats`: counts only, no content."""
+    """`python -m app.lead_worker sync|watch|stats|repair-companies [--dry-run]`: counts and
+    company names only, no content."""
     from dataclasses import asdict
     from temporalio.client import Client
     from app.lead_workflow import SYNC_WORKFLOW_ID, TASK_QUEUE, GmailSyncWorkflow, GmailWatchWorkflow
+    if command.startswith("repair-companies"):
+        print(json.dumps(await repair_companies(dry_run=command.endswith("--dry-run")), indent=2))
+        return
     if command == "stats":
         async with await connect() as connection:
             await leads_store.setup(connection)
@@ -624,6 +749,6 @@ if __name__ == "__main__":
     import sys
     from dotenv import load_dotenv
     load_dotenv(Path(__file__).resolve().parent.parent / ".env")
-    if sys.argv[1:2] not in (["sync"], ["watch"], ["stats"]):
-        sys.exit("usage: python -m app.lead_worker sync|watch|stats")
-    asyncio.run(cli(sys.argv[1]))
+    if sys.argv[1:2] not in (["sync"], ["watch"], ["stats"], ["repair-companies"]):
+        sys.exit("usage: python -m app.lead_worker sync|watch|stats|repair-companies [--dry-run]")
+    asyncio.run(cli(" ".join(sys.argv[1:3])))

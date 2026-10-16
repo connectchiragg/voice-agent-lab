@@ -150,7 +150,8 @@ def leads(raw: Any, now: datetime | None = None) -> dict[str, Any]:
         temp = number(lead.get("temperature"))
         rows.append({
             "id": re.sub(r"[^\w-]", "-", str(lead.get("id") or f"lead-{i}"))[:64],
-            "company": text(lead.get("company"), 80) or "Unknown company",
+            "company": company_label(lead.get("company")),
+            "company_how": text(lead.get("company_how"), 300),
             "role": text(lead.get("role") or lead.get("title"), 120),
             "stage": stage, "stage_raw": raw_stage,
             "stage_label": STAGE_LABELS.get(raw_stage) or dict(STAGES).get(stage, "Other"),
@@ -196,6 +197,15 @@ def recording(raw: Any, interview: dict[str, Any] | None = None) -> dict[str, An
     provider = text(raw.get("provider") or (interview or {}).get("source"), 30).lower()
     return {"provider": dict(NOTETAKERS).get(provider, provider.capitalize() or "Recording"),
             "url": url, "title": text(raw.get("title"), 120), "player": provider == "fathom"}
+
+
+def company_label(value: Any) -> str:
+    """A lead's company, or "Company not identified" (never a round label or the owner's name)."""
+    from app import company_names
+    name = text(value, 80)
+    if name.startswith("Unknown"):
+        return company_names.NOT_IDENTIFIED
+    return company_names.label(name)
 
 
 def account(value: Any) -> str:

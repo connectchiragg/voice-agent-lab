@@ -93,24 +93,7 @@ def with_query(url: str, **params: Any) -> str:
     return urlunsplit(parts._replace(query=urlencode(query)))
 
 
-# The company and people of a recording, from its calendar invitees.
-
-FREEMAIL = {"gmail.com", "googlemail.com", "outlook.com", "hotmail.com", "live.com", "yahoo.com",
-            "yahoo.co.in", "icloud.com", "me.com", "proton.me", "protonmail.com", "aol.com", "zoho.com",
-            "rediffmail.com", "gmx.com", "mail.com", "yandex.com", "msn.com"}
-TOOL_DOMAINS = ("calendar.google.com", "google.com", "fathom.video", "fireflies.ai", "granola.ai",
-                "zoom.us", "calendly.com", "resource.calendar.google.com")
-SUFFIXES = {"com", "co", "in", "io", "ai", "net", "org", "dev", "tech", "app", "us", "uk", "de", "so",
-            "xyz", "inc", "global", "group", "careers", "jobs", "hr", "mail", "team", "security", "example"}
-# Words that are never a company on their own: round labels and title filler.
-NOT_COMPANY = {"me", "you", "round", "interview", "interviews", "call", "meeting", "min", "mins", "and", "with",
-               "screen", "screening", "intro", "chat", "sync", "level", "technical", "tech", "hr", "final",
-               "onsite", "loop", "panel", "discussion", "for", "the", "of", "at", "x", "vs", "catch", "up",
-               "followup", "follow", "first", "second", "third", "system", "design", "coding", "hiring",
-               "manager", "culture", "fit", "behavioral", "behavioural", "test", "unknown", "fathom",
-               "fireflies", "granola", "zoom", "google", "teams", "meet"}
-ROUND_TOKEN = re.compile(r"^(?:l|r|round|level|lvl|stage)\d{1,2}$|^\d{1,2}$")
-
+# The company and people of a recording, from its calendar invitees (app/company_names.py).
 
 def email_hash(email: str) -> str:
     """A short, one-way tag of an address: matches a lead's contact without storing the email."""
@@ -118,62 +101,43 @@ def email_hash(email: str) -> str:
 
 
 def owner_words() -> set[str]:
-    """The owner's own name words (VALR_OWNER_NAME / VALR_CANDIDATE_NAME / the profile's name)."""
-    import os
-    raw = " ".join(os.getenv(k, "") for k in ("VALR_OWNER_NAME", "VALR_CANDIDATE_NAME"))
-    try:
-        from app.profile.config import settings
-        raw += " " + (settings().candidate_name or "")
-    except Exception:  # noqa: BLE001 - no profile config here: env only.
-        pass
-    return {w for w in re.findall(r"[a-z0-9]+", raw.lower()) if len(w) > 1}
+    from app import company_names
+    return set(company_names.owner_words())
 
 
 def is_company(name: str, owner: set[str] | None = None) -> bool:
-    """False for "", a round label ("L2", "Round 2", "Interview") or the owner's own name."""
-    owner = owner_words() if owner is None else owner
-    words = re.findall(r"[a-z0-9]+", (name or "").lower())
-    rest = [w for w in words if w not in NOT_COMPANY and w not in owner and not ROUND_TOKEN.match(w)]
-    return bool(rest)
+    """False for "", a round label ("L2", "Round 2", "Interview"), a tool or the owner's name."""
+    from app import company_names
+    return company_names.is_company(name, owner)
 
 
 def company_from_domain(domain: str) -> str:
-    """"talent.quillworks.co.in" -> "Quillworks"; "" for a free-mail or tool domain."""
-    domain = (domain or "").lower().strip(".")
-    if not domain or domain in FREEMAIL or domain.endswith(TOOL_DOMAINS):
-        return ""
-    parts = domain.split(".")
-    while len(parts) > 1 and parts[-1] in SUFFIXES:
-        parts.pop()
-    core = parts[-1] if parts else ""
-    return core.replace("-", " ").title() if core and core not in SUFFIXES else ""
+    from app import company_names
+    return company_names.from_domain(domain)
 
 
-def invitee_details(invitees: list[dict[str, Any]], owner_emails: set[str] | None = None) -> dict[str, Any]:
+def invitee_details(invitees: list[dict[str, Any]], owner_emails: set[str] | None = None,
+                    title: str = "", recorder: str = "") -> dict[str, Any]:
     """Fathom's `calendar_invitees` -> {company, company_domain, interviewers, invitee_hashes}.
 
-    The external invitees (`is_external`, else not the owner's address or domain) are the
-    interviewers; the most common non-free-mail domain among them names the company."""
+    The external invitees (`is_external`, not the owner) are the interviewers; the company is
+    the one resolver's answer from their domains and the title."""
+    from app import company_names
     owner_emails = {e.lower() for e in (owner_emails or set())}
-    owner_domains = {e.rpartition("@")[2] for e in owner_emails} - FREEMAIL
-    people, domains = [], []
+    people, mine = [], [recorder]
     for invitee in invitees or []:
-        if not isinstance(invitee, dict):
+        if isinstance(invitee, dict) and invitee.get("is_external") is False:
+            mine.append(str(invitee.get("name") or ""))  # The recorder's side: never a company.
+        if not isinstance(invitee, dict) or invitee.get("is_external") is False:
             continue
         email = str(invitee.get("email") or "").strip().lower()
-        domain = email.rpartition("@")[2]
-        if email in owner_emails or (domain and domain in owner_domains):
-            continue
-        if invitee.get("is_external") is False:  # The recorder's own side.
-            continue
-        if domain.endswith(TOOL_DOMAINS):
+        if email in owner_emails or company_names.on(company_names.domain_of(email), company_names.TOOL_DOMAINS):
             continue
         people.append((str(invitee.get("name") or "").strip(), email))
-        if domain and domain not in FREEMAIL:
-            domains.append(domain)
-    domain = max(set(domains), key=domains.count) if domains else ""
-    names = [n for n, email in people if n and "@" not in n]
-    return {"company": company_from_domain(domain), "company_domain": domain,
+    found = company_names.resolve(attendees=[e for _, e in people], title=title, owner_emails=owner_emails,
+                                  owner_names=[m for m in mine if m])
+    names = [n for n, _ in people if n and "@" not in n]
+    return {"company": found.name, "company_domain": found.domain,
             "interviewers": list(dict.fromkeys(names))[:8],
             "invitee_hashes": [email_hash(e) for _, e in people if e][:12]}
 

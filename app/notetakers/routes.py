@@ -208,6 +208,32 @@ async def recording_media(request: Request, id: str = "", refresh: int = 0) -> J
     return JSONResponse({"ok": True, **result}, headers=NO_CACHE)
 
 
+class CompanyRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    id: str = Field(min_length=6, max_length=140)
+    company: str = Field(default="", max_length=80)
+
+
+@router.post("/valr/api/interviews/company")
+async def set_company(request: Request) -> JSONResponse:
+    """The owner's "Set company" for an interview ("interview:<provider>:<id>" or
+    "slot:<ref>"); "" goes back to the resolver's name. It always wins (app/company_resolver.py)."""
+    from app import company_resolver
+    email = await valr_dashboard.action_owner(request)
+    try:
+        body = CompanyRequest.model_validate_json(await request.body())
+    except ValidationError:
+        raise HTTPException(400, "Expected {id, company}.") from None
+    if not body.id.startswith(("interview:", "slot:")):
+        raise HTTPException(400, "Unknown interview.")
+    name = " ".join(body.company.split())
+    async with pool().connection() as connection:
+        await company_resolver.setup(connection)
+        await company_resolver.set_override(connection, body.id, name, email)
+    return JSONResponse({"ok": True, "message": f"Company set to {name}." if name else "Company is automatic again."},
+                        headers=NO_CACHE)
+
+
 PAST_CALENDAR = timedelta(days=3)  # calendar_events keeps 3 days of the past (app/calendar_sync.py).
 
 

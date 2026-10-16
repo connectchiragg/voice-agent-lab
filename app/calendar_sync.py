@@ -119,14 +119,15 @@ def from_ics(event: calendar_ics.CalEvent, recurring: bool = False) -> SlotEvent
 
 
 def with_company(event: SlotEvent) -> SlotEvent:
-    """Fill the company guess (title, else a non-personal attendee domain)."""
-    cal = calendar_ics.CalEvent(event.key, event.title, datetime.fromisoformat(event.start_utc),
-                                datetime.fromisoformat(event.end_utc), event.all_day,
-                                organizer=event.organizer_email,
-                                attendees=[calendar_ics.Attendee(p.email, p.name)
-                                           for p in event.attendees])
-    event.company = calendar_ics.company_name(cal)
-    event.company_domain = calendar_ics.company_domain(cal)
+    """The company (app/company_names.py, the one resolver): the outside attendees' domain,
+    then a company named in the title; never a round label or the owner's name."""
+    from app import company_names
+    mine = {p.email.lower() for p in event.attendees if p.is_self and p.email}
+    emails = [p.email for p in event.attendees if p.email and not p.is_self]
+    if event.organizer_email and event.organizer_email.lower() not in mine:
+        emails.append(event.organizer_email)
+    found = company_names.resolve(attendees=emails, title=event.title, owner_emails=mine)
+    event.company, event.company_domain = found.name, found.domain
     return event
 
 

@@ -5,6 +5,7 @@ focus and the salary scripts; then the post-call reports; then the numbers, fold
 
 The chart markup (#perf-chart, .picker, #perf-data) is the one static/valr.js draws into.
 """
+from app.company_names import NOT_IDENTIFIED
 import json
 from typing import Any
 
@@ -191,7 +192,7 @@ def page(view: dict[str, Any], clock: Clock) -> str:
                      for r in perf.get("by_round_type") or [])
     recent = "".join(
         f'<li><a href="/valr/interviews/past/{e(attention.past_slug(iv))}"><span class="cu-when mono num">{e(clock.short_date(iv["date"]) if iv["date"] else "–")}</span>'
-        f'<span class="cu-what">{e(iv["company"] or "Unknown company")} <span class="muted small">{e(iv["round"])}</span></span>'
+        f'<span class="cu-what">{e(iv["company"] or NOT_IDENTIFIED)} <span class="muted small">{e(iv["round"])}</span></span>'
         f'<span class="cu-end"><span class="num">{score(iv["overall"])}</span>{chip(*OUTCOME[iv["outcome"]])}</span></a></li>'
         for iv in list(reversed(perf["interviews"]))[:5])
     coach = perf.get("coach")

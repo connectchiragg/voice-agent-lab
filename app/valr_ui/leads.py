@@ -5,6 +5,8 @@ latest timeline, and the corrections (stage, merge, dismiss) that post to
 /valr/api/leads/<id>/override. Data: app/valr_ui/contracts.leads()."""
 from typing import Any
 
+from app.company_names import NOT_IDENTIFIED
+
 from app.valr_page import Clock, chip, e, link
 from app.valr_ui.home import hero
 from app.valr_ui.shell import page_head
@@ -45,6 +47,23 @@ def matches(lead: dict[str, Any], stage: str, q: str) -> bool:
     return True
 
 
+def company_how(lead: dict[str, Any]) -> str:
+    """"Company: Zinnov · how we know: attendee domain zinnov.com", folded small."""
+    how = lead.get("company_how") or ("not identified yet: set it below" if lead["company"] == NOT_IDENTIFIED else "")
+    if not how:
+        return ""
+    return (f'<details class="how small"><summary class="muted">Company: {e(lead["company"])} · how we know</summary>'
+            f'<p class="muted small">{linkify(how)}</p></details>')
+
+
+def linkify(how: str) -> str:
+    """The "found via web: <url>" citation as a link; the rest as text."""
+    head, sep, url = how.partition("found via web: ")
+    if sep and url.startswith("https://"):
+        return e(head) + "found via web: " + link(url.split()[0])
+    return e(how)
+
+
 def corrections(lead: dict[str, Any], others: list[dict[str, Any]], stages: list[str]) -> str:
     """The owner's corrections (static/valr-app.js posts them with the CSRF token)."""
     options = "".join(f'<option value="{e(s)}"{" selected" if lead["stage_manual"] and lead["stage_raw"] == s else ""}>'
@@ -55,8 +74,13 @@ def corrections(lead: dict[str, Any], others: list[dict[str, Any]], stages: list
              f'<select id="fix-into" data-fix-into>{into}</select>'
              '<button class="btn small" type="button" data-fix="merge">Merge into</button></div>' if into else "")
     return f"""
+{company_how(lead)}
 <details class="fix" data-lead-fix="{e(lead['id'])}" data-company="{e(lead['company'])}">
   <summary class="label">Correct this lead</summary>
+  <div class="fix-row"><label class="sr-only" for="fix-company">Company</label>
+    <input id="fix-company" data-fix-company maxlength="80" autocomplete="off" placeholder="Company name"
+           value="{'' if lead['company'] == NOT_IDENTIFIED else e(lead['company'])}">
+    <button class="btn small" type="button" data-fix="rename">Set company</button></div>
   <div class="fix-row"><label class="sr-only" for="fix-stage">Stage</label>
     <select id="fix-stage" data-fix-stage><option value=""{'' if lead['stage_manual'] else ' selected'}>Automatic stage</option>{options}</select>
     <button class="btn small" type="button" data-fix="stage">Set stage</button></div>

@@ -302,9 +302,11 @@ def stage(value: Any) -> str:
 
 
 def company_name(value: Any) -> str:
-    """The interviewing company; "" when the importer recorded the notetaker (e.g. "Fathom")."""
+    """The interviewing company; "" when it is not one (app/company_names.py: the notetaker,
+    e.g. "Fathom", a round label or the owner's name)."""
+    from app import company_names
     text = scrub(value or "").strip()
-    return "" if text.lower() in RECORDERS else text
+    return "" if text.lower() in RECORDERS or not company_names.is_company(text) else text
 
 
 def day_label(date: str) -> str:

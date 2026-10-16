@@ -157,6 +157,7 @@ document.addEventListener("click", async event => {
     const body = {action: fix.dataset.fix};
     if (body.action === "stage") body.stage = box.querySelector("[data-fix-stage]").value;
     if (body.action === "merge") body.into = box.querySelector("[data-fix-into]").value;
+    if (body.action === "rename") body.company = box.querySelector("[data-fix-company]").value.trim();
     if (body.action === "dismiss" && !confirm(`Dismiss ${box.dataset.company}? It stays hidden, with its email threads.`)) return;
     const reply = await postJson(`/valr/api/leads/${encodeURIComponent(id)}/override`, body);
     toast(reply.message || "Saved.");
@@ -179,4 +180,22 @@ search?.addEventListener("input", () => {
   document.querySelectorAll("[data-lead-row]").forEach(row => {
     row.hidden = Boolean(q) && !row.textContent.toLowerCase().includes(q);
   });
+});
+
+// Interviews: "Set company" (the owner's name for it always wins over the resolver's).
+document.addEventListener("click", async event => {
+  const save = event.target.closest("[data-company-save]");
+  if (!save) return;
+  const box = save.closest("[data-company-fix]");
+  save.disabled = true;
+  try {
+    const reply = await postJson("/valr/api/interviews/company",
+      {id: box.dataset.companyFix, company: box.querySelector("[data-company-input]").value.trim()});
+    toast(reply.message || "Saved.");
+    setTimeout(() => location.reload(), 700);
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    save.disabled = false;
+  }
 });

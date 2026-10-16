@@ -348,3 +348,12 @@ details.numbers { margin: 28px 0; border-top: 1px solid var(--hairline); padding
   font: 500 var(--fs-xs)/1 var(--mono); letter-spacing: 0.1em; text-transform: uppercase; }
 .set-body .seg button + button { border-left: 1px solid var(--hairline); }
 .set-body .seg button[aria-pressed="true"] { background: var(--glow); color: var(--bone); box-shadow: inset 0 -2px 0 var(--signal); }
+.how { margin: 6px 0 12px; }
+.how summary { cursor: pointer; list-style: none; }
+.how summary::-webkit-details-marker { display: none; }
+.how summary::after { content: " +"; }
+.how[open] summary::after { content: " –"; }
+.how p { margin: 6px 0 0; overflow-wrap: anywhere; }
+.fix-row input { min-height: 36px; min-width: 0; flex: 1 1 180px; background: var(--graphite); color: var(--bone);
+  border: 1px solid var(--hairline-strong); padding: 0 10px; font: inherit; }
+.how .fix-row input { max-width: 320px; }
