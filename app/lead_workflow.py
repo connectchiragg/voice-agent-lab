@@ -6,6 +6,9 @@
   temperatures, expiry). Started by each Pub/Sub push (signal-with-start on the id
   `valr-gmail-sync`: a burst of pushes makes one more pass, not many) and by the Temporal
   Schedule `valr-gmail-poll` every 30 minutes, the safety net for missed pushes.
+  A pass that could not finish (summary.more: the 150-message cap per run, or Gmail's rate
+  limit, mode "paused-ratelimit") continues as new after MORE_AFTER, or RESUME_AFTER when
+  rate limited, until the backfill is done (behind the patch BACKFILL_RESUME_PATCH).
 - `GmailWatchWorkflow`: renews users.watch (activity `gmail_watch`). The Schedule
   `valr-gmail-watch` runs it once a day; Google ends a watch after 7 days.
 
@@ -21,17 +24,21 @@ TASK_QUEUE = "voice-research"
 SYNC_WORKFLOW_ID = "valr-gmail-sync"
 POLL_SCHEDULE = "valr-gmail-poll"
 WATCH_SCHEDULE = "valr-gmail-watch"
+BACKFILL_RESUME_PATCH = "gmail-backfill-resume"
+PAUSED = "paused-ratelimit"
+RESUME_AFTER = timedelta(minutes=2)  # After a rate limit.
+MORE_AFTER = timedelta(seconds=30)  # After a run that hit the per-run cap.
 
 
 @dataclass
 class GmailSyncInput:
-    reason: str  # push | poll | manual | backfill
+    reason: str  # push | poll | manual | resume
     history_id: int = 0  # From the push, when there is one (skip if already processed).
 
 
 @dataclass
 class GmailSyncSummary:
-    mode: str = ""  # history | backfill | recovery | skipped
+    mode: str = ""  # history | backfill | recovery | skipped | paused-ratelimit
     fetched: int = 0
     kept: int = 0
     dropped: int = 0
@@ -39,6 +46,8 @@ class GmailSyncSummary:
     llm_calls: int = 0
     usd: float = 0.0
     error: str = ""
+    more: bool = False  # Not finished (per-run cap or rate limit): run again soon.
+    left: int = 0  # Messages listed but not looked at yet.
 
 
 @dataclass
@@ -76,10 +85,15 @@ class GmailSyncWorkflow:
                 retry_policy=RetryPolicy(maximum_attempts=3, initial_interval=timedelta(seconds=15)))
             if not self.pokes:
                 break
+            if summary.mode == PAUSED and workflow.patched(BACKFILL_RESUME_PATCH):
+                break  # Rate limited: no pass right away, the resume below waits first.
         await workflow.execute_activity(
             "leads_refresh", request.reason, result_type=RefreshSummary,
             start_to_close_timeout=timedelta(minutes=3),
             retry_policy=RetryPolicy(maximum_attempts=3, initial_interval=timedelta(seconds=10)))
+        if summary.more and workflow.patched(BACKFILL_RESUME_PATCH):
+            await workflow.sleep(RESUME_AFTER if summary.mode == PAUSED else MORE_AFTER)
+            workflow.continue_as_new(GmailSyncInput("resume"))
         return summary
 
     @workflow.signal
