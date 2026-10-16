@@ -3,6 +3,8 @@
     VALR_DEV_PREVIEW=1 python scripts/preview_ui.py        # http://127.0.0.1:8090/ and /valr
     .../valr?scenario=empty                                 # first run: nothing connected, no data
     .../valr?scenario=error                                 # the calendar store is down
+    VALR_DEV_PREVIEW=1 python scripts/preview_ui.py --performance data/performance.json
+                                                            # your own scores in the Performance section
 
 No Postgres, Temporal, Deepgram or LLM: the cockpit shows tests/valr_sample.py's made-up
 interviews, its buttons change in-memory state only, and a call talks to the stub
@@ -29,6 +31,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--port", type=int, default=8090)
     parser.add_argument("--host", default=HOST, help=argparse.SUPPRESS)
+    parser.add_argument("--performance", type=Path,
+                        help="a real performance.json to render (local only; never served beyond 127.0.0.1)")
     args = parser.parse_args()
 
     import uvicorn
@@ -52,8 +56,16 @@ def main() -> None:
         scenario.set(wanted if wanted in ("full", "empty", "error") else "full")
         return await call_next(request)
 
+    real = None
+    if args.performance:
+        import json
+        real = valr_view.performance(json.loads(args.performance.read_text(encoding="utf-8")))
+
     async def collect(pool, now=None):
-        return sample_view(paused=state["paused"], scenario=scenario.get())
+        view = sample_view(paused=state["paused"], scenario=scenario.get())
+        if real is not None and scenario.get() == "full":
+            view["performance"] = real
+        return view
 
     class Pool:
         def connection(self):

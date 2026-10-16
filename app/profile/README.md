@@ -9,7 +9,8 @@ is gitignored and written with mode 0600. Compensation figures exist only in
 ```
 python scripts/build_profile.py --resume "<resume.pdf>"          # data/profile.json
 python scripts/import_recordings.py [--from-export DIR]           # v1 analyses and v2 scores
-python scripts/score_performance.py [--from-export DIR] --purge   # rescore stored analyses (v2)
+python scripts/score_performance.py [--from-export DIR] --purge   # rescore stored analyses (rubric)
+python scripts/refresh_insights.py [--no-fetch] [--force-coach]   # interviewer cues + coach read (v3)
 python scripts/import_recordings.py --purge                       # delete raw downloads
 ```
 
@@ -24,7 +25,7 @@ does the analysis and scoring.
 | `data/profile.json` (`VALR_PROFILE_PATH`) | 1 | `brief`. The UI must not show `compensation`. |
 | `data/evaluation.json` (`VALR_EVALUATION_PATH`) | `schema_version` 2 (absent means 1) | `brief_text` for the prompt; `interviews[]` (v1 analysis); `trends` (v1, 1-5); `performance_path` |
 | `data/interview_scores.csv` and `.json` (`VALR_SCORES_PATH`) | 1 | v1 dated 1-5 scores (kept for compatibility) |
-| `data/performance.json` (`VALR_PERFORMANCE_PATH`) | 2 | Granular rubric and chart-ready trends (below) |
+| `data/performance.json` (`VALR_PERFORMANCE_PATH`) | 3 (2 still readable) | Granular rubric, chart-ready trends, interviewer cues, the coach's read (below) |
 | `data/performance_scores.csv` (`VALR_PERFORMANCE_CSV`) | 2 | Long table: `date, interview_id, company, company_stage, round_type, outcome, level, dimension, subdimension, score, justification, quote` |
 
 ## performance.json (schema 2)
@@ -56,6 +57,42 @@ The main keys are:
 - `callouts.most_improved` and `callouts.biggest_risk` name a sub-dimension `key`; the risk is the lowest latest moving average.
 - `recurring_weak_topics[]` holds `{topic, verdict, occurrences[{date, interview_id, status, note}]}`.
 - `trend_text`: at most 150 tokens. The same text is the `Trend:` section of `evaluation.json`'s `brief_text`.
+
+## Schema 3 additions (all optional for readers; v2 keys unchanged)
+
+- `coach`: the plain-language read for a human (app/profile/coach.py): `where_you_stand`,
+  `whats_working[]`, `whats_costing_you[2]` (why it matters, a real quote with its date and
+  company, what to do instead, a model rephrase), `this_weeks_focus[3]` drills,
+  `negotiation` scripts (placeholders, never figures), `interviewers` (leaned in /
+  disengaged), `headline`, and `numbers` (supporting detail). Claude Sonnet writes it from
+  the structured data; quotes are cited by id from a quote bank, so every example is real.
+  Cached by `input_hash`; regenerated only when the data changes. `trend_text` (and the
+  brief's Trend line) is now the coach headline plus the first drill.
+- `interviews[].impression` (app/profile/impressions.py): what the interviewer signalled.
+  Measured from the transcript: talk share, follow-up rate, answer length, warm vs flat
+  acknowledgements, approximate interruptions, clarification requests, rushing, the close
+  and the call length against its calendar slot. Read by Sonnet: cues from the taxonomy
+  below, each with the interviewer's words (<= 20 words, verified against the transcript,
+  else dropped), a timestamp and what the candidate had just said. `score` (0-10) is
+  computed from `components` (engagement .30, positive .25, next steps .20, warning signs
+  .15 inverted, talk balance .10). `coverage: "derived"` = no transcript any more (only the
+  talk balance from the stored analysis, no score).
+- `impressions`: impression by outcome, its correlation with advancing (only with >= 2
+  advanced and >= 2 rejected), and with the rubric score.
+
+Cue taxonomy: engagement (follow_up_probe, deep_dive, warm_acknowledgement,
+flat_acknowledgement, interruption), positive (explicit_praise, future_framing,
+team_or_logistics, selling_company), negative (rushing, cut_short, clarification_request,
+skepticism, brush_off_close), next_step (concrete_next_step, vague_next_step).
+
+## Post-call report (Telegram)
+
+app/post_call.py (worker loop) + app/profile/post_call.py (scoring and text). A new
+recording reaches it through the notetaker webhook hook (app/profile/notetaker_hook.py,
+queue only) or the worker's 30-minute Fathom check. The worker classifies it, scores it,
+reads the cues, adds it to performance.json (when the data directory is writable) and sends
+a short report to the owner's linked Telegram chat; without a linked chat it waits as
+"pending" on the dashboard. The report never carries pay figures, emails or phone numbers.
 
 ## Briefing
 
