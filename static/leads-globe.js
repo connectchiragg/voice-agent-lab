@@ -2,7 +2,7 @@
 //
 //   import { mount } from "/static/leads-globe.js";
 //   const globe = await mount(element, data, { onSelect(node) { ... } });
-//   globe.update(data); globe.select(id); globe.focus(id); globe.destroy();
+//   globe.update(data); globe.select(id); globe.focus(id); globe.hover(id); globe.destroy();
 //
 // `data` is {leads: [{id, company, temperature, band, stage, stage_label?, last_touch_at,
 // status?}]}: the live leads (and the closed ones when the page shows them). Only leads are
@@ -12,12 +12,13 @@
 // the top, the coldest at the bottom, closed (if shown) last, so the sphere reads like a
 // thermometer and auto-rotation brings every lead round to the front. Colour = band (a
 // distinct colour per band, a small ramp inside it); size = stage (later stages bigger), so
-// colour and size say different things. Every lead has a label; a label that would overlap a
-// nearer one is hidden until hovered or focused, and labels on the far side fade out.
+// colour and size say different things. Every lead has a label, placed in a free slot around
+// its dot or further out with a leader line (`placeLabels`); one is hidden only when no slot is
+// free, or while its dot is on the far side (it fades in as the dot turns to the front).
 // Hovering a node or label shows "Company · band · score · stage · last touch".
 //
 // Options: onSelect({type: "lead", id, lead} | null), maxNodes (default 150), labels (most
-// labels drawn, default 80), reducedMotion (default: the media query; true = no
+// labels drawn, default 150: every drawn lead), reducedMotion (default: the media query; true = no
 // auto-rotation, no inertia, no animated focus), threeUrl (an ES module build of three.js;
 // default pinned below), now (Date for "3 days ago"; default the current time). Without
 // WebGL it resolves to {supported: false} and draws nothing: the host shows its list. The
@@ -104,21 +105,47 @@ export function layout(data, { maxNodes = 150, radius = RADIUS } = {}) {
   return { nodes, hidden: leads.length - n };
 }
 
+// Where a label may go, around its dot: [dx, dy] in units of (dot radius + gap); the label's
+// box is anchored by side (right of the point, left of it, or centred).
+const NEAR = [[1, 0, "l"], [-1, 0, "r"], [0.8, -0.9, "l"], [0.8, 0.9, "l"], [-0.8, -0.9, "r"], [-0.8, 0.9, "r"],
+  [0, -1.3, "c"], [0, 1.3, "c"]];
+
 /**
- * Which labels to show. items: [{id, x, y, w, h, depth (1 front .. -1 back), forced}]. Forced
- * labels go first, then nearer ones; a label overlapping one already placed is culled, and
- * labels on the far side are culled. Returns Map id -> {show, opacity}.
+ * Places labels without overlaps. items: [{id, x, y (the dot's centre, px), r (its radius, px),
+ * w, h, depth (1 front .. -1 back), forced}]. Forced labels (hovered, focused, selected) go
+ * first, then nearer ones. Each label tries 8 slots around its dot, then the same 8 slots
+ * further out (twice) with a leader line; it is hidden only when all 24 collide, or on the far side.
+ * Slots that cover another dot are tried after the free ones. Returns Map id -> {show,
+ * opacity, x, y (the label box's top-left), leader (bool), ax, ay (the leader's dot end)}.
  */
-export function placeLabels(items, { pad = 2 } = {}) {
+export function placeLabels(items, { width = Infinity, height = Infinity, pad = 2, gap = 3, far = 26 } = {}) {
   const out = new Map(), placed = [];
+  const dots = items.filter((it) => it.depth > -0.05).map((it) => [it.x - it.r, it.y - it.r, it.x + it.r, it.y + it.r, it.id]);
+  const hits = (box, list) => list.some((p) => box[0] < p[2] && box[2] > p[0] && box[1] < p[3] && box[3] > p[1]);
   const order = [...items].sort((a, b) => (b.forced - a.forced) || (b.depth - a.depth));
   for (const it of order) {
-    const opacity = Math.max(0, Math.min(1, (it.depth + 0.2) / 0.45));
-    const box = [it.x - pad, it.y - pad, it.x + it.w + pad, it.y + it.h + pad];
-    const clash = placed.some((p) => box[0] < p[2] && box[2] > p[0] && box[1] < p[3] && box[3] > p[1]);
-    const show = Boolean(it.forced) || (opacity > 0.05 && !clash);
-    if (show) placed.push(box);
-    out.set(it.id, { show, opacity: it.forced ? 1 : opacity });
+    const opacity = it.forced ? 1 : Math.max(0, Math.min(1, (it.depth + 0.15) / 0.4));
+    let spot = null;
+    if (opacity > 0.05) {
+      const slots = [];
+      for (const [extra, leader] of [[0, false], [far, true], [far * 2, true]]) {
+        for (const [dx, dy, side] of NEAR) {
+          const reach = it.r + gap + extra;
+          const px = it.x + dx * reach, py = it.y + dy * reach;
+          const x = side === "l" ? px : side === "r" ? px - it.w : px - it.w / 2;
+          const y = py - it.h / 2;
+          slots.push({ x, y, leader, box: [x - pad, y - pad, x + it.w + pad, y + it.h + pad] });
+        }
+      }
+      const inside = slots.filter((s) => s.box[0] >= 0 && s.box[1] >= 0 && s.box[2] <= width && s.box[3] <= height);
+      const others = dots.filter((d) => d[4] !== it.id);
+      spot = inside.find((s) => !hits(s.box, placed) && !hits(s.box, others))
+        || inside.find((s) => !hits(s.box, placed))
+        || (it.forced ? (inside[0] || slots[0]) : null);
+    }
+    if (spot) placed.push(spot.box);
+    out.set(it.id, spot ? { show: true, opacity, x: spot.x, y: spot.y, leader: spot.leader, ax: it.x, ay: it.y }
+      : { show: false, opacity, x: it.x, y: it.y, leader: false, ax: it.x, ay: it.y });
   }
   return out;
 }
@@ -141,7 +168,7 @@ export async function mount(el, data, options = {}) {
   const reduced = options.reducedMotion ?? matchMedia("(prefers-reduced-motion: reduce)").matches;
   const small = el.clientWidth < 640 || innerWidth < 640;
   const maxNodes = options.maxNodes ?? 150;
-  const maxLabels = options.labels ?? 80;
+  const maxLabels = options.labels ?? 150;
   if (!webglAvailable()) {
     el.classList.add("globe-unsupported");
     return { supported: false, update() {}, select() {}, focus() {}, destroy() {} };
@@ -160,6 +187,17 @@ export async function mount(el, data, options = {}) {
   canvas.setAttribute("aria-hidden", "true");
   const labels = document.createElement("div");
   labels.className = "globe-labels";
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("class", "globe-leaders"); svg.setAttribute("aria-hidden", "true");
+  labels.append(svg);
+  const leaders = [];
+  function leaderLine(i) {
+    while (leaders.length <= i) {
+      const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
+      svg.append(line); leaders.push(line);
+    }
+    return leaders[i];
+  }
   const tip = document.createElement("div");
   tip.className = "globe-tip"; tip.hidden = true; tip.setAttribute("aria-hidden", "true");
   el.append(canvas, labels, tip);
@@ -196,7 +234,7 @@ export async function mount(el, data, options = {}) {
 
   const ball = new THREE.SphereGeometry(1, small ? 12 : 20, small ? 8 : 14);
   let graph = null, meshes = [], byId = new Map(), labelEls = new Map(), sizes = new Map();
-  let selected = null, hovered = null, focused = null, dirty = true;
+  let selected = null, hovered = null, focused = null, dirty = true, inside = false;
 
   function clear() {
     for (const mesh of meshes) {
@@ -204,7 +242,7 @@ export async function mount(el, data, options = {}) {
       mesh.children.forEach((child) => child.material.dispose());
     }
     meshes = []; byId = new Map();
-    labels.replaceChildren(); labelEls = new Map(); sizes = new Map();
+    labels.replaceChildren(svg); labelEls = new Map(); sizes = new Map();
   }
 
   function build(next) {
@@ -370,6 +408,8 @@ export async function mount(el, data, options = {}) {
   canvas.addEventListener("pointerup", onUp);
   canvas.addEventListener("pointercancel", onUp);
   canvas.addEventListener("pointerleave", () => setHover(null));
+  el.addEventListener("pointerenter", (event) => { if (event.pointerType === "mouse") inside = true; });
+  el.addEventListener("pointerleave", () => { inside = false; lastInput = performance.now(); });
   canvas.addEventListener("wheel", onWheel, { passive: false });
   canvas.style.touchAction = "none";
   // Labels are buttons: hover or focus shows the tooltip (focus also turns the lead to the
@@ -393,7 +433,8 @@ export async function mount(el, data, options = {}) {
     camera.updateProjectionMatrix();
     if (!zoomed) {  // Fit the sphere and its labels in the narrower side.
       const half = Math.atan(Math.tan(camera.fov * Math.PI / 360) * Math.min(1, camera.aspect));
-      distance = Math.max(260, (RADIUS * 1.32) / Math.tan(half));
+      // The sphere fills most of the panel; a portrait panel keeps room for side labels.
+      distance = Math.max(220, (RADIUS * (camera.aspect < 1 ? 1.3 : 1.12)) / Math.tan(half));
     }
     dirty = true;
   }
@@ -409,24 +450,38 @@ export async function mount(el, data, options = {}) {
     return [(projected.x + 1) / 2 * el.clientWidth, (1 - projected.y) / 2 * el.clientHeight, depth];
   }
   function drawLabels() {
-    const items = [];
+    const items = [], height = el.clientHeight;
+    const unit = height / (2 * Math.tan(camera.fov * Math.PI / 360));  // Pixels per world unit at distance 1.
     for (const [id, label] of labelEls) {
+      const mesh = byId.get(id);
+      mesh.getWorldPosition(projected);
+      const r = mesh.scale.x * unit / Math.max(1, distance - projected.z);  // The dot's radius on screen.
       const [x, y, depth] = project(id);
       const [w, h] = sizes.get(id);
-      const r = byId.get(id).userData.r;
       const forced = id === hovered || id === focused || id === selected ? 1 : 0;
-      const right = x + r * 0.9 + 3;  // Beside the node; on its left near the right edge.
-      const left = right + w > el.clientWidth - 4 ? x - r * 0.9 - 3 - w : right;
-      items.push({ id, x: Math.max(2, left), y: y - h / 2, w, h, depth, forced, label });
+      items.push({ id, x, y, r, w, h, depth, forced, label });
     }
-    const shown = placeLabels(items);
+    const shown = placeLabels(items, { width: el.clientWidth, height });
+    let shownFront = 0, front = 0, used = 0;
     for (const it of items) {
       const state = shown.get(it.id);
-      it.label.style.transform = `translate(${it.x.toFixed(1)}px, ${it.y.toFixed(1)}px)`;
+      if (it.depth > 0) { front++; if (state.show) shownFront++; }
+      it.label.style.transform = `translate(${state.x.toFixed(1)}px, ${state.y.toFixed(1)}px)`;
       it.label.style.opacity = state.opacity.toFixed(2);
       it.label.classList.toggle("is-culled", !state.show);
       it.label.classList.toggle("is-forced", Boolean(it.forced));
+      if (state.show && state.leader) {
+        const line = leaderLine(used++);
+        const ex = Math.max(state.x, Math.min(state.x + it.w, it.x)), ey = Math.max(state.y, Math.min(state.y + it.h, it.y));
+        line.setAttribute("x1", it.x.toFixed(1)); line.setAttribute("y1", it.y.toFixed(1));
+        line.setAttribute("x2", ex.toFixed(1)); line.setAttribute("y2", ey.toFixed(1));
+        line.style.opacity = (0.55 * state.opacity).toFixed(2);
+        line.style.display = "";
+      }
     }
+    for (let i = used; i < leaders.length; i++) leaders[i].style.display = "none";
+    el.dataset.labelledFront = String(shownFront);  // Measured: labelled front-facing dots / front-facing dots.
+    el.dataset.front = String(front);
     const tipId = hovered || focused;
     if (!tip.hidden && tipId && byId.has(tipId)) {
       const [x, y] = project(tipId);
@@ -452,8 +507,8 @@ export async function mount(el, data, options = {}) {
     } else if (!dragging && !reduced && (Math.abs(velocity.x) + Math.abs(velocity.y) > 1e-4)) {
       rotate(velocity.x, velocity.y);
       velocity = { x: velocity.x * 0.94, y: velocity.y * 0.94 };
-    } else if (!dragging && auto && !selected && !hovered && !focused && performance.now() - lastInput > 2500) {
-      rotate(0.0016, 0);
+    } else if (!dragging && auto && !selected && !hovered && !focused && !inside && performance.now() - lastInput > 2500) {
+      rotate(0.0011, 0);  // Slow enough to read the labels as they come round.
     }
     camera.position.set(0, 0, distance);
     camera.lookAt(0, 0, 0);
@@ -472,6 +527,8 @@ export async function mount(el, data, options = {}) {
     update(next) { build(next); },
     select(id) { select(id, false); },
     focus,
+    /** Point at a lead from outside (a list row): highlight it, show its tooltip, turn it to the front. */
+    hover(id) { if (id && byId.has(id)) { setHover(id); focus(id); } else setHover(null); },
     get hidden() { return graph ? graph.hidden : 0; },
     destroy() {
       alive = false; cancelAnimationFrame(frame); observer.disconnect(); io.disconnect();

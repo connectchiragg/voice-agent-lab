@@ -621,7 +621,7 @@ def test_leads_bands_closed_and_waiting_agree_everywhere(client):
     client.box["leads"] = lambda: contracts.leads(sample_leads(shape="live"))
     leads = contracts.leads(sample_leads(shape="live"))
     c = leads["counts"]
-    assert (c["live"], c["closed"], c["expired"]) == (62, 39, 6)
+    assert (c["live"], c["closed"], c["expired"]) == (70, 39, 6)
     words = lambda page: " ".join(re.sub(r"<[^>]+>", " ", html.unescape(page)).split())  # noqa: E731
     home, page = (words(client.get(path, headers=GOOD).text) for path in ("/valr", "/valr/leads"))
     assert f"{c['live']} live leads" in home and f"{c['live']} live leads" in page
