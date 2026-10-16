@@ -1,6 +1,6 @@
 import Foundation
 
-/// What has been sent, kept in ~/Library/Application Support/VALR Recorder Sync/state.json.
+/// What has been sent, kept in ~/Library/Application Support/VALR/state.json.
 /// Holds attachment ids, SHA-256 digests and VALR ids only: no titles, names or audio.
 public struct SyncState: Codable, Equatable, Sendable {
     public struct Done: Codable, Equatable, Sendable {

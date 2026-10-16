@@ -29,7 +29,7 @@ from datetime import datetime, timezone
 from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Request, Response
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from app import phone_recordings as phone
@@ -296,3 +296,17 @@ async def phone_help_page(request: Request) -> HTMLResponse:
                         theme=request.query_params.get("theme"), bell=shell.bell(notes, attention.items(view), clock),
                         lead_dot=bool(notes["leads"]))
     return HTMLResponse(html, headers=NO_CACHE)
+
+
+@router.get("/valr/downloads/mac")
+async def mac_download(request: Request) -> FileResponse:
+    """Settings › Phone call recordings › VALR for Mac › Download: the DMG (owner only), from
+    downloads/ (app/mac_release.py)."""
+    from app import mac_release
+    await valr_dashboard.owner(request)
+    release = mac_release.info()
+    if release is None:
+        raise HTTPException(404, "The Mac app isn't in this build.")
+    return FileResponse(release["path"], media_type="application/x-apple-diskimage", filename=release["file"],
+                        content_disposition_type="attachment",
+                        headers={"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"})

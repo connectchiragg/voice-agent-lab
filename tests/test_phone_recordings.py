@@ -411,3 +411,51 @@ def test_help_markdown_is_escaped_and_nests_lists():
     assert "<h3>Hi &lt;b&gt;</h3>" in out and "<script>" not in out and "&lt;script&gt;" in out
     assert out.count("<ol") == 1 and out.count("<ul") == 1 and "<code>code</code>" in out
     assert "<strong>bold</strong>" in out and out.index("<ul") < out.index("Two")
+
+
+def test_the_mac_app_download_is_owner_only_and_matches_its_manifest(client):
+    import hashlib
+    from app import mac_release
+    release = mac_release.info()
+    assert release is not None, "Run scripts/release_mac.sh: downloads/ has no VALR DMG"
+    assert release["path"].is_file() and release["path"].parent == mac_release.DOWNLOADS
+    assert release["file"] == f"VALR-{release['version']}.dmg" and release["size"] < 10_000_000
+    data = release["path"].read_bytes()
+    assert hashlib.sha256(data).hexdigest() == release["sha256"] and data[-512:-508] == b"koly"  # A real UDIF image.
+
+    assert client.get("/valr/downloads/mac").status_code == 403
+    assert client.get("/valr/downloads/mac", headers={"Cf-Access-Jwt-Assertion": "guest"}).status_code == 403
+    got = client.get("/valr/downloads/mac", headers=client.good)
+    assert got.status_code == 200 and got.content == data
+    assert got.headers["content-type"] == "application/x-apple-diskimage"
+    assert got.headers["content-disposition"] == f'attachment; filename="{release["file"]}"'
+    assert "no-store" in got.headers["cache-control"]
+
+
+def test_mac_release_info_refuses_a_bad_manifest(tmp_path):
+    import json
+    from app import mac_release
+    assert mac_release.info(tmp_path) is None
+    (tmp_path / "VALR-1.2.3.dmg").write_bytes(b"x" * 2048)
+    good = {"version": "1.2.3", "file": "VALR-1.2.3.dmg", "sha256": "a" * 64}
+    (tmp_path / "mac.json").write_text(json.dumps(good))
+    assert mac_release.info(tmp_path)["size_label"] == "2 KB"
+    for bad in ({"file": "../secrets.dmg"}, {"sha256": "nope"}, {"version": "9.9.9"}):
+        (tmp_path / "mac.json").write_text(json.dumps({**good, **bad}))
+        assert mac_release.info(tmp_path) is None, bad
+
+
+def test_settings_shows_the_phone_recordings_section(client):
+    from app import mac_release
+    page = client.get("/valr/settings", headers=client.good).text
+    card = page[page.index('id="phone-recordings"'):]
+    card = card[:card.index("</li>\n")] if "</li>\n" in card else card
+    for text in ("Record calls on iPhone", "More → Call Recording", "saves the recording in Notes",
+                 "Share → Send to VALR", 'href="/valr/settings/phone-help"',
+                 "VALR for Mac", 'href="/valr/downloads/mac"', "drag VALR to Applications", "right-click VALR",
+                 "Full Disk Access", "Start syncing", "same iCloud with Notes sync on",
+                 "note text never leaves your Mac", "Upload token", "share the same token",
+                 'data-phone-action="show"', 'data-phone-action="rotate"', "Status", "data-phone-status"):
+        assert text in card, text
+    release = mac_release.info()
+    assert f"version {release['version']}" in card and release["sha256"] in card and release["size_label"] in card

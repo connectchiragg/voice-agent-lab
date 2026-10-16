@@ -1,4 +1,4 @@
-# VALR Recorder Sync (macOS menu-bar app)
+# VALR for Mac (menu-bar app)
 
 When you record a phone call on an iPhone (iOS 18.1 or later), the iPhone saves it in **Notes** as an
 audio file plus a transcript. iCloud then copies that note to your Mac. This small menu-bar app
@@ -6,7 +6,7 @@ notices each new call recording on the Mac and sends the audio to VALR. VALR tra
 to **Past interviews**, the same as a Truecaller upload.
 
 ```
-iPhone call  →  Notes (iCloud)  →  this Mac  →  VALR Recorder Sync  →  POST /hooks/recording-upload  →  Past interviews
+iPhone call  →  Notes (iCloud)  →  this Mac  →  VALR (menu bar)  →  POST /hooks/recording-upload  →  Past interviews
 ```
 
 - Menu-bar only (no Dock icon). It can open at login. Needs macOS 14 or later.
@@ -16,24 +16,32 @@ iPhone call  →  Notes (iCloud)  →  this Mac  →  VALR Recorder Sync  →  P
   (a phone number), it is replaced with "Phone call", so no number leaves the Mac.
 - The upload token is kept in the macOS **Keychain**. The app never writes it to a file or a log.
 - An item counts as done only after VALR answers `ok`. What was sent is recorded in
-  `~/Library/Application Support/VALR Recorder Sync/state.json`, which holds attachment IDs, SHA-256
+  `~/Library/Application Support/VALR/state.json`, which holds attachment IDs, SHA-256
   digests and VALR IDs only.
 - Optional and **off by default**: after VALR confirms a recording, the app moves the note to Notes'
   **Recently Deleted** folder, where Notes keeps it for 30 days.
 
+The app is called **VALR** (`VALR.app`, bundle ID `com.haciensus.valr.mac`) and uses VALR's orb as
+its icon; in the menu bar it shows a monochrome version of the orb that follows light and dark mode.
+
 ## Install and set up (owner, about 3 minutes)
 
-1. **Build it** (or take the .dmg someone sent you):
+> **Quit the old VALR Recorder Sync if you installed it.** Its menu › **Quit VALR Recorder Sync**,
+> then move `/Applications/VALR Recorder Sync.app` to the Bin. VALR picks up its settings, its
+> history of what was sent and its upload token by itself (see *Upgrading from VALR Recorder Sync*).
+
+1. **Download it:** in VALR, **Settings › Phone call recordings › VALR for Mac › Download for Mac**
+   (`VALR-<version>.dmg`; the page shows its SHA-256). Or build it:
    ```bash
    cd ~/projects/voice-agent-lab-macsync/mac
-   ./build.sh            # makes dist/VALR Recorder Sync.app, plus a .zip and a .dmg
+   ./build.sh            # makes dist/VALR.app, plus VALR-<version>.zip and VALR-<version>.dmg
    ```
-2. **Install it:** drag `dist/VALR Recorder Sync.app` into **Applications**. Install it there first:
+2. **Install it:** open the DMG and drag **VALR** into **Applications**. Install it there first:
    macOS ties Full Disk Access to the app's location and signature.
 3. **Open it the first time:** right-click the app and choose **Open**, then **Open** again.
    You only need to do this once, because the app is not notarized.
    - If macOS still blocks it, open **System Settings › Privacy & Security** and click **Open Anyway**.
-   - Or run: `xattr -dr com.apple.quarantine "/Applications/VALR Recorder Sync.app"`.
+   - Or run: `xattr -dr com.apple.quarantine /Applications/VALR.app`.
 4. The setup window opens:
    1. **VALR address:** leave `https://valr.haciensus.com`.
    2. **Upload token:** in VALR, open **Settings › Phone call recordings › Show upload token**.
@@ -43,12 +51,12 @@ iPhone call  →  Notes (iCloud)  →  this Mac  →  VALR Recorder Sync  →  P
         **Rotate** in VALR would break the Shortcut.
    3. **Full Disk Access:**
       1. Click **Open Full Disk Access settings**.
-      2. Click **+** and choose **Applications › VALR Recorder Sync**, or switch it on if it's
+      2. Click **+** and choose **Applications › VALR**, or switch it on if it's
          already in the list.
       3. The step in the app turns green by itself.
    4. **Options:** "Move the note to Recently Deleted" is off by default. If you turn it on, macOS
-      asks once: *"VALR Recorder Sync wants to control Notes"*. Click **Allow**.
-5. Click **Start syncing**. A waveform icon appears in the menu bar.
+      asks once: *"VALR wants to control Notes"*. Click **Allow**.
+5. Click **Start syncing**. The VALR orb appears in the menu bar.
 6. **Check it:** open **Settings… › Check Notes**. It shows counts only, for example
    "Call recordings ready to send: 1".
 7. **Test it end to end:** make a short call on the iPhone and record it. Wait until the note appears
@@ -63,6 +71,33 @@ iPhone call  →  Notes (iCloud)  →  this Mac  →  VALR Recorder Sync  →  P
 - need Full Disk Access granted again (remove the app from the list and add it back).
 
 A Developer ID signature (see below) avoids this.
+
+## Upgrading from VALR Recorder Sync
+
+The app used to be called "VALR Recorder Sync" (bundle ID `com.haciensus.valr.recordersync`).
+On its first launch, VALR (`Sources/RecorderSyncCore/LegacyMigration.swift`):
+- moves `~/Library/Application Support/VALR Recorder Sync/` to `…/VALR/`, so recordings already
+  sent are not sent again (VALR de-duplicates anyway);
+- copies the settings (VALR address, options, setup done) from the old preferences;
+- reads the same Keychain item: its service name, `com.haciensus.valr.recordersync.upload-token`,
+  did not change. macOS may ask once whether VALR may use it: click **Always Allow**.
+
+What you do by hand:
+1. Quit the old app (menu › **Quit VALR Recorder Sync**) and move it from Applications to the Bin.
+2. **System Settings › General › Login Items:** remove *VALR Recorder Sync* if it's listed. Turn
+   on "Open at login" again in VALR's Settings if you want it.
+3. **System Settings › Privacy & Security › Full Disk Access:** remove *VALR Recorder Sync* and add
+   **VALR** (the setup window's step turns green).
+
+## Releasing a new version
+
+```bash
+VERSION=1.0.1 scripts/release_mac.sh   # from the repo root
+```
+It runs `mac/build.sh`, copies the DMG to `downloads/VALR-<version>.dmg` (removing older ones) and
+writes `downloads/mac.json` (version, size, SHA-256). Commit `downloads/`: the deploy ships the
+branch with `git archive`, and the Dockerfile copies `downloads/` into the app image. The site
+serves it to the signed-in owner at `GET /valr/downloads/mac`.
 
 ## How it reads the recordings
 
@@ -136,7 +171,7 @@ forensic tools do:
 | **Ad-hoc signed .zip/.dmg** (implemented: `mac/build.sh`) | free | Must right-click › Open once, or clear quarantine (`xattr -dr com.apple.quarantine …`). Rebuilds need Full Disk Access and Keychain access granted again. |
 | **Developer ID signed + notarized** (TODOs with exact `notarytool` commands in `build.sh`) | Apple Developer Program, **US$99/year** | Opens normally with no warnings. Permissions survive updates, because the signature identity stays the same. |
 | **Sparkle auto-updates** (described, not built) | free library; needs a place to host `appcast.xml` (VALR's static files, or GitHub Releases) | The app checks for updates and installs them itself. Use it together with Developer ID signing. Updates are signed with an EdDSA key kept outside the repo. |
-| **Homebrew cask** (described) | free | `brew install --cask valr-recorder-sync`. A cask points at a versioned .dmg URL and its SHA-256. You can use your own tap (`brew tap haciensus/valr`) from the start. The official homebrew-cask repository only accepts notarized, reasonably popular apps. |
+| **Homebrew cask** (described) | free | `brew install --cask valr`. A cask points at a versioned .dmg URL and its SHA-256. You can use your own tap (`brew tap haciensus/valr`) from the start. The official homebrew-cask repository only accepts notarized, reasonably popular apps. |
 
 **Recommendation:** use the free ad-hoc build while VALR has one user. Move to Developer ID,
 notarization and Sparkle once someone outside the team installs it.
@@ -173,7 +208,7 @@ VALR is single-owner today: there is one upload token, a hash of which is stored
 ```bash
 cd mac
 ./test.sh                                  # unit tests: fixture Notes DB + local mock server
-./build.sh                                 # release .app, .zip, .dmg in mac/dist/
+./build.sh                                 # VALR.app, VALR-<version>.zip/.dmg in mac/dist/
 cd VALRRecorderSync && swift build         # debug build
 ```
 
@@ -200,6 +235,7 @@ cd VALRRecorderSync && swift build         # debug build
 | `Keychain.swift` | The token. |
 | `NotesDeleter.swift` | AppleScript to move a note to Recently Deleted, after checking the note's title. |
 | `Pairing.swift` | The future "Connect a Mac" pairing. |
+| `LegacyMigration.swift` | Carries an install over from the old name, VALR Recorder Sync. |
 | `Sources/VALRRecorderSync/` | SwiftUI menu-bar app, setup, Settings, FSEvents watcher, notifications, open at login (`SMAppService`). |
 
 **Retries:**

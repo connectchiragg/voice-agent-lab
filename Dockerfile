@@ -53,6 +53,9 @@ COPY app ./app
 COPY static ./static
 # Settings › Phone call recordings › "iPhone shortcut steps" renders this doc (app/phone_help.py).
 COPY docs/phone-recordings.md ./docs/phone-recordings.md
+# Settings › Phone call recordings › VALR for Mac: the DMG and its manifest (app/mac_release.py,
+# scripts/release_mac.sh), served at /valr/downloads/mac.
+COPY downloads ./downloads
 ENV PATH=/opt/venv/bin:$PATH \
     PYTHONUNBUFFERED=1 \
     HOST=0.0.0.0 \

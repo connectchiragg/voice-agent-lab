@@ -449,7 +449,7 @@ def test_every_route_is_public_or_needs_the_owner():
                  "/valr/interviews/past/{slug}", "/valr/leads", "/valr/api/notetakers/{provider}/connect",
                  "/valr/api/notifications", "/valr/api/notifications/read", "/valr/api/notifications/settings",
                  "/valr/api/recording/audio", "/valr/api/phone/status", "/valr/api/phone/token",
-                 "/valr/settings/phone-help",
+                 "/valr/settings/phone-help", "/valr/downloads/mac",
                  "/valr/api/push", "/valr/api/push/subscribe", "/valr/api/push/unsubscribe", "/valr/api/push/test"):
         assert path in paths and gate.classify(path) == "owner", path
     assert gate.classify("/valrx") is None and gate.classify("/staticx") is None

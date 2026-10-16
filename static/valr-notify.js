@@ -202,7 +202,7 @@ function startPhone() {
   const value = document.querySelector("[data-phone-token-value]");
   document.querySelectorAll("[data-phone-action]").forEach(button => button.addEventListener("click", async () => {
     const action = button.dataset.phoneAction;
-    if (action === "rotate" && !confirm("Rotate the upload token? The Shortcut stops working until you paste the new one.")) return;
+    if (action === "rotate" && !confirm("Rotate the upload token? VALR for Mac and the iPhone Shortcut stop sending until you paste the new one into both.")) return;
     try {
       const data = await api("/valr/api/phone/token", {action});
       value.textContent = data.token;

@@ -19,7 +19,8 @@ final class AppModel: ObservableObject {
     @Published private(set) var problem: SyncReport.Problem?
 
     let reader = NotesStoreReader()
-    let store = StateStore()
+    // Carries over an install from before the rename ("VALR Recorder Sync") before anything reads state or settings.
+    let store: StateStore = { LegacyMigration.run(); return StateStore() }()
     let keychain = TokenKeychain()
     private lazy var engine = SyncEngine(source: { [reader] in try reader.read() }, store: store,
                                          deleter: AppleScriptNoteDeleter())

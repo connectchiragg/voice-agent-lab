@@ -45,7 +45,7 @@ struct OnboardingView: View {
             }
 
             step(3, "Full Disk Access", done: model.access == .granted) {
-                Text("Call recordings live inside the Notes data, which macOS protects. Open System Settings › Privacy & Security › Full Disk Access, click +, and add VALR Recorder Sync (or switch it on). This step turns green by itself.")
+                Text("Call recordings live inside the Notes data, which macOS protects. Open System Settings › Privacy & Security › Full Disk Access, click +, and add VALR (or switch it on). This step turns green by itself.")
                     .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 HStack {
                     Button("Open Full Disk Access settings") { model.openFullDiskAccessSettings() }
@@ -127,7 +127,7 @@ struct OnboardingView: View {
         busy = true; defer { busy = false }
         do {
             let paired = try await PairingClient(server: model.settings.serverURL)
-                .exchange(code: pairingCode, deviceName: "VALR Recorder Sync on \(Host.current().localizedName ?? "Mac")")
+                .exchange(code: pairingCode, deviceName: "VALR on \(Host.current().localizedName ?? "Mac")")
             try model.saveToken(paired.token)
             tokenOK = true
             tokenMessage = "Connected."
