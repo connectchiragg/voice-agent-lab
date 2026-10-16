@@ -170,6 +170,90 @@ cat ~/voice-agent-lab/DEPLOYED_COMMIT
 REMOTE
 }
 
+# Disk retention on the VM (a full disk once failed a build: 52 rollback tags, build cache,
+# old trees). Thresholds in GB, from the Mac's environment.
+PRUNE_BELOW_GB=${PRUNE_BELOW_GB:-6}
+ABORT_BELOW_GB=${ABORT_BELOW_GB:-4}
+KEEP_STAMPS=${KEEP_STAMPS:-2}       # rollback stamps (deploys) whose tags are kept
+KEEP_TREES=${KEEP_TREES:-2}         # newest ~/voice-agent-lab.prev-* and .bad-* trees kept
+BUILD_CACHE_MAX=${BUILD_CACHE_MAX:-3gb}
+
+# Bash functions sent ahead of the retention scripts below.
+VM_PRUNE_FN=''
+IFS= read -r -d '' VM_PRUNE_FN <<'FN' || true  # (not $(cat): bash 3.2 misparses case in it)
+gb_free() { sudo df -Pk /var/lib/docker | awk 'NR==2 {printf "%.1f", $4/1048576}'; }
+below() { awk -v a="$1" -v b="$2" 'BEGIN {exit !(a < b)}'; }
+untag() {  # untag <tag>: removes the image too when nothing else uses it
+  if sudo docker rmi "$1" >/dev/null 2>&1; then removed=$((removed + 1)); else echo "  kept $1 (in use)"; fi
+}
+prune_images() {
+  local tags keep stamp t tag cur removed=0
+  # Rollback tags (repo:rollback-<YYYYMMDD-HHMM>-<container>): keep the KEEP_STAMPS newest stamps.
+  tags=$(sudo docker images --format '{{.Repository}}:{{.Tag}}' | grep -E ':rollback-[0-9]{8}-[0-9]{4}-' || true)
+  keep=$(printf '%s\n' "$tags" | sed -nE 's/.*:rollback-([0-9]{8}-[0-9]{4})-.*/\1/p' | sort -u | tail -n "$KEEP_STAMPS")
+  for t in $tags; do
+    stamp=$(printf '%s' "$t" | sed -E 's/.*:rollback-([0-9]{8}-[0-9]{4})-.*/\1/')
+    printf '%s\n' "$keep" | grep -qx "$stamp" || untag "$t"
+  done
+  echo "rollback tags: removed $removed; kept stamps: $(echo $keep)"
+  # Per-commit tags (voice-agent-lab(-worker):<sha>, also from GHCR): keep the live commit's only.
+  removed=0
+  cur=$(cat ~/voice-agent-lab/DEPLOYED_COMMIT 2>/dev/null || echo none)
+  for t in $(sudo docker images --format '{{.Repository}}:{{.Tag}}' | grep -E '(^|/)voice-agent-lab(-worker)?:[0-9a-f]{7,40}$' || true); do
+    tag=${t##*:}
+    case "$tag" in "$cur"*) ;; *) untag "$t" ;; esac
+  done
+  echo "commit tags: removed $removed (kept $cur)"
+  echo "dangling images: $(sudo docker image prune -f | tail -1)"
+  sudo docker buildx prune -f --max-used-space "$BUILD_CACHE_MAX" >/dev/null 2>&1 \
+    || sudo docker builder prune -f --keep-storage "$BUILD_CACHE_MAX" >/dev/null 2>&1 \
+    || echo "WARNING: build cache prune failed"
+  echo "build cache now: $(sudo docker system df --format '{{.Type}} {{.Size}}' | sed -n 's/^Build Cache //p') (cap $BUILD_CACHE_MAX)"
+}
+FN
+vm_prune() {  # vm_prune <env assignments> < script: sends the functions, then the script
+  local script; script=$(cat)
+  { printf '%s\n' "$(printf '%s\n' "$script" | head -1)" "set -euo pipefail" "$VM_PRUNE_FN";
+    printf '%s\n' "$script"; } \
+    | ssh_vm "KEEP_STAMPS=$KEEP_STAMPS KEEP_TREES=$KEEP_TREES BUILD_CACHE_MAX=$BUILD_CACHE_MAX PRUNE_BELOW_GB=$PRUNE_BELOW_GB ABORT_BELOW_GB=$ABORT_BELOW_GB bash -s"
+}
+
+# Before building or pulling: below PRUNE_BELOW_GB free, prune; still below ABORT_BELOW_GB, stop.
+step_disk_preflight() {
+  say "Disk space on the VM (prune below ${PRUNE_BELOW_GB} GB free, stop below ${ABORT_BELOW_GB} GB)"
+  vm_prune <<'REMOTE'
+# check free disk space; prune old rollback tags and build cache if low; stop if still too low
+free=$(gb_free); echo "free: $free GB"
+if below "$free" "$PRUNE_BELOW_GB"; then
+  echo "under $PRUNE_BELOW_GB GB: pruning first"
+  prune_images
+  free=$(gb_free); echo "free after pruning: $free GB"
+fi
+if below "$free" "$ABORT_BELOW_GB"; then
+  echo "Only $free GB free on the VM (need $ABORT_BELOW_GB GB to build): stopping, nothing live changed." >&2
+  echo "See: sudo docker system df; ls -d ~/voice-agent-lab.*; sudo docker images | grep rollback" >&2
+  exit 6
+fi
+REMOTE
+}
+
+# After a successful deploy only: old rollback/commit tags, dangling images, build cache, old trees.
+step_retention() {
+  say "Retention: keep ${KEEP_STAMPS} rollback stamps and ${KEEP_TREES} old trees of each kind, build cache under ${BUILD_CACHE_MAX}"
+  vm_prune <<'REMOTE'
+# prune old rollback and commit tags, dangling images, build cache over the cap, old .prev-*/.bad-* trees
+echo "free before: $(gb_free) GB"
+prune_images
+for kind in prev bad; do
+  for dir in $(ls -dt ~/voice-agent-lab."$kind"-* 2>/dev/null | tail -n +$((KEEP_TREES + 1))); do
+    rm -rf "$dir" 2>/dev/null || sudo rm -rf "$dir"
+    echo "removed $dir"
+  done
+done
+echo "free after: $(gb_free) GB"
+REMOTE
+}
+
 # Steps after the images exist on the VM as :next. DRY_RUN=1 (env) stops before the swap.
 steps_go_live() {
   step_wait_no_call
@@ -180,6 +264,7 @@ steps_go_live() {
   step_swap_app
   step_worker_and_callbacks
   step_checks
+  step_retention
   print_rollback
 }
 
