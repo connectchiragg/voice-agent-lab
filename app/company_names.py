@@ -58,7 +58,7 @@ AGENCY_DOMAINS = frozenset("""
     shl.com hirevue.com testgorilla.com mettl.com imocha.io xobin.com glider.ai interviewvector.com
     intervue.io barraiser.com incruiter.com flocareer.com gloroots.com recrew.ai recrew.in recrew.com
     watsonsearchpartner.com watsonsearchpartners.com successpact.com crossover.com andela.com
-    randstad.com adecco.com michaelpage.com hays.com roberthalf.com teamlease.com quesscorp.com
+    weekday.works weekday.so weekday.contact randstad.com adecco.com michaelpage.com hays.com roberthalf.com teamlease.com quesscorp.com
     abcconsultants.net kellyservices.com manpowergroup.com ciel.co.in xpheno.com
     """.split())
 # Calendar, video and notetaker tools.
@@ -179,6 +179,57 @@ def words(text: str) -> list[str]:
     return re.findall(r"[a-z0-9]+(?:'[a-z]+)?", (text or "").lower())
 
 
+VERBS = frozenset("""
+    complete join please click submit schedule book confirm accept review take start apply register attend fill
+    upload update verify reply respond share send let meet check read sign log see find get learn discover
+    explore watch try download view save claim unlock activate continue finish prepare select choose pick
+    """.split())
+STOPWORDS = frozenset("is are was were be been the for to of and or a an in on at with by from as this that your our "
+                      "my their his her its it we you i".split())
+MONTHS = "jan feb mar apr may jun jul aug sep sept oct nov dec january february march april june july august " \
+         "september october november december"
+COMMON = COMMON | frozenset(MONTHS.split()) | frozenset("monday tuesday wednesday thursday friday saturday sunday "
+                                                       "today tomorrow yesterday".split())
+FRAGMENT = re.compile(r"\b\d{1,2}(?::\d{2})?\s*(?:am|pm)\b|^\d+(?::\d+)?\s*(?:am|pm)?$|"
+                      rf"^(?:{MONTHS.replace(' ', '|')})\.?\s+\d{{1,2}}(?:st|nd|rd|th)?$|"
+                      rf"^\d{{1,2}}(?:st|nd|rd|th)?\s+(?:{MONTHS.replace(' ', '|')})\.?$", re.I)
+
+
+def is_fragment(name: str) -> bool:
+    """A time or date ("30pm", "10am", "Oct 16"), an imperative ("Complete the Mandatory AI"),
+    or a sentence cut mid-way ("Deployed Engineer is")."""
+    text = (name or "").strip()
+    tokens = words(text)
+    if not tokens:
+        return True
+    return bool(FRAGMENT.search(text)) or tokens[0] in VERBS or tokens[-1] in STOPWORDS
+
+
+NOT_A_PERSON = re.compile(r"\b(?:via|team|hiring|careers?|recruit\w*|talent|jobs?|notifications?|no-?reply|"
+                          r"hr|people|support|info|admin|calendar|scheduling)\b", re.I)
+
+
+def is_person(name: str, people: Iterable[str] = (), everyone: Iterable[str] = ()) -> bool:
+    """Is `name` a person's name: the full, first or last name of one of this touch's `people`
+    (display names like "Acme via Greenhouse" or "Acme Hiring Team" are not people), or a
+    two-word capitalised name that appears as a person anywhere (`everyone`)."""
+    k = key(name)
+    if not k:
+        return False
+    for person in people:
+        if NOT_A_PERSON.search(person or ""):
+            continue
+        parts = [w for w in words(person) if len(w) >= 3]
+        if not parts:
+            continue
+        if k == " ".join(words(person)) or k in parts:
+            return True
+    tokens = (name or "").split()
+    if len(tokens) == 2 and all(t[:1].isupper() for t in tokens):
+        return any(k == " ".join(words(p)) for p in everyone)
+    return False
+
+
 def is_company(name: str, owner: Iterable[str] | None = None) -> bool:
     """False for "", round labels, meeting words, tool names, common words, places alone, a bare
     1-2 letter word, or the owner's name."""
@@ -190,6 +241,8 @@ def is_company(name: str, owner: Iterable[str] | None = None) -> bool:
         return False  # "Meeting between A and B" names people, not a company.
     if all(w in ROLE_WORDS for w in rest):
         return False  # Only role / title words: "Deployed Engineer", "AI Software".
+    if is_fragment(name):
+        return False  # "30pm", "Complete the Mandatory AI", "Deployed Engineer is".
     return any(len(w) >= 3 for w in rest) or (len(rest) == 1 and (name or "").strip().isupper() and len(rest[0]) >= 2)
 
 
@@ -317,7 +370,8 @@ def canonical(name: str, known: Iterable[str] = ()) -> str:
             continue  # "AI" is a brand word only when the longer spelling is the most common.
         chosen = k
     spellings = by_key[chosen]
-    return max(spellings, key=lambda m: (spellings[m], not m.isupper(), not m.islower(), -len(m)))
+    inner = lambda m: bool(re.search(r"[a-z][A-Z]", m))  # noqa: E731 - "HiroJet", "FourKites"
+    return max(spellings, key=lambda m: (inner(m), spellings[m], not m.isupper(), not m.islower(), -len(m)))
 
 
 def same(a: str, b: str) -> bool:
@@ -509,9 +563,10 @@ def resolve(*, attendees: Iterable[str] = (), sender_email: str = "", sender_nam
         for better, _ in human:
             if same(better, name):  # The same company, as people spell it.
                 return Resolution(better, domain, source, agency)
-        if human:
-            better, src = human[0]
-            return Resolution(better, "", src, agency, conflict=f"{name} ({domain})")
+        if spoken:  # Only the existing name may outrank a domain (the model then decides).
+            return Resolution(spoken, "", "stated", agency, conflict=f"{name} ({domain})")
+        if titled:  # A title naming something else: the domain stands, the model is asked.
+            return Resolution(name, domain, source, agency, conflict=f"title: {titled}")
         return Resolution(name, domain, source, agency)
 
     name, domain = from_people(attendees, owners, env, agencies)
@@ -546,6 +601,15 @@ def is_agency_name(name: str, agencies: Iterable[str] = ()) -> bool:
     """Is this name one of the known (or learned) agencies or platforms?"""
     k = key(name).replace(" ", "")
     return bool(k) and any(key(agency_name(d)).replace(" ", "") == k for d in set(AGENCY_DOMAINS) | set(agencies))
+
+
+def firm(found: Resolution, people: Iterable[str] = ()) -> str:
+    """The name only when the rules may give it as a final answer: from a company domain
+    (attendees or sender) or a name the source stated, and never a person's name. Title, ATS and
+    lead guesses are left to the model (app/company_resolver.py)."""
+    if found.source not in ("attendees", "sender", "stated") or is_person(found.name, people):
+        return ""
+    return found.name
 
 
 def label(name: str, owner: Iterable[str] | None = None) -> str:

@@ -137,7 +137,7 @@ def invitee_details(invitees: list[dict[str, Any]], owner_emails: set[str] | Non
     found = company_names.resolve(attendees=[e for _, e in people], title=title, owner_emails=owner_emails,
                                   owner_names=[m for m in mine if m])
     names = [n for n, _ in people if n and "@" not in n]
-    return {"company": found.name, "company_domain": found.domain,
+    return {"company": company_names.firm(found, names + [m for m in mine if m]), "company_domain": found.domain,
             "interviewers": list(dict.fromkeys(names))[:8],
             "invitee_hashes": [email_hash(e) for _, e in people if e][:12]}
 

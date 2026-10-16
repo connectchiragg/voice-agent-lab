@@ -442,8 +442,10 @@ def test_repair_keeps_one_spelling_per_company():
                Touch("gmail:3", "email", at(3), company="Cermati.com", stated="Cermati", direction="in",
                      domain="cermati.example", people=[Contact("bo@cermati.example", "Bo")], title="Next steps"),
                Touch("gmail:4", "email", at(4), company="Recrew AI", stated="Recrew AI", direction="in",
-                     domain="recrew.ai", people=[Contact("x@recrew.ai", "X")], title="Software")]
-    client = FakeClient(*[{"company": "Software", "confidence": 0.9}] * 4)
+                     domain="recrew.ai", people=[Contact("x@recrew.ai", "X")], title="Software"),
+               Touch("gmail:5", "email", at(5), company="Chasi AI", stated="Chasi AI", direction="in",
+                     domain="chasi.example", people=[Contact("ana@chasi.example", "Ana")], title="Re: Role at Chasi AI")]
+    client = FakeClient(*[{"company": "Software", "confidence": 0.9}] * 5)
     run(lead_worker.resolve_touches(FakeConn(), touches, make(client), dry_run=True))
     assert [t.company for t in touches[:3]] == ["Chasi AI", "Chasi AI", "Cermati"]
     assert touches[3].company != "Software"
@@ -514,3 +516,85 @@ def test_answers_cached_by_older_rules_or_for_another_name_are_not_reused():
     a = resolver.Evidence(kind="email", title="Hello", sender_email="x@acme.example", stated="Deriv")
     b = resolver.Evidence(kind="email", title="Hello", sender_email="x@acme.example", stated="Acme")
     assert a.fingerprint() != b.fingerprint()
+
+
+# The 9bbd6e3 dry-run (made-up people stand in for the real ones).
+
+@pytest.mark.parametrize("name", ["30pm", "10am", "10:30 am", "Oct 16", "16 Oct", "Complete the Mandatory AI",
+                                  "Join the AI Challenge", "Deployed Engineer is", "Platform for", "Click here"])
+def test_fragments_are_never_a_company(name):
+    assert not names.is_company(name) and names.clean(name) == ""
+
+
+def test_person_names_are_never_a_company():
+    people = ["Kiran Varma", "Hana Ito"]
+    assert names.is_person("Kiran Varma", people) and names.is_person("Hana", people) and names.is_person("Ito", people)
+    assert not names.is_person("Acme Robotics", people)
+    assert not names.is_person("Aspire", ["Aspire via Greenhouse"])        # A display name, not a person.
+    assert names.is_person("Kiran Varma", [], everyone={"Kiran Varma"})   # Seen as a person anywhere.
+    # A person's own domain never names the company, and the model's answer is checked too.
+    ev = resolver.Evidence(kind="calendar", title="Technical round", people=[("Hana Ito", "hana@hana.example")],
+                           stated="Telnyx")
+    decision, confident, candidates = resolver.rules(ev)
+    assert decision.company in ("Telnyx", "") and decision.company != "Hana"
+    got = run(make(FakeClient({"company": "Hana", "confidence": 0.95})).resolve(FakeConn(), resolver.Evidence(
+        kind="calendar", title="Intro", people=[("Hana Ito", "hana@gmail.com")])))
+    assert got.company == ""
+
+
+@pytest.mark.parametrize("title", ["Interview at 4:30pm", "Complete the Mandatory AI assessment",
+                                   "Deployed Engineer is hiring", "Chat with Kiran Varma", "Screen with Hana Ito"])
+def test_title_guesses_are_candidates_never_answers(title):
+    ev = resolver.Evidence(kind="email", title=title, sender_name="Kiran Varma", sender_email="kiran@gmail.com",
+                           people=[("Hana Ito", "hana@gmail.com")])
+    decision, confident, _ = resolver.rules(ev)
+    assert decision.company == "" and not confident
+
+
+def test_a_title_name_is_final_only_when_already_known():
+    ev = resolver.Evidence(kind="email", title="Interview with Aspire", sender_email="kai@gmail.com")
+    assert resolver.rules(ev)[0].company == ""
+    assert resolver.rules(ev, known={"Aspire"})[0].company == "Aspire"
+
+
+def test_internal_capitals_win_when_only_case_differs():
+    assert names.canonical("Hirojet", ["HiroJet", "Hirojet", "Hirojet"]) == "HiroJet"
+    assert names.canonical("HIROJET", ["HiroJet"]) == "HiroJet"
+
+
+def test_one_thread_never_splits_and_the_model_less_refresh_keeps_names():
+    pytest.importorskip("temporalio")
+    from app import lead_worker
+    touches = [Touch("gmail:a", "email", at(1), company="Razorpay Software", stated="Razorpay Software", direction="in",
+                     domain="razorpay.example", people=[Contact("hr@razorpay.example", "Razorpay Hiring Team")],
+                     title="Your application", thread="t1"),
+               Touch("gmail:b", "email", at(2), company="Razorpay Software", stated="Razorpay Software", direction="in",
+                     domain="razorpay.example", people=[Contact("dev@razorpay.example", "Kiran Varma")],
+                     title="Next steps", thread="t1"),
+               Touch("gmail:c", "email", at(3), company="Razorpay Software", stated="Razorpay Software", direction="in",
+                     domain="ipsoftlabs.example", people=[Contact("hr@ipsoftlabs.example", "Ipsoft Labs HR")],
+                     title="Razorpay role", thread="t1"),
+               Touch("cal:d", "calendar", at(4), company="Telnyx", stated="Telnyx",
+                     people=[Contact("hien@gmail.com", "Hien Tran")], title="Interview at 4:30pm")]
+    r = make(None)  # No model: rules, cache and the stability rule only.
+    run(lead_worker.resolve_touches(FakeConn(), touches, r, dry_run=True))
+    assert [t.company for t in touches[:3]] == ["Razorpay", "Razorpay", "Razorpay"]
+    assert touches[3].company == "Telnyx"
+
+
+def test_repair_has_its_own_budget(monkeypatch):
+    monkeypatch.setenv("VALR_COMPANY_LLM_PER_DAY", "0")
+    conn = FakeConn()
+    r = make(FakeClient({"company": "Zinnov", "confidence": 0.9}, {"company": "Zinnov", "confidence": 0.9}))
+    r.daily_cap, r.max_calls = False, 1
+    run(r.resolve(conn, UNCLEAR))
+    run(r.resolve(conn, resolver.Evidence(kind="calendar", title="Other", people=[("Mo Lee", "mo@gmail.com")])))
+    assert r.skips == {"model_called": 1, "max_model_calls": 1}
+    monkeypatch.delenv("VALR_COMPANY_LLM_PER_DAY")
+    assert resolver.per_day() == 500
+
+
+def test_a_title_never_outranks_an_attendee_domain():
+    found = names.resolve(attendees=["mia@telnyx.example"], title="Interview with Hien Tran")
+    assert found.name == "Telnyx" and found.conflict  # The model is asked; the title is only a candidate.
+    assert names.resolve(attendees=["mia@telnyx.example"], stated="Telnyx", title="Hien").name == "Telnyx"
