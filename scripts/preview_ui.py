@@ -34,12 +34,13 @@ def main() -> None:
     import uvicorn
 
     from app import interview_store, interviews, main as app_main, research, valr_dashboard, valr_view, webrtc
-    from tests.valr_sample import sample_view
+    from tests.valr_sample import notetakers_view, sample_recording, sample_view
     import webrtc_latency
 
     valr_dashboard.enable_dev_preview(args.host)  # Raises unless VALR_DEV_PREVIEW=1 and loopback.
     os.environ["VALR_ADMIN_EMAILS"] = valr_dashboard.PREVIEW_EMAIL
-    state = {"paused": False}
+    state = {"paused": False, "notetakers": {"fathom": "connected", "fireflies": "not_connected",
+                                             "granola": "not_connected"}}
     scenario: contextvars.ContextVar[str] = contextvars.ContextVar("scenario", default="full")
 
     @app_main.app.middleware("http")
@@ -50,10 +51,43 @@ def main() -> None:
             from app import valr_page
             return HTMLResponse(valr_page.error_page("The database didn't answer."), status_code=503)
         scenario.set(wanted if wanted in ("full", "empty", "error") else "full")
+        path = request.url.path
+        if path.startswith("/valr/api/notetakers/") or path == "/valr/api/recording" \
+                or path == "/valr/api/telegram/code":
+            return await preview_api(request, path)
         return await call_next(request)
 
+    async def preview_api(request, path):
+        """Fake notetaker / recording / Telegram answers; a pasted key is read and dropped."""
+        from fastapi.responses import JSONResponse
+        if not valr_dashboard.is_preview_request(request):
+            return JSONResponse({"detail": "Preview only."}, status_code=403)
+        if path == "/valr/api/recording":
+            return JSONResponse(sample_recording(found=request.query_params.get("ref") != "none"))
+        if path == "/valr/api/telegram/code":
+            return JSONResponse({"ok": True, "command": "/start 123456", "expires_minutes": 15,
+                                 "link": "https://t.me/example_valr_bot?start=123456",
+                                 "message": "Send /start 123456 to the VALR bot within 15 minutes."})
+        provider, action = path.split("/")[4:6]
+        label = provider.capitalize()
+        if action == "connect":
+            await request.body()  # Never stored or echoed.
+            state["notetakers"][provider] = "connected"
+            return JSONResponse({"ok": True, "message": f"{label} connected."})
+        if action == "disconnect":
+            state["notetakers"][provider] = "not_connected"
+            return JSONResponse({"ok": True, "message": f"{label} disconnected."})
+        if action == "sync":
+            return JSONResponse({"ok": True, "found": 3, "new": 1, "message": f"{label}: 3 recordings in the last 7 days, 1 new."})
+        return JSONResponse({"ok": True, "message": f"{label}: 2 notes read, 2 new."})
+
     async def collect(pool, now=None):
-        return sample_view(paused=state["paused"], scenario=scenario.get())
+        view = sample_view(paused=state["paused"], scenario=scenario.get())
+        if scenario.get() == "full":
+            view["connections"]["notetakers"] = notetakers_view(state["notetakers"])
+            view["mode"] = "telegram"  # The default since 2026-10-16; the bot is set up, not linked.
+            view["connections"]["telegram"] = {"configured": True, "linked": False, "linked_at": None}
+        return view
 
     class Pool:
         def connection(self):

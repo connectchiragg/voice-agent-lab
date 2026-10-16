@@ -22,7 +22,7 @@
 #     on" log lines, no "BYOK ALERT". Prints the rollback commands.
 # Never touches cloudflared, Temporal or Postgres. Secrets are never printed.
 set -euo pipefail
-VM=${VM:-ubuntu@15.252.242.165}
+VM=${VM:-ubuntu@<vm-ip>}
 KEY=${KEY:-$HOME/.ssh/voice-agent-lab_ed25519}
 BRANCH=${BRANCH:-valr-interviews}
 WAIT_S=${WAIT_S:-900}

@@ -701,7 +701,9 @@ gathers, `app/valr_page.py` renders, `static/valr.js` adds the live parts). Writ
 user who did not build VALR: plain words, every time as "11:15 AM IST" (ASSISTANT_TIMEZONE)
 with a relative "in 2 h 25 min". Top to bottom: what VALR does, the next briefing call and
 the three actions (call VALR now, pause or resume calls, sync the calendar); set-up steps
-until Google, Fathom, the phone number and a test call are done; the week's interviews,
+until Google, a notetaker, Telegram, the phone number and a test call are done, each step a
+link or button that does it (Google consent, the notetaker key forms, a t.me link that sends
+the `/start` code, the phone check explained, a `tel:` link to VALR); the week's interviews,
 each opening a detail view (the briefing, who you're meeting, what this round is like,
 likely questions, the pay band against your target, a prep checklist, what your emails
 and past rounds say, the company); performance (scorecards out of 10, a trend with
@@ -718,6 +720,23 @@ VALR_BRIEFING_DIAL=0 stays the hard off). Performance reads `interview_scorecard
 `interview_scores.json` and `evaluation.json` (1-5 scores shown out of 10).
 `VALR_DEV_PREVIEW=1 python scripts/preview_ui.py` serves both pages with made-up data at
 http://127.0.0.1:8090 (`/valr?scenario=empty`, `error`, `down` for the other states).
+
+**Notetakers** (`app/notetakers/`): Fathom, Fireflies and Granola behind one interface
+(verify a key, list recordings in a date range, one recording's transcript and summary in
+the profile importer's meeting shape, its share and embed links). The owner connects each
+on the dashboard ("Get set up"): the key is posted to the server, checked with one call,
+stored Fernet-encrypted (VALR_TOKEN_KEY) and never shown again; an environment key
+(FATHOM_API_KEY...) still works. New recordings arrive by webhook (`/hooks/fathom`,
+`/hooks/fireflies`, `/hooks/granola`, all signed; Access bypasses in docs/deploy.md) or
+"Check for new recordings", are matched to a calendar event (time window + attendee
+emails) and handed to the per-interview evaluation through VALR_EVAL_HOOK
+(`app/notetakers/pipeline.py` documents the interface; without one they wait, listed by
+`python -m app.notetakers pending`). Granola keeps no audio: notes only, by API key
+(Business plan and up) or an uploaded export. A past interview's detail view (and each
+scorecard's "Watch recording") shows the Fathom recording embedded
+(`fathom.video/embed/<token>`, which needs the share setting "Anyone with the link"),
+always with a "Watch on Fathom" deep link and key moments as `?timestamp=` links; Fireflies
+documents no embed or timestamp links, so it links out.
 
 **Context push (optional).** A Mac-side job (not built) may POST per-interview email
 context to `/valr/context` (JSON {event_key?, company?, subject?, summary?, excerpt?, notes?},
