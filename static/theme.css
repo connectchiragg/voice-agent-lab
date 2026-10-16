@@ -40,8 +40,9 @@
   --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
 }
 
+/* Light: when the system asks, unless the toggle chose dark; or when the toggle chose light. */
 @media (prefers-color-scheme: light) {
-  :root {
+  :root:not([data-theme="dark"]) {
     color-scheme: light;
     --char: #f3f5f9;
     --graphite: #ffffff;
@@ -64,6 +65,29 @@
     --info: #0b6aa8;
   }
 }
+:root[data-theme="light"] {
+  color-scheme: light;
+  --char: #f3f5f9;
+  --graphite: #ffffff;
+  --carbon: #e9edf5;
+  --bone: #0a0f1c;
+  --ash: #4a5670;
+  --mute: #8a94a8;
+  --hairline: rgba(10, 15, 28, 0.12);
+  --hairline-strong: rgba(10, 15, 28, 0.26);
+  --signal: #1f55e0;
+  --signal-fill: #1f55e0;
+  --signal-fill-hover: #1a47c0;
+  --ice: #0b6aa8;
+  --glow: rgba(31, 85, 224, 0.09);
+  --glow-2: rgba(11, 106, 168, 0.05);
+  --violet: #4f46e5;
+  --ok: #0f7b4f;
+  --warn: #8a5a00;
+  --bad: #c0243f;
+  --info: #0b6aa8;
+}
+:root[data-theme="dark"] { color-scheme: dark; }
 
 *, *::before, *::after { box-sizing: border-box; }
 html { -webkit-text-size-adjust: 100%; scroll-behavior: smooth; }

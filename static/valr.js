@@ -1,4 +1,4 @@
-// /valr behaviour: countdowns, the interview drawer, the owner's actions (POST with the
+// The VALR pages' behaviour (every page): countdowns, the (legacy) interview drawer, the owner's actions (POST with the
 // page's CSRF token), the prep checklists, the trend chart and a quiet refresh.
 const csrf = document.querySelector('meta[name="csrf-token"]')?.content ?? "";
 const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -76,7 +76,59 @@ async function post(path, body = {}) {
   if (!response.ok) throw new Error(typeof data.detail === "string" ? data.detail : `Something went wrong (HTTP ${response.status}).`);
   return data;
 }
-const BUSY = {sync: "Syncing…", refresh: "Starting…", dials: "Saving…", callnow: "Calling…", tgcode: "Getting a code…"};
+const BUSY = {sync: "Syncing…", refresh: "Starting…", dials: "Saving…", callnow: "Calling…", tgcode: "Getting a code…",
+              tglink: "Getting a link…", tgtest: "Sending…"};
+
+// Telegram: one tap. The code comes with a t.me deep link (Telegram sends "/start <code>"
+// when he presses Start); a QR of the same link for scanning with the phone. Then wait for
+// the link to land and reload.
+const QR_SRC = "https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js";
+const QR_SRI = "sha384-mZT2gIty7ZDdOGkxfP6joZcYdMW1Jvj9dRlfpTmaJAKKXTqzygtB22k7FLe+KZC1";
+function loadQr() {
+  if (window.qrcode) return Promise.resolve(window.qrcode);
+  return new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = QR_SRC;
+    script.integrity = QR_SRI;
+    script.crossOrigin = "anonymous";
+    script.referrerPolicy = "no-referrer";
+    script.onload = () => resolve(window.qrcode);
+    script.onerror = reject;
+    document.head.append(script);
+  });
+}
+async function showTelegramLink(result) {
+  const panel = document.querySelector("[data-tg-panel]");
+  if (!panel) {
+    if (result.link) window.open(result.link, "_blank", "noopener");
+    return;
+  }
+  const open = panel.querySelector("[data-tg-open]");
+  const help = panel.querySelector("[data-tg-help]");
+  panel.hidden = false;
+  if (result.link) {
+    open.href = result.link;
+    open.hidden = false;
+    help.textContent = `On this phone: tap Open Telegram, then Start. On a computer: scan the code with your phone. Valid ${result.expires_minutes} minutes.`;
+    try {
+      const qr = (await loadQr())(0, "M");
+      qr.addData(result.link);
+      qr.make();
+      panel.querySelector("[data-tg-qr]").innerHTML = qr.createSvgTag({cellSize: 4, margin: 0, scalable: true});
+    } catch {}
+  } else {
+    open.hidden = true;
+    help.textContent = `Send ${result.command} to the VALR bot within ${result.expires_minutes} minutes.`;
+  }
+  const started = Date.now();
+  const wait = setInterval(async () => {
+    if (Date.now() - started > result.expires_minutes * 60000) { clearInterval(wait); return; }
+    try {
+      const state = await (await fetch("/valr/api/state", {credentials: "same-origin", cache: "no-store"})).json();
+      if (state.connections?.telegram?.linked) { clearInterval(wait); location.reload(); }
+    } catch {}
+  }, 4000);
+}
 document.addEventListener("click", async event => {
   const button = event.target.closest("button[data-action]");
   if (!button) return;
@@ -97,6 +149,11 @@ document.addEventListener("click", async event => {
       result = await post("/valr/api/call-now");
     } else if (action === "refresh") {
       result = await post(`/valr/api/slots/${encodeURIComponent(button.dataset.ref)}/refresh`);
+    } else if (action === "tglink") {
+      result = await post("/valr/api/telegram/code");
+      await showTelegramLink(result);
+    } else if (action === "tgtest") {
+      result = await post("/valr/api/telegram/test");
     } else if (action === "tgcode") {
       result = await post("/valr/api/telegram/code");
       const code = button.parentElement.querySelector("[data-tg-code]");
@@ -146,7 +203,7 @@ try {
 } catch {}
 function signature(view) {
   return JSON.stringify([
-    view.dials_paused?.enabled, view.next_call?.at, view.jobs?.[0]?.status,
+    view.dials_paused?.enabled, view.next_call?.at, view.jobs?.[0]?.status, view.connections?.telegram?.linked,
     (view.blocks ?? []).map(b => [b.id, b.state, b.slots.map(s => [s.ref, s.status, s.updated_at])]),
   ]);
 }
