@@ -38,6 +38,7 @@ from app import company_names as names
 
 logger = logging.getLogger("valr")
 MODEL = "claude-haiku-5-5"
+RESOLVER_VERSION = 3  # Bump when the rules change: cached answers from older rules are ignored.
 CONFIDENT = 0.7      # Below this (or needs_web) one web search follows.
 SHOW = 0.5           # Below this after research: "Company not identified".
 MAX_TOKENS = 300
@@ -123,9 +124,12 @@ class Evidence:
         return sorted({d for d in found if d and d not in mine})
 
     def fingerprint(self) -> str:
+        """Same evidence, same answer. Includes the current name and RESOLVER_VERSION, so answers
+        cached by an older rule set (or for another current name) are never reused."""
         title = " ".join(names.words(re.sub(r"^(re|fwd?|fw)\s*:\s*", "", self.title.strip(), flags=re.I)))
         sender = names.domain_of(self.sender_email) + "|" + " ".join(names.words(self.sender_name))
-        raw = json.dumps([self.company_domains(), title, sender if self.sender_email else ""])
+        raw = json.dumps([RESOLVER_VERSION, self.company_domains(), title, sender if self.sender_email else "",
+                          names.key(self.stated)])
         return hashlib.sha256(raw.encode()).hexdigest()[:32]
 
     def render(self, candidates: list[dict[str, str]]) -> str:
@@ -347,6 +351,9 @@ class Resolver:
     candidate: str = ""
     job_id: str = ""
     calls: int = 0
+    skips: dict[str, int] = field(default_factory=dict)  # why the model did not run, by reason code
+    trace: list[str] = field(default_factory=list)       # with verbose: "<kind>: <reason>" per entity
+    verbose: bool = False
     kept: int = 0   # Repairs refused by the stability rule (the earlier name stayed).
     usd: float = 0.0
     spend: list[dict[str, Any]] = field(default_factory=list)
@@ -355,18 +362,34 @@ class Resolver:
         if entity_id:
             manual = await override(connection, entity_id)
             if manual:
+                self._skip(ev, "override")
                 return Decision(manual, "", 1.0, "override", "set by you")
         first, confident, candidates = rules(ev, self.owner_emails, leads, self.agencies)
         if confident:
+            self._skip(ev, "rules_confident")
             return first
         fingerprint = ev.fingerprint()
         hit = await cached(connection, fingerprint)
         if hit is not None:
+            self._skip(ev, "cache_hit")
             return hit
-        if self.client is None or await today_count(connection) >= per_day() or not await self._month_ok(connection):
-            return first  # Over a cap or no model: the rules' best guess, not cached.
-        client = self.client()
-        answer, rows = await asyncio.to_thread(review, ev, candidates, client, self.candidate)
+        if self.client is None:
+            self._skip(ev, "per_run_cap" if self.calls else "no_model_client")
+            return first  # The rules' best guess, not cached.
+        if await today_count(connection) >= per_day():
+            self._skip(ev, "daily_cap")
+            return first
+        if not await self._month_ok(connection):
+            self._skip(ev, "month_cap")
+            return first
+        try:
+            client = self.client()
+            answer, rows = await asyncio.to_thread(review, ev, candidates, client, self.candidate)
+        except Exception as error:  # noqa: BLE001 - counted and shown; the rules' answer stands.
+            self._skip(ev, f"model_error:{type(error).__name__}")
+            logger.warning("VALR company review failed: %s", type(error).__name__)
+            return first
+        self._skip(ev, "model_called")
         source, citation = "llm", ""
         if answer.get("needs_web") or answer["confidence"] < CONFIDENT:
             try:
@@ -382,6 +405,11 @@ class Resolver:
         self.calls += 1
         await save(connection, fingerprint, decision, source)
         return decision
+
+    def _skip(self, ev: Evidence, reason: str) -> None:
+        self.skips[reason] = self.skips.get(reason, 0) + 1
+        if self.verbose:
+            self.trace.append(f"{ev.kind}: {reason}")
 
     def _decision(self, answer: dict[str, Any], source: str, citation: str) -> Decision:
         company = enforce(str(answer.get("company") or ""), self.owner_emails, self.agencies)

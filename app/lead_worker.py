@@ -421,8 +421,11 @@ class LeadActivities:
                 await connection.execute("DELETE FROM lead_touchpoints WHERE id = %s", (f"cal:{key}",))
             everything = await leads_store.touches(connection)
             try:  # Rules, then the cached or capped Haiku review for the unclear ones.
-                await resolve_touches(connection, everything, company_resolver.default_resolver(owner_emails()),
+                names_resolver = company_resolver.default_resolver(owner_emails())
+                await resolve_touches(connection, everything, names_resolver,
                                       limit=int(os.getenv("VALR_COMPANY_LLM_PER_RUN", "10")))
+                logger.info("VALR leads: company names %s, $%.4f", json.dumps(names_resolver.skips, sort_keys=True),
+                            names_resolver.usd)
             except Exception as error:  # noqa: BLE001 - the rebuild still runs on the rules' names.
                 logger.warning("VALR leads: company review skipped (%s)", type(error).__name__)
             corrections = await leads_store.overrides(connection)
@@ -586,7 +589,7 @@ def touch_evidence(touch: Touch, owners: set[str], snippet: str = "") -> company
         kind=touch.kind, title=touch.title.removeprefix("Recording: "),
         people=people[1:] if inbound else people, domains=[touch.domain] if touch.domain else [],
         sender_name=people[0][0] if inbound else "", sender_email=people[0][1] if inbound else "",
-        snippet=snippet, stated=touch.stated or touch.company, role=touch.role)
+        snippet=snippet, stated=touch.stated or ("" if touch.company_how else touch.company), role=touch.role)
 
 
 def names_clean(name: str) -> str:
@@ -624,8 +627,8 @@ async def resolve_touches(connection: Any, touches: list[Touch], resolver: compa
         if limit is not None and resolver.calls >= limit:
             resolver.client = None  # Rules and cache only for the rest of this pass.
         beat()
-        if not touch.stated and touch.company:
-            touch.stated = touch.company  # The original name: strong evidence, kept for good.
+        if not touch.stated and touch.company and not touch.company_how:
+            touch.stated = touch.company  # The source's own name: strong evidence, kept for good.
         ev = touch_evidence(touch, owners, texts.get(touch.id, ""))
         decision = await resolver.resolve(connection, ev)
         before = touch.company
@@ -635,7 +638,7 @@ async def resolve_touches(connection: Any, touches: list[Touch], resolver: compa
             decision = company_resolver.Decision(names_clean(baseline), "", company_resolver.EXISTING, "existing",
                                                  "kept the earlier name")
         if decision.company:  # One spelling per company: "Chasi" -> "Chasi AI", "Fourkites" -> "FourKites".
-            decision.company = company_names.canonical(decision.company, known + [baseline])
+            decision.company = company_names.canonical(decision.company, known)
         if (decision.company, decision.how) != (touch.company, touch.company_how):
             changes.append((touch.id, before, decision.company))
             touch.company, touch.company_how = decision.company, decision.how
@@ -677,13 +680,15 @@ async def repair_recordings(connection: Any, resolver: company_resolver.Resolver
     return changes
 
 
-async def repair_companies(dry_run: bool = False) -> dict[str, Any]:
-    """`python -m app.lead_worker repair-companies [--dry-run]`: names only, before -> after.
+async def repair_companies(dry_run: bool = False, verbose: bool = False) -> dict[str, Any]:
+    """`python -m app.lead_worker repair-companies [--dry-run] [--verbose]`: names only, before -> after;
+    `model_path` counts why each unclear case did or did not reach the model (reason codes only).
     The full pipeline (rules -> Haiku -> one web search), with the stability rule: a stored name
     changes only for a more confident one that is not an agency or platform. A dry run changes
     no names (model answers are still cached, so the real run costs nothing more)."""
     now = datetime.now(timezone.utc)
     resolver = company_resolver.default_resolver(owner_emails())
+    resolver.verbose = verbose
     async with await connect() as connection:
         await leads_store.setup(connection)
         everything = await leads_store.touches(connection)
@@ -698,6 +703,8 @@ async def repair_companies(dry_run: bool = False) -> dict[str, Any]:
             await leads_store.save_leads(connection, after, everything, now)
     return {"dry_run": dry_run, "model_calls": resolver.calls, "usd": round(resolver.usd, 4),
             "kept_by_stability_rule": resolver.kept, "agency_domains_learned": len(resolver.agencies),
+            "model_path": resolver.skips,  # reason code -> count: model_called, cache_hit, month_cap, ...
+            **({"model_path_per_entity": resolver.trace} if verbose else {}),
             "leads_before": len(before), "leads_after": len(after),
             "not_identified_before": sum(1 for l in before if l.company == company_names.NOT_IDENTIFIED),
             "not_identified_after": sum(1 for l in after if l.company == company_names.NOT_IDENTIFIED),
@@ -745,7 +752,8 @@ async def cli(command: str) -> None:
     from temporalio.client import Client
     from app.lead_workflow import SYNC_WORKFLOW_ID, TASK_QUEUE, GmailSyncWorkflow, GmailWatchWorkflow
     if command.startswith("repair-companies"):
-        print(json.dumps(await repair_companies(dry_run=command.endswith("--dry-run")), indent=2))
+        print(json.dumps(await repair_companies(dry_run="--dry-run" in command, verbose="--verbose" in command),
+                         indent=2))
         return
     if command == "stats":
         async with await connect() as connection:
@@ -779,5 +787,5 @@ if __name__ == "__main__":
     from dotenv import load_dotenv
     load_dotenv(Path(__file__).resolve().parent.parent / ".env")
     if sys.argv[1:2] not in (["sync"], ["watch"], ["stats"], ["repair-companies"]):
-        sys.exit("usage: python -m app.lead_worker sync|watch|stats|repair-companies [--dry-run]")
-    asyncio.run(cli(" ".join(sys.argv[1:3])))
+        sys.exit("usage: python -m app.lead_worker sync|watch|stats|repair-companies [--dry-run] [--verbose]")
+    asyncio.run(cli(" ".join(sys.argv[1:4])))

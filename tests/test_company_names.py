@@ -447,3 +447,70 @@ def test_repair_keeps_one_spelling_per_company():
     run(lead_worker.resolve_touches(FakeConn(), touches, make(client), dry_run=True))
     assert [t.company for t in touches[:3]] == ["Chasi AI", "Chasi AI", "Cermati"]
     assert touches[3].company != "Software"
+
+
+# The a3387c8 dry-run: junky longer variants must not win; the good changes stay.
+
+@pytest.mark.parametrize("new, known, shown", [
+    ("SoundHound AI - 15-Min", ["SoundHound AI"], "SoundHound AI"),
+    ("FurtherAI engineering", ["FurtherAI"], "FurtherAI"),
+    ("Aspireapp", ["Aspire"], "Aspire"),
+    ("Razorpay Software", ["Razorpay"], "Razorpay"),
+    ("Guickly (Stealth Startup)", ["Guickly"], "Guickly"),
+    ("Everpure (formerly Pure Storage)", ["Everpure"], "Everpure"),
+    ("Everpure (formerly Pure Storage)", [], "Everpure"),               # Never a parenthetical.
+    # The good live changes.
+    ("Chasi", ["Chasi AI", "Chasi AI", "Chasi"], "Chasi AI"),           # "AI" wins only as the most common.
+    ("Chasi AI", ["Chasi", "Chasi", "Chasi AI"], "Chasi"),
+    ("Safe", ["Safe Security"], "Safe Security"),                       # A real brand word.
+    ("Fourkites", ["FourKites", "FourKites, Inc."], "FourKites"),
+    ("Hilabs", ["HiLabs", "HiLabs"], "HiLabs"),
+    ("SWIGGY", [], "Swiggy"),
+    ("Micro1", ["micro1", "micro1"], "micro1"),
+    ("Revantage Global Services India Private Limited", [], "Revantage Global Services"),
+    ("PLUGSCALE CONSULTING PRIVATE CONSULTING", ["PlugScale Consulting"], "PlugScale Consulting"),
+    ("Cermati.com", ["Cermati"], "Cermati"),
+])
+def test_canonical_spelling_prefers_the_clean_short_form(new, known, shown):
+    assert names.canonical(new, known) == shown
+
+
+@pytest.mark.parametrize("raw, name", [("aminfoweb.com", "Aminfoweb"), ("arataai.com", "Arata AI"),
+                                       ("ipsoftlabs.com", "Ipsoft Labs")])
+def test_domain_names(raw, name):
+    assert names.from_domain(raw) == name
+
+
+def test_why_the_model_did_not_run_is_counted(monkeypatch):
+    conn = FakeConn()
+    r = make(None)
+    r.verbose = True
+    run(r.resolve(conn, UNCLEAR))
+    confident = resolver.Evidence(kind="calendar", title="Technical round", people=[("Maya", "maya@acme-robotics.example")])
+    run(r.resolve(conn, confident))
+    monkeypatch.setenv("VALR_COMPANY_LLM_PER_DAY", "0")
+    run(make(FakeClient()).resolve(conn, UNCLEAR))
+    monkeypatch.setenv("VALR_COMPANY_LLM_PER_DAY", "100")
+    capped = make(FakeClient(), month_ok=lambda c: False)
+    run(capped.resolve(conn, UNCLEAR))
+
+    class Broken:
+        @property
+        def messages(self):
+            raise RuntimeError("gateway down")
+    broken = make(Broken())
+    run(broken.resolve(conn, UNCLEAR))
+    assert r.skips == {"no_model_client": 1, "rules_confident": 1}
+    assert r.trace == ["calendar: no_model_client", "calendar: rules_confident"]
+    assert capped.skips == {"month_cap": 1} and broken.skips == {"model_error:RuntimeError": 1}
+    ok = make(FakeClient({"company": "Zinnov", "confidence": 0.9}))
+    run(ok.resolve(conn, UNCLEAR))
+    again = make(FakeClient())
+    run(again.resolve(conn, UNCLEAR))
+    assert ok.skips == {"model_called": 1} and again.skips == {"cache_hit": 1}
+
+
+def test_answers_cached_by_older_rules_or_for_another_name_are_not_reused():
+    a = resolver.Evidence(kind="email", title="Hello", sender_email="x@acme.example", stated="Deriv")
+    b = resolver.Evidence(kind="email", title="Hello", sender_email="x@acme.example", stated="Acme")
+    assert a.fingerprint() != b.fingerprint()
