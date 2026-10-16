@@ -61,11 +61,13 @@ function json(el) {
 function peek(lead) {
   const box = document.querySelector("[data-lead-peek]");
   if (!box || !lead) return;
-  const temp = Number.isFinite(lead.temperature) ? ` · ${lead.temperature}/100` : "";
+  const band = {hot: "Hot", warm: "Warm", cool: "Cool", cold: "Cold", closed: "Closed"}[lead.band] || "";
+  const temp = Number.isFinite(lead.temperature) ? ` · ${band} ${lead.temperature}` : "";
   box.innerHTML = `<button class="peek-close" type="button" aria-label="Close">✕</button>
     <span class="label"><span class="sw st-${esc(lead.stage)}" aria-hidden="true"></span> ${esc(lead.stage_label || lead.stage)}${esc(temp)}</span>
     <span class="peek-title">${esc(lead.company)}</span>
     <span class="muted small">${esc(lead.role)}</span>
+    ${lead.waiting_on === "you" && lead.waiting_reason ? `<span class="small court you">Your move: ${esc(lead.waiting_reason)}</span>` : ""}
     ${lead.next_step ? `<span class="small">Next: ${esc(lead.next_step)}</span>` : ""}
     <a class="hero-link mono" href="/valr/leads?lead=${encodeURIComponent(lead.id)}#lead">Open lead →</a>`;
   box.hidden = false;
@@ -90,20 +92,21 @@ async function mountGlobe() {
     }
   }
   const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
-  const phone = matchMedia("(max-width: 640px)").matches;
+  // Closed leads are drawn only while "Show closed" is ticked (or the Closed filter is on).
+  const toggle = document.querySelector("[data-globe-closed]");
+  const shown = () => ({leads: (raw?.leads || []).filter(l => l.status !== "closed" || toggle?.checked)});
+  const closedLeads = (raw?.leads || []).filter(l => l.status === "closed");
+  for (const lead of closedLeads) byId.set(lead.id, {...lead, stage_label: lead.stage_label, role: ""});
   if (raw?.leads?.length && /leads-globe\.js/.test(globe.dataset.src || "")) {
     try {
       const module = await import(globe.dataset.src);
-      const view = await module.mount(globe, raw, {
-        onSelect(node) {
-          if (node?.type === "lead") choose(node.id);
-          else if (node?.type === "contact" && node.contact?.leads?.length) choose(node.contact.leads[0]);
-        },
-        maxNodes: phone ? 40 : 120,
-        // Home's hero copy sits over the globe: no labels there on a phone (a tap shows the lead).
-        labels: phone ? (onLeads ? 6 : 0) : (onLeads ? 24 : 12), reducedMotion: reduced,
+      const view = await module.mount(globe, shown(), {
+        onSelect(node) { if (node?.type === "lead") choose(node.id); },
+        // Every live lead is drawn and labelled (static/leads.css keeps the hero copy off the globe).
+        maxNodes: 150, labels: 80, reducedMotion: reduced,
       });
       if (view?.supported !== false) {
+        toggle?.addEventListener("change", () => view.update(shown()));
         if (selected) { view.select?.(selected); view.focus?.(selected); }
         globe.dataset.globeKind = "3d";
         return;
@@ -111,7 +114,7 @@ async function mountGlobe() {
       view?.destroy?.();
     } catch (error) {
       console.warn("3D globe unavailable, using the light one:", error?.message || error);
-      globe.querySelectorAll("canvas, .globe-labels").forEach(node => node.remove());
+      globe.querySelectorAll("canvas, .globe-labels, .globe-tip").forEach(node => node.remove());
     }
   }
   try {

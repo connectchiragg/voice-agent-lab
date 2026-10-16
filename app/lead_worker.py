@@ -110,7 +110,9 @@ def email_touch(email: Email, decision: Decision, owners: set[str]) -> Touch:
                  summary=decision.summary, direction="out" if outbound else "in",
                  sentiment=None if outbound else decision.sentiment, cue=decision.cue,
                  stage_hint=decision.stage_hint, next_step=decision.next_step,
-                 url=gmail_api.thread_url(email.thread_id), role=decision.role, thread=email.thread_id)
+                 url=gmail_api.thread_url(email.thread_id), role=decision.role, thread=email.thread_id,
+                 category=decision.category, action_requested=None if outbound else decision.action_requested,
+                 action="" if outbound else decision.action)
 
 
 def beat() -> None:

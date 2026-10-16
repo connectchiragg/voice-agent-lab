@@ -1,12 +1,12 @@
-"""Leads: the globe (valr-leads' static/leads-globe.js; the lite globe as fallback), stage
-filters and a search box (in the URL: ?stage=&q=&lead=&status=expired), and the list by
-temperature. A selected lead (?lead=) opens its card: temperature and why, people, the
+"""Leads: the globe (valr-leads' static/leads-globe.js; the lite globe as fallback), band,
+stage and "waiting on you" filters and a search box (in the URL: ?band=&stage=&waiting=you&q=
+&lead=&status=expired), and the list by temperature with a band pill. A selected lead (?lead=) opens its card: temperature and why, people, the
 latest timeline, and the corrections (stage, merge, dismiss) that post to
 /valr/api/leads/<id>/override. Data: app/valr_ui/contracts.leads()."""
 from typing import Any
 
 from app.valr_page import Clock, chip, e, link
-from app.valr_ui.home import hero
+from app.valr_ui.home import band_sw, hero
 from app.valr_ui.shell import page_head
 
 STAGE_TONE = {"sourced": "muted", "applied": "muted", "screening": "info", "interviewing": "accent", "offer": "ok",
@@ -14,29 +14,30 @@ STAGE_TONE = {"sourced": "muted", "applied": "muted", "screening": "info", "inte
 RAW_STAGE = {"sourced": "Sourced", "applied": "Applied", "screening": "Screening", "interviewing": "Interviewing",
              "offer": "Offer", "closed-won": "Won", "closed-lost": "Not moving forward", "ghosted": "Gone quiet"}
 KIND = {"email": "Email", "calendar": "Interview", "recording": "Recording", "evaluation": "Scored"}
-STOPS = ((0, (0x3b, 0x7b, 0xff)), (35, (0x8f, 0xd0, 0xff)), (65, (0xff, 0xc4, 0x6b)), (100, (0xff, 0x6a, 0x2b)))
-
-
-def temp_color(t: float | None) -> str:
-    """Cold blue -> hot orange, the same stops as static/leads-globe.js."""
-    x = max(0.0, min(100.0, float(t or 0)))
-    for (a, ca), (b, cb) in zip(STOPS, STOPS[1:]):
-        if x <= b:
-            f = (x - a) / (b - a)
-            return "rgb({},{},{})".format(*(round(u + (v - u) * f) for u, v in zip(ca, cb)))
-    return "rgb(255,106,43)"
+BAND_LABEL = {"hot": "Hot", "warm": "Warm", "cool": "Cool", "cold": "Cold", "closed": "Closed"}
 
 
 def temperature(lead: dict[str, Any]) -> str:
+    """The band pill: "● Hot 82" (the swatch's shade is the score's place inside the band)."""
     t = lead.get("temperature")
-    if t is None:
-        return '<span class="muted">–</span>'
-    return (f'<span class="temp-num num"><span class="temp-dot" style="background:{temp_color(t)}" aria-hidden="true"></span>'
-            f'{int(t)}</span>')
+    band = lead.get("band") or "cold"
+    score = f'<span class="num">{int(t)}</span>' if t is not None else '<span class="num muted">–</span>'
+    return f'<span class="band-pill b-{e(band)}">{band_sw(band, t)}{e(BAND_LABEL.get(band, band))} {score}</span>'
 
 
-def matches(lead: dict[str, Any], stage: str, q: str) -> bool:
+def court_line(lead: dict[str, Any], tag: str = "span") -> str:
+    who = lead.get("waiting_on") or "nobody"
+    if who == "nobody" or not lead.get("waiting_reason"):
+        return ""
+    return f'<{tag} class="court {e(who)}">{"Your move: " if who == "you" else ""}{e(lead["waiting_reason"])}</{tag}>'
+
+
+def matches(lead: dict[str, Any], stage: str, q: str, band: str = "", waiting: str = "") -> bool:
     if stage and lead["stage"] != stage:
+        return False
+    if band and band != "closed" and lead["band"] != band:
+        return False
+    if waiting == "you" and lead["waiting_on"] != "you":
         return False
     if q:
         hay = " ".join([lead["company"], lead["role"], lead["next_step"], lead["location"], lead["domain"],
@@ -95,8 +96,9 @@ def lead_card(lead: dict[str, Any], clock: Clock, leads: dict[str, Any]) -> str:
   <p class="muted">{e(lead['role'] or 'Role unknown')}{(' · ' + e(lead['domain'])) if lead['domain'] else ''}</p>
   <p>{chip(stage, STAGE_TONE[lead['stage']])} {chip('Waiting on you', 'warn') if lead['waiting_on_you'] else ''}
     {chip('Expired', 'muted') if lead['status'] == 'expired' else ''}</p>
+  {court_block(lead)}
   {nxt}
-  <p class="small">Temperature {temperature(lead)}<span class="muted">/100</span></p>
+  <p class="small">Temperature {temperature(lead)}<span class="muted"> /100 · {e(BAND_MEANING.get(lead['band'], ''))}</span></p>
   {f'<details class="fold"><summary class="small">Why this temperature</summary><ul class="temp-parts">{parts}</ul></details>' if parts else ''}
   {f'<h3 class="h-sm">People</h3><ul class="people plain">{people}</ul>' if people else ''}
   {f'<h3 class="h-sm">Latest</h3><ol class="timeline">{timeline}</ol>' if timeline else ''}
@@ -104,6 +106,19 @@ def lead_card(lead: dict[str, Any], clock: Clock, leads: dict[str, Any]) -> str:
   {f'<p>{link(lead["url"], "Open the email thread")}</p>' if lead['url'] else ''}
   {corrections(lead, leads.get('leads') or [], leads.get('raw_stages') or list(RAW_STAGE))}
 </section>"""
+
+
+BAND_MEANING = {"hot": "an active process, next step soon", "warm": "engaged recently",
+                "cool": "applied or sourced, waiting", "cold": "quiet or ghosted", "closed": "won or not moving forward"}
+
+
+def court_block(lead: dict[str, Any]) -> str:
+    """Whose move it is, with the thread to answer in."""
+    who = lead.get("waiting_on") or "nobody"
+    head = {"you": "Your move", "them": "Their move", "nobody": "Nobody's move"}[who if who in ("you", "them") else "nobody"]
+    gmail = link(lead["url"], "Open the thread") if who == "you" and lead.get("url") else ""
+    return (f'<p class="court-line {e(who)}"><b>{head}</b><span>{e(lead.get("waiting_reason") or "")}</span>'
+            f'{gmail}</p>')
 
 
 def gmail_line(leads: dict[str, Any], clock: Clock) -> str:
@@ -120,50 +135,68 @@ def gmail_line(leads: dict[str, Any], clock: Clock) -> str:
             '<button class="btn small" type="button" data-leads-sync>Check Gmail now</button></div>')
 
 
+def chip_link(href: str, label: str, count: int, current: bool, lead: str = "") -> str:
+    return (f'<a class="pick-link" href="?{href}"{" aria-current=\"true\"" if current else ""}>{lead}{e(label)} '
+            f'<span class="num">{count}</span></a>')
+
+
 def page(view: dict[str, Any], clock: Clock, leads: dict[str, Any], stage: str, q: str, selected: str,
-         status: str = "") -> str:
+         status: str = "", band: str = "", waiting: str = "") -> str:
     expired = status == "expired"
-    rows = (leads.get("expired") if expired else leads.get("leads")) or []
+    band = band if band in BAND_LABEL else ""
+    waiting = "you" if waiting == "you" else ""
+    closed = band == "closed" and not expired
+    rows = (leads.get("expired") if expired else leads.get("closed") if closed else leads.get("leads")) or []
     stage = stage if stage in {s["key"] for s in leads.get("stages") or []} else ""
-    shown = [r for r in rows if matches(r, stage, q)]
+    shown = [r for r in rows if matches(r, stage, q, band, waiting)]
+    counts = leads.get("counts") or {}
     qs = ("&amp;q=" + e(q)) if q else ""
-    chips = [f'<a class="pick-link" href="?{("q=" + e(q)) if q else ""}"{" aria-current=\"true\"" if not stage and not expired else ""}>'
-             f'Active <span class="num">{len(leads.get("leads") or [])}</span></a>']
-    chips += [f'<a class="pick-link" href="?stage={e(s["key"])}{qs}"'
-              f'{" aria-current=\"true\"" if stage == s["key"] and not expired else ""}><span class="sw st-{e(s["key"])}" aria-hidden="true"></span>'
-              f'{e(s["label"])} <span class="num">{s["count"]}</span></a>' for s in leads.get("stages") or [] if s["count"]]
+    plain = not (stage or band or waiting or expired)
+    chips = [chip_link(qs.removeprefix("&amp;"), "Live", counts.get("live", 0), plain)]
+    if counts.get("waiting_on_you"):
+        chips.append(chip_link(f"waiting=you{qs}", "Waiting on you", counts["waiting_on_you"], waiting == "you" and not expired))
+    chips.append('<span class="chips-sep" aria-hidden="true"></span>')
+    chips += [chip_link(f"band={e(b['key'])}{qs}", b["label"], b["count"], band == b["key"] and not expired, band_sw(b["key"]))
+              for b in leads.get("bands") or []]
+    chips.append(chip_link(f"band=closed{qs}", "Closed", counts.get("closed", 0), closed, band_sw("closed")))
+    chips.append('<span class="chips-sep" aria-hidden="true"></span>')
+    chips += [chip_link(f"stage={e(s['key'])}{qs}", s["label"], s["count"], stage == s["key"] and not expired,
+                        f'<span class="sw st-{e(s["key"])}" aria-hidden="true"></span>')
+              for s in leads.get("stages") or [] if s["count"]]
     if leads.get("expired"):
-        chips.append(f'<a class="pick-link" href="?status=expired{qs}"{" aria-current=\"true\"" if expired else ""}>'
-                     f'Expired <span class="num">{len(leads["expired"])}</span></a>')
-    keep = ("&amp;status=expired" if expired else "") + (("&amp;stage=" + e(stage)) if stage else "")
+        chips.append(chip_link(f"status=expired{qs}", "Expired", len(leads["expired"]), expired))
+    keep = ("&amp;status=expired" if expired else "") + (("&amp;stage=" + e(stage)) if stage else "") \
+        + (("&amp;band=" + e(band)) if band else "") + ("&amp;waiting=you" if waiting else "")
     table = "".join(f"""
-<tr data-lead-row="{e(r['id'])}" data-stage="{e(r['stage'])}"{' class="expired"' if r['status'] == 'expired' else ''}{' aria-current="true"' if r['id'] == selected else ''}>
-  <td><a href="?lead={e(r['id'])}{keep}#lead"><b>{e(r['company'])}</b></a><span class="muted small block">{e(r['role'])}</span></td>
-  <td>{temperature(r)}</td>
-  <td><span class="sw st-{e(r['stage'])}" aria-hidden="true"></span>{e(r['stage_label'])}{' ' + chip('You', 'warn') if r['waiting_on_you'] else ''}</td>
+<tr data-lead-row="{e(r['id'])}" data-stage="{e(r['stage'])}" data-band="{e(r['band'])}"{' class="expired"' if r['status'] == 'expired' else ''}{' aria-current="true"' if r['id'] == selected else ''}>
+  <td><a href="?lead={e(r['id'])}{keep}#lead"><b>{e(r['company'])}</b></a><span class="muted small block">{e(r['role'])}</span>{court_line(r)}</td>
+  <td class="temp">{temperature(r)}</td>
+  <td><span class="sw st-{e(r['stage'])}" aria-hidden="true"></span>{e(r['stage_label'])}{' ' + chip('You', 'warn') if r['waiting_on'] == 'you' else ''}</td>
   <td class="hide-sm">{e(r['next_step']) or '<span class="muted">–</span>'}</td>
   <td class="hide-sm num muted small">{e(clock.day(r['last_activity_at'])) if r['last_activity_at'] else '–'}</td>
 </tr>""" for r in shown)
-    everyone = (leads.get("leads") or []) + (leads.get("expired") or [])
+    everyone = (leads.get("leads") or []) + (leads.get("closed") or []) + (leads.get("expired") or [])
     chosen = next((r for r in everyone if r["id"] == selected), None)
     if not leads.get("available"):
         body = ('<div class="empty"><p class="empty-title">The lead tracker isn\'t connected yet.</p>'
                 '<p class="muted">It reads job emails in Gmail (read-only) and keeps this list up to date.</p>'
                 '<a class="btn small" href="/valr/settings#google">Check Google</a></div>')
     else:
+        hidden = "".join(f'<input type="hidden" name="{k}" value="{e(v)}">' for k, v in
+                         (("stage", stage), ("band", band), ("waiting", waiting), ("status", "expired" if expired else "")) if v)
         body = f"""
 {gmail_line(leads, clock)}
 <form class="filters" method="get" action="/valr/leads" role="search">
   <div class="chips-row">{''.join(chips)}</div>
-  {f'<input type="hidden" name="stage" value="{e(stage)}">' if stage else ''}{'<input type="hidden" name="status" value="expired">' if expired else ''}
+  {hidden}
   <label class="search"><span class="sr-only">Search leads</span>
     <input type="search" name="q" value="{e(q)}" placeholder="Search company, role or person" data-lead-search></label>
 </form>
 <div class="leads-layout">
   <div class="table-wrap"><table class="leads-table">
-    <thead><tr><th scope="col">Company</th><th scope="col">Temp.</th><th scope="col">Stage</th><th scope="col" class="hide-sm">Next step</th><th scope="col" class="hide-sm">Last activity</th></tr></thead>
+    <thead><tr><th scope="col">Company</th><th scope="col">Temperature</th><th scope="col">Stage</th><th scope="col" class="hide-sm">Next step</th><th scope="col" class="hide-sm">Last activity</th></tr></thead>
     <tbody>{table or '<tr><td colspan="5" class="muted">No leads match.</td></tr>'}</tbody>
   </table></div>
   {lead_card(chosen, clock, leads) if chosen else ''}
 </div>"""
-    return page_head("Leads", 'Every company <span class="dim">in play, by temperature.</span>') + hero(leads, compact=True) + body
+    return page_head("Leads", 'Every company <span class="dim">in play, by temperature.</span>') + hero(leads, compact=True, show_closed=closed) + body

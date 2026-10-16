@@ -100,6 +100,8 @@ class Decision:
     cue: str = "none"
     summary: str = ""
     next_step: str = ""
+    action_requested: bool | None = None  # The email asks the candidate to do something (None: not asked)
+    action: str = ""  # What, in a few words ("share your availability")
     usage: dict[str, int] = field(default_factory=dict)
 
 
@@ -162,7 +164,12 @@ Reply with JSON only, no prose:
  feedback) | "negative" (regret to inform, not moving forward, position filled, on hold) |
  "none" (first outreach, scheduling, acknowledgements),
  "summary": "<= 20 words, paraphrased, no phone numbers, no pay figures",
- "next_step": "<= 12 words, what happens next, or \\"\\""}
+ "next_step": "<= 12 words, what happens next, or \\"\\"",
+ "action_requested": true only if the sender asks the candidate to do something now (give
+ availability or book a slot, answer a question, send documents, do an assignment or test,
+ decide on an offer, share salary details); false for acknowledgements, alerts, rejections,
+ updates and his own replies,
+ "action": "<= 8 words, what he should do, starting with a verb, or \\"\\""}
 stage_hint: sourced = recruiter outreach before he applied; applied = application received;
 screening = recruiter or HR screen; interviewing = interview rounds or assessments; offer;
 closed-won = he accepted; closed-lost = rejected or withdrawn.
@@ -228,7 +235,9 @@ def parse(text: str) -> Decision:
         sender_role=body.get("sender_role") if body.get("sender_role") in SENDER_ROLES else "other",
         stage_hint=stage, sentiment=sentiment,
         cue=body.get("cue") if body.get("cue") in ("positive", "negative") else "none",
-        summary=clip(body.get("summary"), 24), next_step=clip(body.get("next_step"), 14))
+        summary=clip(body.get("summary"), 24), next_step=clip(body.get("next_step"), 14),
+        action_requested=body["action_requested"] if isinstance(body.get("action_requested"), bool) else None,
+        action=clip(body.get("action"), 10)[:100])
 
 
 def classify(email: Email, owner_emails: set[str], client: Any, model: str = MODEL) -> Decision:

@@ -119,7 +119,8 @@ async def render(request: Request, name: str, **params: str) -> HTMLResponse:
             body, status = not_found("That interview isn't in your history.", "/valr/interviews/past", "Past interviews"), 404
     elif name == "leads":
         body = leads.page(view, clock, await load_leads(), query.get("stage", "")[:20],
-                          query.get("q", "")[:80], query.get("lead", "")[:64], query.get("status", "")[:10])
+                          query.get("q", "")[:80], query.get("lead", "")[:64], query.get("status", "")[:10],
+                          band=query.get("band", "")[:10], waiting=query.get("waiting", "")[:10])
     elif name == "performance":
         body = performance.page(view, clock)
     elif name == "settings":
