@@ -1,14 +1,14 @@
 """The VALR cockpit at /valr (valr.haciensus.com redirects / there).
 
-Pages and data (any verified Access login): `GET /valr`, the server-rendered cockpit
-(app/valr_page.py: upcoming interview blocks with their status, briefs and researcher
-notes, the performance trend, spend and dial limits, connections, recent research
-runs), and `GET /valr/api/state`, the same view as JSON (app/valr_view.py).
+Pages and data (any verified Access login): `GET /valr` and the other pages
+(app/valr_ui/: Home, Interviews, Leads, Performance, Settings, System; the components in
+app/valr_page.py), and `GET /valr/api/state`, the view as JSON (app/valr_view.py).
 
 Actions (`POST /valr/api/...`, the owner only, see `action_owner`): `sync` starts a
 calendar sync; `dials` {paused} sets the pause switch the briefing workflows check
 before each heads-up or automatic dial; `telegram/code` issues a one-time `/start`
-code (15 minutes) that links the owner's Telegram chat; `slots/<ref>/refresh` re-runs one interview's research
+code (15 minutes) and its t.me deep link that links the owner's Telegram chat;
+`telegram/test` sends the linked chat a test message; `slots/<ref>/refresh` re-runs one interview's research
 with the caches bypassed. Each needs a same-origin JSON request carrying the page's
 CSRF token (HMAC of the viewer's email and the issue time, 12 hours).
 
@@ -35,7 +35,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from app import (access, calendar_sync, callbacks, google_oauth, interview_store, interviews,
-                 research, telegram_api, valr_page, valr_view)
+                 research, telegram_api, valr_view)
 from app.interview_types import group_blocks, slot_workflow_id
 
 logger = logging.getLogger("uvicorn.error")
@@ -175,14 +175,9 @@ async def google_callback(request: Request, code: str = "", state: str = "",
 
 @router.get("/valr", response_class=HTMLResponse)
 async def dashboard(request: Request) -> HTMLResponse:
-    email = await viewer(request)
-    try:
-        view = await state_view()
-    except Exception as error:  # noqa: BLE001 - a page that says so, not a stack trace or JSON.
-        logger.warning("VALR dashboard unavailable: %s", type(error).__name__)
-        return HTMLResponse(valr_page.error_page("The database didn't answer."), status_code=503,
-                            headers=NO_CACHE)
-    return HTMLResponse(valr_page.page(view, email, csrf_token(email)), headers=NO_CACHE)
+    """Home: the leads map and "right now" (the other pages: app/valr_ui/routes.py)."""
+    from app.valr_ui import routes
+    return await routes.render(request, "home")
 
 
 @router.get("/valr/api/state")
@@ -290,9 +285,38 @@ async def telegram_code(request: Request) -> JSONResponse:
         code = await telegram_api.new_code(connection)
     logger.info("VALR Telegram link code issued from the dashboard")
     minutes = int(telegram_api.CODE_TTL.total_seconds() // 60)
+    username = await telegram_api.bot_username()
+    link = telegram_api.deep_link(username, code) if username else None
     return JSONResponse({"ok": True, "command": f"/start {code}", "expires_minutes": minutes,
-                         "message": f"Send /start {code} to the VALR bot within {minutes} minutes."},
+                         "link": link, "bot": f"@{username}" if username else None,
+                         "message": (f"Tap \"Open Telegram\" and press Start within {minutes} minutes."
+                                     if link else
+                                     f"Send /start {code} to the VALR bot within {minutes} minutes.")},
                         headers=NO_CACHE)
+
+
+@router.post("/valr/api/telegram/test")
+async def telegram_test(request: Request) -> JSONResponse:
+    """Send the linked owner chat a short test message, so he can see the link works."""
+    await action_owner(request)
+    client = telegram_api.bot()
+    if client is None or not telegram_api.configured():
+        raise HTTPException(503, "Telegram is not set up yet.")
+    if research.pool is None:
+        raise HTTPException(503, "Postgres is unavailable.")
+    async with research.pool.connection() as connection:
+        await telegram_api.setup(connection)
+        chat = await telegram_api.owner_chat(connection)
+    if chat is None:
+        raise HTTPException(409, "Telegram isn't connected yet: tap \"Open Telegram & connect\" first.")
+    try:
+        await client.send(chat, "VALR test message: heads-ups will arrive here 30 minutes before "
+                                "each interview.")
+    except telegram_api.TelegramError as error:
+        logger.warning("VALR Telegram test message failed: %s", type(error).__name__)
+        raise HTTPException(502, "Telegram didn't accept the message. Try again in a minute.") from None
+    logger.info("VALR Telegram test message sent from the dashboard")
+    return JSONResponse({"ok": True, "message": "Test message sent. Check Telegram."}, headers=NO_CACHE)
 
 
 @router.post("/valr/api/call-now")

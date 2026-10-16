@@ -13,7 +13,7 @@
 # Then: dashboard > Get set up > Connect Telegram > "Show /start code", and send
 # "/start <code>" to the bot within 15 minutes.
 set -euo pipefail
-VM=ubuntu@15.252.242.165
+VM=ubuntu@<vm-ip>
 KEY="$HOME/.ssh/voice-agent-lab_ed25519"
 HOOK=https://valr.haciensus.com/hooks/telegram
 

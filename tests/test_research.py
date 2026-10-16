@@ -187,7 +187,7 @@ def test_the_dashboard_needs_a_verified_access_login(monkeypatch):
     monkeypatch.setattr(valr_dashboard, "verifier", Verifier())
     assert client.get("/valr").status_code == 403
     assert client.get("/valr", headers={"Cf-Access-Jwt-Assertion": "bad"}).status_code == 403
-    page = client.get("/valr", headers={"Cf-Access-Jwt-Assertion": "good"})
+    page = client.get("/valr/system", headers={"Cf-Access-Jwt-Assertion": "good"})
     assert page.status_code == 200 and "Coorg &lt;b&gt;" in page.text
     assert "61 s" in page.text and "$0.09" in page.text  # Under System: recent research.
     moved = client.get("/", headers={"host": "valr.haciensus.com"}, follow_redirects=False)

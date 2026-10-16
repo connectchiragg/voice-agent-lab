@@ -24,6 +24,7 @@ from typing import Any
 
 from app import (calendar_sync, google_oauth, interview_store, interviews, research_jobs,
                  telegram_api)
+from app.valr_ui import contracts
 from app.interview_types import (TOOL_DOMAINS, SlotEvent, attendee_role, group_blocks, people,
                                  slot_workflow_id)
 from app.interview_workflow import MIN_LEFT_TO_CALL, RESEARCH_LEAD, SINGLE_CALL_LEAD
@@ -81,7 +82,7 @@ def interviewer_rows(event: SlotEvent, researched: set[str], research_ran: bool,
             role = "recruiter"  # talent@, hr@, careers@ and the like: a person or team in HR.
         if role in ("owner", "resource", "tool"):
             continue
-        name = scrub(person.name).strip() or f"Attendee {len(rows) + 1}"
+        name = scrub(person.name).strip() or name_from_email(email) or f"Attendee {len(rows) + 1}"
         if person.response == "declined" and not person.organizer:
             status = "declined"
         elif role == "recruiter":
@@ -94,6 +95,16 @@ def interviewer_rows(event: SlotEvent, researched: set[str], research_ran: bool,
             status = "pending"
         rows.append({"name": name, "email": email, "status": status})
     return rows
+
+
+def name_from_email(email: str) -> str:
+    """"maya.lin@x.example" -> "Maya Lin" when the invite has no display name; otherwise the
+    local part as written ("jd42")."""
+    local = email.split("@", 1)[0]
+    words = [w for w in re.split(r"[._-]+", local) if w]
+    if words and len(words) <= 3 and all(w.isalpha() for w in words):
+        return " ".join(w.capitalize() for w in words)
+    return scrub(local)
 
 
 def is_tool(email: str) -> bool:
@@ -243,14 +254,16 @@ LABELS = {  # Plain names for the profile rubric's keys (app/profile/rubric.py).
     "technical": "Technical", "communication": "Communication", "behavioural": "Behavioural",
     "process": "Running the round", "negotiation": "Pay conversations",
     "system_design": "System design", "coding_problem_solving": "Coding & problem solving",
-    "cs_fundamentals": "CS fundamentals", "domain_depth": "Domain depth",
-    "tradeoff_reasoning": "Trade-offs", "conciseness_answer_first": "Answer first",
-    "structure": "Structure", "clarity": "Clarity", "listening_clarifying": "Listening & clarifying",
-    "pace_fillers": "Pace & fillers", "star_stories": "STAR stories",
-    "ownership_impact": "Ownership & impact", "motivation_why_us": "Why us",
-    "pushback_curveballs": "Pushback & curveballs", "time_management": "Time management",
-    "questions_at_end": "Questions at the end", "anchoring": "Anchoring",
-    "information_control": "Information control", "competing_offers": "Competing offers",
+    "cs_fundamentals": "CS basics", "domain_depth": "Depth in your field",
+    "tradeoff_reasoning": "Explaining trade-offs", "conciseness_answer_first": "Answering first",
+    "structure": "Structured answers", "clarity": "Clarity",
+    "listening_clarifying": "Answering what was asked",
+    "pace_fillers": "Pace & filler words", "star_stories": "Stories with a result",
+    "ownership_impact": "Showing your impact", "motivation_why_us": "Why this company",
+    "pushback_curveballs": "Handling pushback", "time_management": "Pacing the round",
+    "questions_at_end": "Your questions at the end", "anchoring": "Getting their range first",
+    "information_control": "Not revealing your numbers early",
+    "competing_offers": "Using other offers",
 }
 ROUNDS = {"screen": "Screen", "technical": "Technical", "system_design": "System design",
           "hiring_manager": "Hiring manager", "behavioural": "Behavioural", "founder": "Founder",
@@ -268,13 +281,30 @@ def number(value: Any) -> float | None:
     return round(float(value), 2) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
 
 
+STAGES = {"pre_seed": "Pre-seed", "seed": "Seed", "series_a": "Series A", "series_b": "Series B",
+          "series_c": "Series C", "series_d": "Series D", "series_a_b": "Series A–B",
+          "series_c_plus": "Series C+", "growth": "Growth stage", "growth_early": "Early growth",
+          "growth_late": "Late-stage", "late": "Late-stage", "public": "Public", "enterprise": "Enterprise",
+          "bootstrapped": "Bootstrapped", "startup": "Startup", "agency": "Agency", "services": "Services"}
+RECORDERS = {"fathom", "fireflies", "fireflies.ai", "granola", "otter", "otter.ai", "zoom", "google meet",
+             "meet", "teams", "microsoft teams", "tl;dv", "tldv", "read.ai"}
+
+
 def stage(value: Any) -> str:
-    """"series_c" -> "Series C", "public" -> "Public"; unknown -> ""."""
-    text = scrub(value or "").replace("_", " ").strip()
-    if not text or text == "unknown":
+    """"series_c" -> "Series C", "growth_late" -> "Late-stage"; unknown -> ""."""
+    key = scrub(value or "").strip().lower().replace(" ", "_").replace("-", "_")
+    if not key or key == "unknown":
         return ""
-    words = text.split()
+    if key in STAGES:
+        return STAGES[key]
+    words = key.split("_")
     return " ".join([words[0].capitalize()] + [w.upper() if len(w) == 1 else w for w in words[1:]])
+
+
+def company_name(value: Any) -> str:
+    """The interviewing company; "" when the importer recorded the notetaker (e.g. "Fathom")."""
+    text = scrub(value or "").strip()
+    return "" if text.lower() in RECORDERS else text
 
 
 def day_label(date: str) -> str:
@@ -318,7 +348,7 @@ def performance(perf: dict[str, Any] | None) -> dict[str, Any]:
                      key=lambda i: str(i.get("date") or "")):
         interviews.append({
             "id": scrub(iv.get("interview_id")), "date": str(iv.get("date") or "")[:10],
-            "company": scrub(iv.get("company") or ""), "stage": stage(iv.get("company_stage")),
+            "company": company_name(iv.get("company")), "stage": stage(iv.get("company_stage")),
             "round": ROUNDS.get(iv.get("round_type") or "", label(iv.get("round_type") or "unknown")),
             "outcome": iv.get("outcome") if iv.get("outcome") in ("advanced", "rejected") else "unknown",
             "outcome_evidence": scrub(iv.get("outcome_evidence") or ""),
@@ -328,6 +358,7 @@ def performance(perf: dict[str, Any] | None) -> dict[str, Any]:
             "questions": [{"question": scrub(q.get("question")), "went_well": scrub(q.get("went_well") or ""),
                            "improve": scrub(q.get("improve") or ""), "hint": scrub(q.get("model_answer_hint") or "")}
                           for q in iv.get("question_feedback") or [] if isinstance(q, dict)][:6],
+            **interview_extras(iv),
         })
     callouts = perf.get("callouts") if isinstance(perf.get("callouts"), dict) else {}
     most, risk = callouts.get("most_improved"), callouts.get("biggest_risk")
@@ -354,9 +385,17 @@ def performance(perf: dict[str, Any] | None) -> dict[str, Any]:
                             for a in latest["do_next_time"]] if latest else [],
         "recurring_weak_topics": weak, "by_round_type": rounds,
         "trend_text": scrub(perf.get("trend_text") or ""),
+        "coach": contracts.coach(perf.get("coach")),
         "generated_at": perf.get("generated_at"),
         "available": bool(interviews),
     }
+
+
+def interview_extras(iv: dict[str, Any]) -> dict[str, Any]:
+    """Fields the notetaker and coach branches add to each interview (app/valr_ui/contracts.py)."""
+    return {"source": scrub(iv.get("source") or ""),
+            "recording": contracts.recording(iv.get("recording"), iv),
+            "impression": contracts.impression(iv.get("impression"))}
 
 
 def _fallback_series(interviews: list[dict[str, Any]], value: Any) -> dict[str, Any]:
@@ -466,6 +505,15 @@ def job_view(job: dict[str, Any]) -> dict[str, Any]:
                       for n in job.get("notes") or [] if isinstance(n, dict)]}
 
 
+def owner_name() -> str:
+    """The owner's first name, only to turn call scripts into "you" on the page."""
+    try:
+        from app.profile.config import settings
+        return settings().candidate_name.split()[0] if settings().candidate_name.strip() else ""
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def valr_number() -> str:
     """VALR's own number (the one it calls from and answers on), for "Call VALR now"."""
     return os.getenv("VALR_PUBLIC_NUMBER") or os.getenv("TELNYX_FROM_NUMBER") or "+12288888007"
@@ -569,11 +617,13 @@ async def timeline(connection: Any, now: datetime, paused: bool) -> list[dict[st
 
 
 async def telegram_view(connection: Any) -> dict[str, Any]:
-    view = {"configured": telegram_api.configured(), "linked": False, "linked_at": None}
+    view = {"configured": telegram_api.configured(), "linked": False, "linked_at": None,
+            "username": None}
     try:
         await telegram_api.setup(connection)
         status = await telegram_api.link_status(connection)
-        view.update(linked=status["linked"], linked_at=iso(status["linked_at"]))
+        view.update(linked=status["linked"], linked_at=iso(status["linked_at"]),
+                    username=status.get("username"))
     except Exception as error:  # noqa: BLE001
         logger.warning("VALR Telegram link unavailable: %s", type(error).__name__)
         view["error"] = True
@@ -643,6 +693,7 @@ async def collect(pool: Any, now: datetime | None = None) -> dict[str, Any]:
     perf, target = profile_files()
     view["performance"] = performance(perf)
     view["pay_target"] = target
+    view["owner_name"] = owner_name()
     view["setup"] = {"phone_on_file": bool(os.getenv("VALR_OWNER_PHONE", "").strip()),
                      "test_call_done": view.pop("_briefed_ever", False),
                      "valr_number": valr_number()}

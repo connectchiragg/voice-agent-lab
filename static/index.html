@@ -15,11 +15,16 @@
       // WebRTC by default; ?transport=ws keeps the WebSocket client for one release.
       const transport = new URLSearchParams(location.search).get("transport");
       import(transport === "ws" ? "/static/voice.js" : "/static/voice-webrtc.js");
+      // On the VALR host (and the local preview) the call page links back to the app.
+      if (/^valr\.|^127\.0\.0\.1$/.test(location.hostname)) {
+        addEventListener("DOMContentLoaded", () => { document.querySelector("[data-valr-back]").hidden = false; });
+      }
     </script>
   </head>
   <body data-state="idle">
     <header class="topbar">
       <span class="brand"><span class="brand-dot" aria-hidden="true"></span>valr<span class="brand-sub">/ voice</span></span>
+      <a class="back-link" href="/valr" data-valr-back hidden>← VALR</a>
       <div id="connection" class="conn" data-quality="none" title="How your audio reaches VALR">
         <span class="dot" aria-hidden="true"></span>
         <span class="conn-text">Not connected</span>
