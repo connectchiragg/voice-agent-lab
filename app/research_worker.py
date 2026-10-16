@@ -323,7 +323,7 @@ async def main() -> None:
     from app import llm_gateway
     if missing := llm_gateway.required_key_missing():
         sys.exit(f"{missing}: VALR research cannot run.")
-    logger.info("VALR %s", llm_gateway.shared().describe())
+    llm_gateway.shared()  # Logs the gateway it uses.
     from app.interview_worker import InterviewActivities
     from app.interview_workflow import BlockCallWorkflow, CalendarSyncWorkflow, InterviewSlotWorkflow
     address = os.getenv("TEMPORAL_ADDRESS", "localhost:7233")
