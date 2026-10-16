@@ -483,5 +483,6 @@ def prompt_note(conversation_id: str) -> str:
     if call.research_job:
         from app import research
         return research.prompt_note(conversation_id, call.reason.removeprefix("what I found about "))
-    return (f"This call is the callback the caller asked for, about {call.reason}. Help with "
-            "that now. Do not book another callback unless the caller clearly asks for one.")
+    return (f"This call is the callback the caller asked for, about {call.reason}. Get straight "
+            "to it, in short spoken turns. Do not book another callback unless the caller clearly "
+            "asks for one.")

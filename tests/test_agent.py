@@ -330,3 +330,17 @@ def test_answering_model_is_reported_but_not_stored(graph, monkeypatch):
 
     assert asyncio.run(collect()) == [{"type": "model", "model": "small"}, {"type": "delta", "text": "Hi"}]
     assert history(cid) == [("user", "hello", "completed"), ("model", "Hi", "completed")]
+
+
+def test_end_call_ends_the_turn_with_a_goodbye_and_no_second_model_call(graph, monkeypatch):
+    from app import closing
+    seen = scripted(monkeypatch, [[ToolCallRequest("e", "end_call", "{}")]])
+    cid = str(uuid4())
+    assert run_turn(cid, "and that's all") == [closing.goodbye_line(cid)]
+    assert len(seen) == 1 and closing.take_end_request(cid)
+    assert history(cid)[1] == ("model", closing.goodbye_line(cid), "completed")
+
+
+def test_the_filler_varies_with_the_turn():
+    assert agent.tool_filler(1) == agent.TOOL_FILLER
+    assert len({agent.tool_filler(turn) for turn in range(1, 4)}) == 3

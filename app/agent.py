@@ -20,7 +20,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from psycopg.conninfo import make_conninfo
 
-from app import callbacks, interviews, memory
+from app import callbacks, closing, interviews, memory
 from app.llm import ModelUsed, ToolCallRequest, stream_model, to_chat_messages
 from app.tools import has_side_effects, run_tool, schemas_for
 
@@ -30,8 +30,14 @@ logger = logging.getLogger("uvicorn.error")
 MessageStatus = Literal["completed", "interrupted"]
 MAX_TOOL_ROUNDS = 3
 # Spoken if a tool is still running after FILLER_AFTER_S and the model has said
-# nothing yet, so a slow lookup is not dead air. Instant tools get no filler.
-TOOL_FILLER = "Let me check that."
+# nothing yet, so a slow lookup is not dead air. Instant tools get no filler. The
+# words vary with the turn, so a call does not hear the same line every time.
+TOOL_FILLERS = ("Let me check that.", "One sec, let me look.", "Let me pull that up.")
+TOOL_FILLER = TOOL_FILLERS[0]
+
+
+def tool_filler(user_turns: int) -> str:
+    return TOOL_FILLERS[max(user_turns - 1, 0) % len(TOOL_FILLERS)]
 FILLER_AFTER_S = 0.3
 # A short reply like "Let me look up the forecast." with no tool call is a broken
 # promise; the agent then asks again with a tool call required.
@@ -98,11 +104,12 @@ def tool_rounds(messages: list[Message]) -> int:
 
 async def generate(messages: list[Message], allow_tools: bool, tool_choice: str | None = None,
                    caller_memory: str = "", caller_key: str | None = None,
-                   max_tokens: int | None = None,
+                   max_tokens: int | None = None, conversation_id: str | None = None,
                    ) -> AsyncIterator[str | list[ToolCallRequest] | ModelUsed]:
     options = {"max_tokens": max_tokens} if max_tokens else {}
     async with aclosing(stream_model(to_chat_messages(messages, caller_memory),
-                                     schemas_for(caller_key) if allow_tools else None,
+                                     schemas_for(caller_key, conversation_id) if allow_tools
+                                     else None,
                                      tool_choice=tool_choice, **options)) as stream:
         async for event in stream:
             yield event
@@ -129,7 +136,8 @@ async def agent(state: Conversation, config: RunnableConfig) -> Conversation:
     try:
         for tool_choice in (None, "required"):
             async for event in generate(messages, allow_tools, tool_choice, caller_memory,
-                                        caller_key, interviews.reply_max_tokens(thread_id)):
+                                        caller_key, interviews.reply_max_tokens(thread_id),
+                                        thread_id):
                 if isinstance(event, ModelUsed):
                     writer({"type": "model", "model": event.name})
                 elif isinstance(event, str):
@@ -189,12 +197,18 @@ async def tools(state: Conversation, config: RunnableConfig) -> Conversation:
     try:  # Cancelled at any point (barge-in, a cancelled speculation): stop the tools too.
         done, _ = await asyncio.wait({running}, timeout=FILLER_AFTER_S)
         if not done and not request["parts"][0]["text"].strip():
-            get_stream_writer()({"type": "delta", "text": TOOL_FILLER + " "})
+            filler = tool_filler(turn.user_turn)
+            get_stream_writer()({"type": "delta", "text": filler + " "})
             # Stored with the tool call: the user heard it as part of this turn.
-            messages[-1] = {**request, "parts": [{"text": TOOL_FILLER}]}
+            request = messages[-1] = {**request, "parts": [{"text": filler}]}
         results = await running
     finally:
         running.cancel()
+    if any(call["name"] == "end_call" for call in calls) and not request["parts"][0]["text"].strip():
+        # The model ended the call without a word: say goodbye for it (no second LLM call).
+        goodbye = closing.goodbye_line(conversation_id)
+        get_stream_writer()({"type": "delta", "text": goodbye})
+        messages[-1] = {**request, "parts": [{"text": goodbye}]}
     for call, result in zip(calls, results):
         messages.append({"role": "tool", "parts": [{"text": result}], "status": "completed",
                          "tool_call_id": call["id"], "name": call["name"]})
@@ -205,13 +219,22 @@ def after_agent(state: Conversation) -> str:
     return "tools" if state["messages"][-1].get("tool_calls") else END
 
 
+def after_tools(state: Conversation) -> str:
+    """After end_call the turn is over: the goodbye was said with the call."""
+    for message in reversed(state["messages"]):
+        if message["role"] != "tool":
+            return END if any(call["name"] == "end_call" for call in message.get("tool_calls", [])) \
+                else "agent"
+    return "agent"
+
+
 def build_graph(checkpointer: BaseCheckpointSaver[str] | None) -> ConversationGraph:
     builder = StateGraph(Conversation)
     builder.add_node("agent", agent)
     builder.add_node("tools", tools)
     builder.add_edge(START, "agent")
     builder.add_conditional_edges("agent", after_agent, ["tools", END])
-    builder.add_edge("tools", "agent")
+    builder.add_conditional_edges("tools", after_tools, ["agent", END])
     return builder.compile(checkpointer=checkpointer)
 
 
@@ -280,6 +303,15 @@ async def record_greeting(conversation_id: str, text: str, status: MessageStatus
     """The assistant spoke first (phone calls): store what was said as its message."""
     messages = await load_history(conversation_id)
     messages.append(model_message(text, status))
+    await save_history(conversation_id, messages)
+
+
+async def record_turn(conversation_id: str, user_text: str | None, reply: str) -> None:
+    """A fixed line said without the LLM (a goodbye, "Still there?"), and what it answered."""
+    messages = await load_history(conversation_id)
+    if user_text:
+        messages.append({"role": "user", "parts": [{"text": user_text}], "status": "completed"})
+    messages.append(model_message(reply))
     await save_history(conversation_id, messages)
 
 

@@ -16,7 +16,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import httpx
 from temporalio.service import RPCError
 
-from app import callbacks, interviews, memory, research
+from app import callbacks, closing, interviews, memory, research
 
 logger = logging.getLogger("uvicorn.error")
 TOOL_TIMEOUT_S = 5.0
@@ -136,11 +136,24 @@ async def forget_me(caller_key: str | None = None) -> dict[str, Any]:
     return {"forgotten": True, "had_memory": had_memory}
 
 
+async def end_call(caller_key: str | None = None, conversation_id: str | None = None) -> dict[str, Any]:
+    """Hang up once this reply has been spoken (app.pipeline.Call ends the call)."""
+    if conversation_id:
+        closing.request_end(conversation_id)
+    return {"ending": True}
+
+
 CONFIRMED = {"type": "boolean", "description": "true only on the second call, after the caller "
              "said yes to the time you read back"}
 
 
 TOOLS = {tool.name: tool for tool in (
+    Tool("end_call",
+         "Hang up after this reply. Use it when the caller is done: they say goodbye, that's "
+         "all, they're all set, or ask you to end the call. Say a short goodbye in the same "
+         "response (a few words), then the call ends.",
+         {"type": "object", "properties": {}},
+         end_call, side_effects=True, takes_call=True),
     Tool("get_weather",
          "Current weather and a three-day forecast (today first) for a city or town.",
          {"type": "object", "properties": {"location": {
@@ -222,19 +235,20 @@ TOOLS = {tool.name: tool for tool in (
           "required": []},
          interviews.get_briefing, takes_call=True, owner_only=True),
     Tool("research_interviews",
-         "Research the owner's interviews on a day (optionally only one company) after this call "
-         "and call him back with a briefing; or refresh research already done. Two steps: call it "
-         "without confirmed and say its 'say' text; only if his next reply is yes, call it again "
-         "with confirmed=true and say its 'say' text.",
+         "Research the owner's next interview, or a day's (optionally only one company), after "
+         "this call and call him back with a briefing; or refresh research already done. Two "
+         "steps: call it without confirmed and say its 'say' text; only if his next reply is yes, "
+         "call it again with confirmed=true and say its 'say' text.",
          {"type": "object", "properties": {
-             "day": {"type": "string", "description": "today, tomorrow, a weekday, or YYYY-MM-DD"},
+             "day": {"type": "string", "description": "next (default: his next interview), today, "
+                     "tomorrow, a weekday, or YYYY-MM-DD"},
              "company": {"type": "string", "description": "Only this company's interview, if he "
                          "names one"},
              "refresh": {"type": "boolean", "description": "true if he asks to refresh or redo "
                          "research that was already done"},
              "confirmed": {"type": "boolean", "description": "true only on the second call, after "
                            "he said yes"}},
-          "required": ["day"]},
+          "required": []},
          interviews.research_interviews, side_effects=True, takes_call=True, takes_turn=True,
          owner_only=True),
 )}
@@ -242,9 +256,18 @@ SCHEMAS = [tool.schema() for tool in TOOLS.values() if not tool.owner_only]
 OWNER_SCHEMAS = [tool.schema() for tool in TOOLS.values()]
 
 
-def schemas_for(caller_key: str | None) -> list[dict[str, Any]]:
-    """The owner gets the interview tools too; everyone else never sees them."""
-    return OWNER_SCHEMAS if interviews.is_owner(caller_key) else SCHEMAS
+BRIEFING_CALL_SCHEMAS = [schema for schema in OWNER_SCHEMAS
+                         if schema["function"]["name"] != "get_briefing"]
+
+
+def schemas_for(caller_key: str | None, conversation_id: str | None = None) -> list[dict[str, Any]]:
+    """The owner gets the interview tools too; everyone else never sees them. On a
+    briefing call the briefs are already in the prompt, so get_briefing is left out
+    (calling it only added a round trip before the brief). Fixed for the whole call,
+    so the prompt prefix stays the same."""
+    if not interviews.is_owner(caller_key):
+        return SCHEMAS
+    return BRIEFING_CALL_SCHEMAS if interviews.on_briefing_call(conversation_id) else OWNER_SCHEMAS
 
 
 def has_side_effects(name: str) -> bool:

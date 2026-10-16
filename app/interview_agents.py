@@ -15,7 +15,7 @@ caps, web search wrapper, guardrails and claim check this reuses unchanged).
   to Claude: the voice call compares them live from the profile.
 - `classify_people`: Haiku sorts uncertain attendees into interviewer / recruiter_hr /
   unknown from {name, domain, title/signature snippets}; only interviewers are researched.
-- `synthesize_slot`: a 60-90 second spoken brief (140-230 words) and cited notes for
+- `synthesize_slot`: a spoken brief in three beats (120-190 words) and cited notes for
   one interview, checked sentence by sentence against the evidence.
 """
 import json
@@ -50,7 +50,9 @@ SEARCH_FOCUS.update({
 })
 BLOCKED_HOSTS = ("linkedin.com",)
 PRIVATE_URL = re.compile(r"^(https://mail\.google\.com/|https://fathom\.video/|valr://)")
-SPOKEN_MIN, SPOKEN_MAX = 130, 250  # Guardrail; the prompt asks for 140-230 (60-90 s).
+SPOKEN_MIN, SPOKEN_MAX = 110, 210  # Guardrail; the prompt asks for 120-190 (three beats, ~60 s).
+# A domain written out for speech ("kestrelapp dot com") is still a web address.
+SPOKEN_DOMAIN = re.compile(r"\b\w+ dot (com|io|ai|in|co|org|net|app)\b", re.I)
 NOTES_MAX = 14
 # Behind the curtain, deeper reasoning (owner's choice, 2026-10-16): researchers on Haiku at
 # effort medium, the brief writer on Sonnet at effort high (adaptive thinking, on by default
@@ -344,15 +346,25 @@ def classify_people(people: list[Person], evidence: str, meter: Meter,
 SLOT_HOW = """You prepare a phone briefing for Chirag, a candidate, about one upcoming interview.
 Interview: {subject}
 Write two things.
-1. spoken: 140 to 230 words (60 to 90 seconds) that the assistant will say out loud, in this order:
-   the company in one line; who the interviewers are and their roles; what this round likely
-   covers and how Chirag's background maps to it (use the candidate profile below); what earlier
-   rounds and emails said (schedule, prep instructions, recruiter notes); the market pay range for
-   the role if found (only the market range: never Chirag's own figures); then one or two
-   personal prep tips from his self-evaluation below. It is speech: no lists, URLs, markdown,
-   abbreviations or symbols; write every number as words ("about forty lakh a year"). Attribute
-   opinions ("reviewers say"). Use only facts in the research and profile below; if something
-   was not found, skip it rather than guess. Do not end with a question.
+1. spoken: 120 to 190 words that the assistant will say to Chirag on a phone call, in three
+   beats it can pause between:
+   (a) the company in a sentence or two, with its one standout fact;
+   (b) the logistics: when and how long, the format, who he's meeting and their roles, and what
+       the recruiter or earlier rounds asked him to prepare (only the current schedule, never
+       the history of reschedules);
+   (c) how to win: what this round likely covers, the one part of his background that fits it
+       best (use the candidate profile below), the market pay range if found (only the market
+       range: never Chirag's own figures), and one personal tip from his self-evaluation below.
+   Write for the ear, as a friend briefing him: talk to him as "you", use contractions and short
+   sentences (mostly under fifteen words), and link the beats with natural spoken transitions
+   ("Now, who you're meeting.", "So, how to win this one."). Never enumerate ("first", "second",
+   "two tips"). At most one number per sentence, in words ("thirty-eight to fifty-two lakh a
+   year", "about three hundred million"); round only by dropping digits, never by computing a
+   new figure, and keep a range a range. Leave out scores and figures that don't help him. No
+   lists, web addresses or domains (say "Kestrel", never "kestrelapp dot com"), markdown,
+   abbreviations or symbols. Attribute opinions ("reviewers say"). Use only facts in the
+   research and profile below; if something was not found, skip it rather than guess. Do not
+   end with a question.
 2. notes: at most {notes_max} short facts for follow-up questions and a quiz, each with source_urls
    copied exactly from the research. Include likely interview questions found in the research
    as notes. Drop anything without a source.
@@ -366,7 +378,7 @@ class SlotNote(BaseModel):
 
 
 class SlotSynthesis(BaseModel):
-    spoken: str = Field(description="140 to 230 words, written to be spoken on a phone call.")
+    spoken: str = Field(description="120 to 190 words, written to be spoken on a phone call.")
     notes: list[SlotNote] = Field(description=f"At most {NOTES_MAX} notes, each with source_urls.")
 
 
@@ -380,8 +392,8 @@ def slot_guardrail(known_urls: set[str], meter: Meter) -> Any:
         problems = []
         count = len(synthesis.spoken.split())
         if not SPOKEN_MIN <= count <= SPOKEN_MAX:
-            problems.append(f"spoken has {count} words; it must be 140 to 230.")
-        if match := SPEECH_BAD.search(synthesis.spoken):
+            problems.append(f"spoken has {count} words; it must be 120 to 190.")
+        if match := SPEECH_BAD.search(synthesis.spoken) or SPOKEN_DOMAIN.search(synthesis.spoken):
             problems.append(f"spoken contains '{match.group(0)}'. Write numbers and symbols as "
                             "words; no URLs or lists.")
         unsourced = [note.fact[:60] for note in synthesis.notes

@@ -73,8 +73,10 @@ def block_label(events: list[SlotEvent]) -> str:
     first = datetime.fromisoformat(events[0].start_utc)
     names = [e.company or e.title[:40] for e in events]
     if len(events) == 1:
-        return f"your {clock(first)} interview with {names[0]}"
-    return f"your {clock(first)} interviews: {', then '.join(names)}"
+        return f"your {clock(first)} {interview_types.event_noun(events[0].title)} with {names[0]}"
+    nouns = {interview_types.event_noun(event.title) for event in events}
+    noun = "interviews" if nouns == {"interview"} else "meetings"
+    return f"your {clock(first)} {noun}: {', then '.join(names)}"
 
 
 def fingerprint(event: SlotEvent) -> str:

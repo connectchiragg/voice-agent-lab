@@ -5,7 +5,8 @@ import numpy as np
 import pytest
 
 from app.deepgram import TurnEvent
-from app.pipeline import Call, Engines, ReplyModel, ReplyText, decode_pcm, heard_text, same_words
+from app.pipeline import (RETRY_SORRY, Call, Engines, ReplyModel, ReplyText, decode_pcm, heard_text,
+                          same_words)
 
 SEGMENT_SAMPLES = 6000  # Each fake segment: two 3000-sample chunks, 0.25 s at 24 kHz.
 
@@ -790,4 +791,182 @@ def test_a_failed_retry_asks_again_instead_of_going_silent():
 
     engines.reply = broken
     events = events_of(run_turn(engines))
-    assert "Could you say it again?" in " ".join(e["text"] for e in events if e["type"] == "caption")
+    assert RETRY_SORRY in " ".join(e["text"] for e in events if e["type"] == "caption")
+
+
+def test_an_abbreviation_does_not_end_a_segment():
+    text = ReplyText()
+    text.push("Lumen Labs is at eleven thirty a.m. with Priya. Then ")
+    assert text.take() == "Lumen Labs is at eleven thirty a.m. with Priya."
+    text.push("Dr. Rao joins at four p.m. ")
+    assert text.take() == ""  # "p.m." may still go on ("p.m. with ...").
+    text.push("Okay?")
+    text.finish()
+    assert text.take() == "Then Dr. Rao joins at four p.m. Okay?"
+    ended = ReplyText()
+    ended.push("It starts at nine a.m. Bring a laptop. ")
+    assert ended.take() == "It starts at nine a.m. Bring a laptop."
+
+
+def turn_engines(reply=("Sure thing.",)):
+    engines, seen = make_engines(reply=reply)
+    stored = []
+
+    async def record_turn(conversation_id, user_text, text):
+        stored.append((user_text, text))
+
+    engines.record_turn = record_turn
+    return engines, seen, stored
+
+
+def test_a_clear_goodbye_is_answered_without_the_llm_and_ends_the_call():
+    from app import closing
+    engines, seen, stored = turn_engines()
+
+    async def scenario():
+        sent = []
+        call, flux = await start_call(engines, sent)
+        await flux.emit("StartOfTurn", "you")
+        await flux.emit("EndOfTurn", "You can end the call.")
+        await call.reply_task
+        await asyncio.wait_for(call.finished(), 1)
+        await call.history_task
+        await finish(call)
+        return sent
+
+    events = events_of(asyncio.run(scenario()))
+    assert seen["replies"] == []  # No LLM: it works while Groq is rate-limited.
+    assert [e["text"] for e in events if e["type"] == "caption"] == [closing.goodbye_line("call-1")]
+    assert stored == [("You can end the call.", closing.goodbye_line("call-1"))]
+
+
+def test_end_call_from_the_model_ends_the_call_after_its_reply():
+    from app import closing
+    engines, seen, _ = turn_engines(reply=("Good luck at four. Bye!",))
+
+    async def generate(conversation_id, text):
+        closing.request_end(conversation_id)  # As the end_call tool does.
+        yield "Good luck at four. Bye!"
+
+    engines.reply = generate
+
+    async def scenario():
+        call, flux = await start_call(engines, [])
+        await flux.emit("StartOfTurn", "and")
+        await flux.emit("EndOfTurn", "And that's all.")
+        await call.reply_task
+        assert call.ended.is_set()
+        await call.close()
+
+    asyncio.run(scenario())
+
+
+def test_a_soft_goodbye_ends_the_call_even_when_the_llm_fails():
+    from app import closing
+    engines, _, _ = turn_engines()
+
+    async def broken(conversation_id, text):
+        raise RuntimeError("rate limited")
+        yield ""  # pragma: no cover
+
+    engines.reply = broken
+
+    async def scenario():
+        sent = []
+        call, flux = await start_call(engines, sent)
+        await flux.emit("StartOfTurn", "and")
+        await flux.emit("EndOfTurn", "And that's all.")
+        await call.reply_task
+        assert call.ended.is_set()
+        await call.close()
+        return sent
+
+    captions = " ".join(e["text"] for e in events_of(asyncio.run(scenario())) if e["type"] == "caption")
+    assert closing.goodbye_line("call-1") in captions and RETRY_SORRY not in captions
+
+
+def test_silence_asks_if_they_are_still_there_then_says_goodbye():
+    from app import closing
+    engines, seen, stored = turn_engines()
+    engines.idle_prompt_s, engines.idle_end_s = 0.05, 0.15
+
+    async def scenario():
+        sent = []
+        call, _ = await start_call(engines, sent)
+        await asyncio.wait_for(call.finished(), 2)
+        await asyncio.gather(call.reply_task, call.history_task)
+        await finish(call)
+        return sent
+
+    captions = [e["text"] for e in events_of(asyncio.run(scenario())) if e["type"] == "caption"]
+    assert captions == [closing.STILL_THERE, closing.IDLE_GOODBYE] and seen["replies"] == []
+    assert stored == [(None, closing.STILL_THERE), (None, closing.IDLE_GOODBYE)]
+
+
+def test_speech_after_the_idle_prompt_keeps_the_call_going():
+    engines, _, _ = turn_engines()
+    engines.idle_prompt_s, engines.idle_end_s = 0.05, 1.5
+
+    async def scenario():
+        call, flux = await start_call(engines, [])
+        await asyncio.sleep(0.4)  # The idle check runs every quarter second.
+        assert call.idle_prompted
+        await call.reply_task
+        await flux.emit("StartOfTurn", "yes")  # Answering "Still there?" resets the timer.
+        assert not call.idle_prompted
+        await asyncio.sleep(0.6)
+        assert not call.ended.is_set() and not call.idle_prompted
+        await call.close()
+
+    asyncio.run(scenario())
+
+
+def test_a_pickup_hello_does_not_cut_the_greeting_and_a_late_one_repeats_it():
+    from app.pipeline import Backchannel
+    engines, seen, stored = greeting_engines()
+    engines.backchannel = Backchannel.from_words(hold_s=0.05)
+
+    async def scenario():
+        sent = []
+        call, flux = await start_call(engines, sent)
+        call.speaker.hold = asyncio.Event()
+        call.greet()
+        await wait_until(lambda: call.current is not None and call.current[1] > 0)
+        call.set_playing(True)
+        await flux.emit("StartOfTurn", "")
+        await flux.emit("Update", "Hello?")
+        await flux.emit("EndOfTurn", "Hello?")
+        assert not call.reply_task.done()  # Still greeting: "Hello?" is not a barge-in.
+        call.speaker.hold.set()
+        call.set_playing(False)
+        await call.reply_task
+        # Said again once the greeting ended, before anything was answered: greet again.
+        await flux.emit("StartOfTurn", "hello")
+        await flux.emit("EndOfTurn", "Hello?")
+        await finish(call)
+        return sent
+
+    events = events_of(asyncio.run(scenario()))
+    assert {"type": "interrupt"} not in events and seen["replies"] == []
+    greeting = "Hi Asha, this is VALR. How can I help?"
+    assert [e["text"] for e in events if e["type"] == "caption"] == [greeting, greeting]
+
+
+def test_a_hello_that_began_before_the_greeting_does_not_cut_it():
+    engines, seen, _ = greeting_engines()
+
+    async def scenario():
+        sent = []
+        call, flux = await start_call(engines, sent)
+        await flux.emit("StartOfTurn", "hello")  # The callee picked up talking.
+        call.speaker.hold = asyncio.Event()
+        call.greet()
+        await wait_until(lambda: call.current is not None and call.current[1] > 0)
+        await flux.emit("EndOfTurn", "Hello?")  # Flux ends that turn mid-greeting.
+        assert not call.reply_task.done()
+        call.speaker.hold.set()
+        await finish(call)
+        return sent
+
+    events = events_of(asyncio.run(scenario()))
+    assert {"type": "interrupt"} not in events and seen["replies"] == []

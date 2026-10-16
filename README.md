@@ -58,7 +58,12 @@ How a call flows (`app/pipeline.py`, `app/deepgram.py`):
 4. `ReplyText` cuts the streamed reply into whole sentences. The first sentence
    goes to Aura as soon as it is complete; each later segment is every sentence
    written by then. Aura streams audio back as it generates it, about 4x faster
-   than real time.
+   than real time. Aura shapes each segment's intonation on its own, so a
+   segment never ends inside a phrase: "a.m." in "at ten a.m. with Priya" is not
+   a sentence end (it was, and split every calendar answer in two). Before Aura,
+   `speakable()` drops web addresses ("kestrelapp.com" -> "kestrelapp"), writes
+   "a.m." as "AM" (Aura paused after each letter) and applies the respellings in
+   `app/persona.py` ("Brightline" -> "Bright Line"); captions keep the original.
 5. Audio goes to the browser as it arrives. Each segment's caption follows its
    audio, with its exact length; the browser reveals the words from where that
    audio started.
@@ -128,14 +133,22 @@ that is cancelled.
   110-170 ms instead of opening a TLS connection per request).
 - Groq occasionally stalls before the first token (seen up to 4 s). Each request
   is hedged instead of retried: if gpt-oss-120b has sent no text or tool-call
-  delta after `FIRST_TOKEN_DEADLINE_MS` (600 ms), one request with the same
+  delta by the deadline, one request with the same
   prompt and tools goes to `LLM_FALLBACK_MODEL` (gpt-oss-20b, a separate
   rate-limit bucket). Whichever starts first is used; the other stream is closed
   at once. A 429, timeout or 5xx from the primary starts the fallback
   immediately, without waiting. If neither has started after 5 s, the turn fails.
-- Why 600 ms: on the AWS VM (30 requests, this prompt) gpt-oss-120b's first token
-  was p50 466 ms, p75 479, p90 680, max 2.6 s; gpt-oss-20b p50 404, p90 505,
-  max 722. So about one request in eight is hedged.
+- The deadline adapts: the p75 of the primary's last 20 winning first tokens plus
+  200 ms, between `FIRST_TOKEN_DEADLINE_MS` (900 ms) and 2.5 s. A fixed 600 ms
+  (from 2026-10-15: p50 466 ms, p90 680) was below the 120b's first token on
+  2026-10-16 (620-930 ms), so every request was hedged, the 20b's quota ran out,
+  and both models then failed on the same turn. Near the rate limit a slow
+  primary is waited for, not hedged (a failing one still falls back).
+- Groq reports no cached tokens at all for this account: identical 2,100-token
+  requests, streamed or not, with or without tools, return
+  `prompt_tokens_details: null` (checked 2026-10-16). So every turn costs its full
+  prompt against the free tier's 8,000 tokens a minute and 200,000 a day per
+  model; the 120b's daily budget is about 50-70 owner turns.
 - Live check through the tunnel (30 turns, 43 requests, 2026-10-15): 4 hedged
   (9%), the fallback won 1. Per-request first token p50 438 ms, p90 587, max
   1.08 s. Per-turn first token p90 fell from 1,206 to 885 ms against the
@@ -172,6 +185,16 @@ same `Call` through `app/transport.py`, with the same events.
   speech start to `clear` 363 and 438 ms with the hold, 477 and 549 ms without
   (no slower: Flux's StartOfTurn usually carries the first word already); a
   spoken "Sure." over a reply was ignored.
+- Ending a call: a clear goodbye ("bye", "you can end the call", "that's all,
+  thanks") is answered with a fixed goodbye and hangs up without the LLM
+  (`app/closing.py`), so it works while Groq is rate-limited. A likely one ("and
+  that's all") goes to the LLM, which has an `end_call` tool; if the LLM fails, it
+  is taken as a goodbye too. Phone calls ask "Still there?" after 20 s of silence
+  and say goodbye and hang up at 45 s (`IDLE_PROMPT_S`, `IDLE_END_S`).
+- Calls we place (callbacks, briefings) wait for the callee's pickup "Hello?" (up
+  to 2.5 s; 1 s of silence if they say nothing) before greeting. A "Hello?" over
+  the greeting does not cut it, and a lone "Hello?" before anything was answered
+  repeats the greeting instead of going to the LLM.
 - Media relay: Cloudflare Realtime TURN credentials are minted per call when
   `CF_TURN_KEY_ID`/`CF_TURN_KEY_API_TOKEN` are set; until then calls use STUN
   only (see docs/deploy.md).
