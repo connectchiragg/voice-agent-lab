@@ -242,50 +242,75 @@ def hero(view: dict[str, Any], clock: Clock) -> str:
 </section>"""
 
 
-# Set-up checklist.
+# Set-up checklist: every step is a link or button that does the step, with its status.
+
+STEP_STATE = {"done": ("Done", "ok"), "todo": ("To do", "info"), "attention": ("Needs attention", "warn")}
+
 
 def setup(view: dict[str, Any]) -> str:
+    from app.notetakers import ui as notetaker_ui
     google = view["connections"]["google"]
     tg = view["connections"].get("telegram") or {}
+    takers = view["connections"].get("notetakers") or {}
     s = view["setup"]
     number = phone_label(s["valr_number"])
     g_done = google["state"] == "connected" and not google["expires_soon"]
     g_text = {"reconnect_needed": "Google access expired. Reconnect so VALR can see new invites.",
               "connected": "Connected. Google asks you to reconnect about once a week while the app is in testing."}
-    steps = [
-        ("Connect Google", g_done,
-         g_text.get(google["state"], "So VALR can see your interview invites and the recruiters' emails about them. Read-only."),
-         ('<a class="btn small" href="/oauth/google/start">'
-          + ("Reconnect" if google["state"] != "not_connected" else "Connect Google") + "</a>")
-         if google["configured"] and not g_done else ""),
-        ("Connect Fathom", view["connections"]["fathom"]["configured"],
-         "So VALR can learn from your past interview recordings and score how you're doing.",
-         '<span class="muted small">Add your Fathom API key to the server settings (FATHOM_API_KEY).</span>'
-         if not view["connections"]["fathom"]["configured"] else ""),
-        *([("Connect Telegram", tg.get("linked", False),
-            "VALR sends the heads-up there 30 minutes before each interview; you tap to get the call.",
-            ('<button class="btn small" type="button" data-action="tgcode">Show /start code</button>'
-             '<code class="mono" data-tg-code hidden></code>') if tg.get("configured")
-            else '<span class="muted small">Run deploy/install-telegram.sh with the bot token first.</span>')]
-          if telegram_mode(view) and not tg.get("linked") else
-          [("Connect Telegram", True, "Connected: heads-ups arrive in your VALR chat.", "")]
-          if telegram_mode(view) else []),
-        ("Confirm your phone number", s["phone_on_file"],
+    g_state = "done" if g_done else "attention" if google["state"] != "not_connected" else "todo"
+    g_action = ('<a class="btn small' + ("" if g_done else " primary") + '" href="/oauth/google/start">'
+                + ("Reconnect" if google["state"] != "not_connected" else "Connect Google") + "</a>"
+                + ("" if google["configured"] else
+                   '<span class="muted small"> Needs GOOGLE_OAUTH_CLIENT_ID/SECRET on the server first.</span>'))
+    on = [t["label"] for t in takers.values() if notetaker_ui.is_on(t)]
+    refused = any(t["state"] == "refused" for t in takers.values())
+    n_state = "attention" if refused else "done" if on else "todo"
+    n_text = (f"Connected: {', '.join(on)}. VALR scores each recorded interview and plays it back here."
+              if on else "Fathom, Fireflies or Granola: VALR learns from your recorded interviews, "
+                         "scores each one and plays it back here.")
+    steps = [("Connect Google", g_state,
+              g_text.get(google["state"], "So VALR can see your interview invites and the recruiters' emails about them. Read-only."),
+              g_action),
+             ("Connect a notetaker", n_state, n_text, notetaker_ui.summary_buttons(takers)
+              or '<a class="btn small" href="#notetakers">Notetakers</a>')]
+    if telegram_mode(view):
+        if tg.get("linked"):
+            steps.append(("Connect Telegram", "done", "Connected: heads-ups arrive in your VALR chat.",
+                          '<button class="btn small ghost" type="button" data-action="tglink">Link again</button>'
+                          '<code class="mono" data-tg-code hidden></code>'))
+        elif tg.get("configured"):
+            steps.append(("Connect Telegram", "todo",
+                          "VALR sends the heads-up there 30 minutes before each interview; you tap to get the call.",
+                          '<button class="btn small primary" type="button" data-action="tglink">Open Telegram</button>'
+                          '<code class="mono" data-tg-code hidden></code>'))
+        else:
+            steps.append(("Connect Telegram", "attention", "The VALR bot isn't installed on the server yet.",
+                          '<details class="pop"><summary class="btn small">How to set it up</summary><p class="small">'
+                          'Run <code>deploy/install-telegram.sh</code> on the server with the bot token from '
+                          '@BotFather. Then come back here and press "Open Telegram".</p></details>'))
+    steps += [
+        ("Confirm your phone number", "done" if s["phone_on_file"] else "todo",
          "VALR only ever calls the number on file, never anyone else.",
-         '<span class="muted small">Set it in the server settings (VALR_OWNER_PHONE).</span>'
-         if not s["phone_on_file"] else ""),
-        ("Make a test call", s["test_call_done"],
+         '<details class="pop"><summary class="btn small">' + ("How VALR checks it" if s["phone_on_file"] else "How to add it")
+         + '</summary><p class="small">VALR knows it is you by caller ID: a call from the number in the server '
+           'setting <code>VALR_OWNER_PHONE</code> gets your calendar, briefings and profile; every other caller '
+           'gets the general assistant. ' + ("A number is on file. " if s["phone_on_file"] else
+                                            "No number is on file yet: add it to the server settings and restart VALR. ")
+         + f'To check it, call <a href="tel:{e(s["valr_number"])}">{e(number)}</a> and ask '
+           '"what\'s on my calendar today?": VALR answers with your interviews only when it recognises you.</p></details>'),
+        ("Make a test call", "done" if s["test_call_done"] else "todo",
          f"Call {number} from your phone and ask \"what's on my calendar today?\"",
-         f'<a class="btn small" href="tel:{e(s["valr_number"])}">Call now</a>' if not s["test_call_done"] else ""),
+         f'<a class="btn small{"" if s["test_call_done"] else " primary"}" href="tel:{e(s["valr_number"])}">'
+         f'{"Call again" if s["test_call_done"] else "Call VALR"} <span class="num">{e(number)}</span></a>'),
     ]
-    done = sum(1 for _, ok, _, _ in steps if ok)
+    done = sum(1 for _, state, _, _ in steps if state == "done")
     items = "".join(f"""
-<li class="step{' done' if ok else ''}">
-  <span class="step-mark mono" aria-hidden="true">{'✓' if ok else f'0{i}'}</span>
-  <div class="step-body"><p class="step-title">{e(title)} <span class="sr-only">{'done' if ok else 'to do'}</span></p>
+<li class="step{' done' if state == 'done' else ''}">
+  <span class="step-mark mono" aria-hidden="true">{'✓' if state == 'done' else f'0{i}'}</span>
+  <div class="step-body"><p class="step-title">{e(title)} {chip(*STEP_STATE[state])}</p>
   <p class="muted small">{e(text)}</p></div>
   <div class="step-action">{action}</div>
-</li>""" for i, (title, ok, text, action) in enumerate(steps, 1))
+</li>""" for i, (title, state, text, action) in enumerate(steps, 1))
     open_ = "" if done == len(steps) else " open"
     return f"""
 <section class="section setup" id="setup" aria-labelledby="setup-title">
@@ -293,6 +318,8 @@ def setup(view: dict[str, Any]) -> str:
     <summary>{eyebrow("01", "Get set up")}<h2 id="setup-title">{'You are all set' if done == len(steps) else 'Finish setting up'}
       <span class="progress mono">{done}/{len(steps)}</span></h2></summary>
     <ol class="steps">{items}</ol>
+    <h3 class="sub-title">Notetakers</h3>
+    {notetaker_ui.cards(takers)}
   </details>
 </section>"""
 
@@ -465,6 +492,7 @@ def detail(slot: dict[str, Any], view: dict[str, Any], clock: Clock) -> str:
       </div>
       <button class="close" type="button" data-close aria-label="Close">✕</button>
     </header>
+    {recording_section(slot)}
     <section class="d-sec"><h3>The briefing</h3><p class="muted small">What VALR will tell you on the call.</p>{brief_html}</section>
     <section class="d-sec"><h3>Who you're meeting</h3><ul class="people">{people}</ul>{found_block(d['people'], '')}</section>
     <section class="d-sec"><h3>What to expect in this round</h3>{found_block(d['round'], 'Nothing found about this round yet.')}</section>
@@ -482,6 +510,14 @@ def detail(slot: dict[str, Any], view: dict[str, Any], clock: Clock) -> str:
 </dialog>"""
 
 
+def recording_section(slot: dict[str, Any]) -> str:
+    """Past interviews (status done) look for their recording when opened."""
+    if slot["status"] != "done":
+        return ""
+    from app.notetakers import ui as notetaker_ui
+    return notetaker_ui.recording_section(slot["ref"])
+
+
 # Performance.
 
 BADGE = {"improving": ("Improving", "ok", "↗"), "flat": ("Steady", "info", "→"),
@@ -489,6 +525,12 @@ BADGE = {"improving": ("Improving", "ok", "↗"), "flat": ("Steady", "info", "�
 VERDICT = {"improved": ("Improved", "ok"), "same": ("No change yet", "warn"), "worse": ("Getting worse", "bad"),
            "mixed": ("Mixed", "info")}
 OUTCOME = {"advanced": ("Advanced", "ok"), "rejected": ("Not advanced", "bad"), "unknown": ("Outcome unknown", "muted")}
+
+
+def watch(card: dict[str, Any], view: dict[str, Any]) -> str:
+    from app.notetakers import ui as notetaker_ui
+    takers = view["connections"].get("notetakers") or {}
+    return notetaker_ui.watch_button(card.get("id") or "", {k for k, v in takers.items() if notetaker_ui.is_on(v)})
 
 
 def badge_chip(badge: str) -> str:
@@ -508,7 +550,7 @@ def performance(view: dict[str, Any], clock: Clock) -> str:
         return f"""
 <section class="section" id="performance" aria-labelledby="perf-title">{head}
   <div class="empty"><p class="empty-title">Your scores appear after your first recorded interview.</p>
-  <p class="muted">Connect Fathom and record your interviews; VALR scores each one on the same rubric (out of 10)
+  <p class="muted">Connect a notetaker (Fathom, Fireflies or Granola) and record your interviews; VALR scores each one on the same rubric (out of 10)
   and shows what is improving and what to practise.</p></div>
 </section>"""
     overall = perf["series"]["overall"]
@@ -567,7 +609,7 @@ def performance(view: dict[str, Any], clock: Clock) -> str:
   <p class="mono label">{e(clock.short_date(card['date']) if card['date'] else '')} · {e(card['round'])}</p>
   <h4>{e(card['company'] or 'Interview')}<span class="muted small">{stage}</span></h4>
   <p class="score-big num">{score(card['overall'])}<span class="of">/10</span></p>
-  <div class="card-badges">{chip(*OUTCOME[card['outcome']], card['outcome_evidence'])}</div>
+  <div class="card-badges">{chip(*OUTCOME[card['outcome']], card['outcome_evidence'])}{watch(card, view)}</div>
   <ul class="score-bars">{bars}</ul>
   {f'<details class="qs"><summary>Next time ({len(card["do_next_time"])})</summary><ul class="facts">{nxt}</ul></details>' if nxt else ''}
   {f'<details class="qs"><summary>Question feedback ({len(card["questions"])})</summary><ul>{qs}</ul></details>' if qs else ''}
@@ -615,6 +657,15 @@ def telegram_line(tg: dict[str, Any], clock: Clock) -> str:
     return "connected" + (f" · since {clock.when(tg['linked_at'])}" if tg.get("linked_at") else "")
 
 
+def notetaker_lines(c: dict[str, Any]) -> str:
+    from app.notetakers import ui as notetaker_ui
+    takers = c.get("notetakers") or {}
+    if not takers:
+        return f"<li><span>Fathom</span><span>{'configured' if c['fathom']['configured'] else 'not configured'}</span></li>"
+    return "".join(f"<li><span>{e(t['label'])}</span><span>{e(notetaker_ui.STATE.get(t['state'], (t['state'], ''))[0])}"
+                   f"{(' · ' + e(t['account'])) if t.get('account') else ''}</span></li>" for t in takers.values())
+
+
 def system(view: dict[str, Any], clock: Clock) -> str:
     s, ilim = view["spend"], view["spend"]["interview_limits"]
     dials = "".join(meter(view["dials"][k]["used"], view["dials"][k]["limit"], title,
@@ -633,7 +684,7 @@ def system(view: dict[str, Any], clock: Clock) -> str:
 <ul class="kv">
   <li><span>Google account</span><span>{e(g['account']) or '–'} · {e(g['state'].replace('_', ' '))}{age}</span></li>
   <li><span>Calendar</span><span>{e(channel)}{until}{synced}</span></li>{error}
-  <li><span>Fathom</span><span>{'configured' if c['fathom']['configured'] else 'not configured'}</span></li>
+  {notetaker_lines(c)}
   <li><span>Telegram</span><span>{telegram_line(c.get('telegram') or {}, clock)}</span></li>
 </ul>"""
     runs = []
@@ -691,8 +742,14 @@ def page(view: dict[str, Any], email: str, csrf: str) -> str:
   <footer class="foot mono">valr · interview copilot <span class="muted">· signed in as {e(email)} · attendee emails and phone numbers are never shown</span></footer>
 </main>
 {details}
+{recording_dialog()}
 <div class="toast" role="status" aria-live="polite" hidden></div>
 </body></html>"""
+
+
+def recording_dialog() -> str:
+    from app.notetakers import ui as notetaker_ui
+    return notetaker_ui.DIALOG
 
 
 def error_page(message: str) -> str:
