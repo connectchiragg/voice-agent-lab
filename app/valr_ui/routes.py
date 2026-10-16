@@ -20,7 +20,7 @@ or the system's.
 """
 import importlib
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import APIRouter, Request
@@ -145,6 +145,69 @@ async def with_details(view: dict[str, Any]) -> dict[str, Any]:
     return {**view, "performance": {**perf, "interviews": filled}}
 
 
+RECORDINGS_DAYS = 365
+
+
+def review_state(eval_status: str, report: str | None) -> str:
+    """pending (queued, being scored, or its hand-off is retried on the worker's next start) |
+    unavailable (no interview or transcript to score) | sent."""
+    if report == "sent":
+        return "sent"
+    if report in ("not_interview", "no_transcript", "failed"):
+        return "unavailable"
+    return "pending"
+
+
+def recording_entry(row: dict[str, Any], report: str | None, company: str) -> dict[str, Any]:
+    """A stored recording without a scorecard, in the shape the Past pages read."""
+    from app.notetakers import store
+    from app.valr_view import scrub
+    start = row.get("event_start") or row.get("started_at") or row.get("received_at")
+    return {"id": f"{row['provider']}:{row['external_id']}", "recording_only": True,
+            "date": start.astimezone(timezone.utc).isoformat() if start else "",
+            "title": scrub(row.get("event_title") or row.get("title") or ""), "company": company, "round": "",
+            "interviewers": [scrub(n) for n in store.names(row)][:6], "provider": row["provider"],
+            "review": review_state(row.get("eval_status") or "", report), "overall": None}
+
+
+async def with_recordings(view: dict[str, Any]) -> dict[str, Any]:
+    """Past interviews = the scorecards plus every stored recording (phone, Fathom, Fireflies,
+    Granola) that has none yet, minus what the owner hid or deleted. Newest last, like
+    performance.json (the list reverses it)."""
+    if research.pool is None:
+        return view
+    try:
+        from app import post_call
+        from app.notetakers import routes as notetaker_routes
+        from app.notetakers import store
+        now = datetime.now(timezone.utc)
+        async with research.pool.connection() as connection:
+            await store.setup(connection)
+            rows = await store.between(connection, now - timedelta(days=RECORDINGS_DAYS), now + timedelta(days=1))
+            gone = await store.hidden(connection)
+            try:
+                reports = await post_call.statuses(connection)
+            except Exception as error:  # noqa: BLE001 - every review shows as pending.
+                logger.warning("VALR post-call statuses unavailable: %s", type(error).__name__)
+                reports = {}
+    except Exception as error:  # noqa: BLE001 - the scorecards still show.
+        logger.warning("VALR stored recordings unavailable: %s", type(error).__name__)
+        return view
+    perf = view.get("performance") or {}
+    scored = [iv for iv in perf.get("interviews") or []
+              if tuple(str(iv.get("id") or "").partition(":")[::2]) not in gone]
+    known = {str(iv.get("id") or "") for iv in scored}
+    fresh = [r for r in rows if f"{r['provider']}:{r['external_id']}" not in known
+             and (r["provider"], r["external_id"]) not in gone]
+    manual = await load_overrides([f"interview:{r['provider']}:{r['external_id']}" for r in fresh])
+    extra = [recording_entry(r, reports.get((r["provider"], r["external_id"])),
+                             manual.get(f"interview:{r['provider']}:{r['external_id']}")
+                             or notetaker_routes.company_of(r.get("company") or "", r.get("event_company") or ""))
+             for r in fresh]
+    merged = sorted(scored + extra, key=lambda iv: str(iv.get("date") or "")[:10])
+    return {**view, "performance": {**perf, "interviews": merged}}
+
+
 async def load_recording(interview: dict[str, Any]) -> dict[str, Any] | None:
     """A past interview's stored recording (valr-notetakers: webhooks and syncs store its share
     link), by its performance.json id "<provider>:<id>"; None when there is none."""
@@ -205,16 +268,20 @@ async def render(request: Request, name: str, **params: str) -> HTMLResponse:
         else:
             body, status = not_found("That interview isn't coming up.", "/valr/interviews", "Interviews"), 404
     elif name == "past":
-        body = interviews.past_page(await with_details(view), clock)
+        body = interviews.past_page(await with_recordings(await with_details(view)), clock)
     elif name == "past_one":
-        view = await with_details(view)
+        view = await with_recordings(await with_details(view))
         found = interviews.find_past(view, params["slug"])
         if found:
             stored = contracts.recording(await load_recording(found), found)
             if stored:
                 found = {**found, "recording": stored}
-            body = interviews.past_detail_page(view, found, clock)
-            title = found["company"] or title
+            if found.get("recording_only"):
+                body = interviews.recording_detail_page(found, clock)
+                title = interviews.past_name(found)
+            else:
+                body = interviews.past_detail_page(view, found, clock)
+                title = found["company"] or title
         else:
             body, status = not_found("That interview isn't in your history.", "/valr/interviews/past", "Past interviews"), 404
     elif name == "leads":

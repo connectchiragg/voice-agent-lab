@@ -288,6 +288,7 @@ class FakeStore:
 
     def __init__(self):
         self.keys, self.recordings, self.events, self.media = {}, {}, {}, {}
+        self.gone = {}
         self.clock = lambda: datetime.now(timezone.utc)
 
     def install(self, monkeypatch):
@@ -359,6 +360,28 @@ class FakeStore:
         async def save_media(c, provider, external_id, media):
             self.media[(provider, external_id)] = {**{k: None for k in store.MEDIA_FIELDS}, **media,
                                                    "updated_at": self.clock()}
+
+        async def between(c, start, end, limit=200):
+            def when(r):
+                value = r.get("start") or r.get("started_at")
+                return datetime.fromisoformat(value.replace("Z", "+00:00")) if isinstance(value, str) else value
+            return [{"provider": p, "external_id": x, "title": r.get("title", ""), "started_at": when(r),
+                     "ended_at": None, "share_url": r.get("share_url", ""), "embed_url": "",
+                     "event_key": r.get("event_key"), "eval_status": r.get("eval_status", "pending"),
+                     "event_title": r.get("event_title"), "event_company": r.get("event_company"),
+                     "event_start": r.get("event_start"), "received_at": None, "company": r.get("company", ""),
+                     "interviewers": json.dumps(r.get("interviewers") or [])}
+                    for (p, x), r in self.recordings.items()]
+
+        async def hide(c, provider, external_id, how="hidden"):
+            self.gone[(provider, external_id)] = how
+
+        async def hidden(c):
+            return set(self.gone)
+
+        async def delete_recording(c, provider, external_id):
+            self.recordings.pop((provider, external_id), None)
+            self.media.pop((provider, external_id), None)
 
         for name, fn in locals().items():
             if name != "self" and callable(fn):

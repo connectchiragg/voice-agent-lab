@@ -255,8 +255,15 @@ def detail_page(view: dict[str, Any], block: dict[str, Any], slot: dict[str, Any
 
 # Past interviews.
 
+REVIEW = {"pending": ("Review pending", "muted"), "unavailable": ("Review not available", "muted"),
+          "sent": ("Review sent", "ok")}
+
+
 def outcome_chip(iv: dict[str, Any], with_evidence: bool = False) -> str:
-    """The scorecard's outcome, else the matched lead's stage (app/valr_ui/past.py)."""
+    """The scorecard's outcome, else the matched lead's stage (app/valr_ui/past.py); a stored
+    recording without a scorecard shows its review state instead."""
+    if iv.get("recording_only"):
+        return chip(*REVIEW.get(iv.get("review") or "pending", REVIEW["pending"]))
     if iv.get("outcome_chip"):
         return chip(*iv["outcome_chip"][:2])
     return chip(*OUTCOME[iv["outcome"]], iv.get("outcome_evidence", "") if with_evidence else "")
@@ -270,11 +277,30 @@ def past_list(view: dict[str, Any], clock: Clock) -> str:
     rows = "".join(f"""
 <li><a class="row-link" href="/valr/interviews/past/{e(attention.past_slug(iv))}">
   <span class="row-when"><span class="num">{e(clock.short_date(iv['date']) if iv['date'] else '')}</span></span>
-  <span class="row-main"><span class="row-title">{e(iv['company'] or NOT_IDENTIFIED)}</span>
+  <span class="row-main"><span class="row-title">{e(past_name(iv))}</span>
     <span class="row-sub">{e(iv['round'])}{(' · with ' + e(', '.join(iv['interviewers'][:2]))) if iv.get('interviewers') else ''}</span></span>
   <span class="row-end">{outcome_chip(iv)}{f'<span class="score-chip num" title="Overall, out of 10">{score(iv["overall"])}</span>' if iv.get('overall') is not None else ''}</span>
 </a></li>""" for iv in interviews)
     return f'<ul class="rows card">{rows}</ul>'
+
+
+def past_name(iv: dict[str, Any]) -> str:
+    """The company; for a stored recording without one, its contact ("Call with Maheku") or title."""
+    if iv.get("company") or not iv.get("recording_only"):
+        return iv.get("company") or NOT_IDENTIFIED
+    people = iv.get("interviewers") or []
+    return f"Call with {people[0]}" if people else iv.get("title") or "Recording"
+
+
+def remove_item(iv: dict[str, Any]) -> str:
+    """⋯ "Delete recording" (a phone upload: its data lives in VALR) or "Hide" (a notetaker's,
+    which lives at the provider). static/valr-app.js confirms, then posts with the CSRF token."""
+    provider, _, external_id = str(iv.get("id") or "").partition(":")
+    if not external_id:
+        return ""
+    if provider == "phone":
+        return menu_item("Delete recording", "trash", attrs=f' data-recording-remove="delete" data-id="{e(iv["id"])}"')
+    return menu_item("Hide", "eye-off", attrs=f' data-recording-remove="hide" data-id="{e(iv["id"])}"')
 
 
 def past_page(view: dict[str, Any], clock: Clock) -> str:
@@ -283,8 +309,10 @@ def past_page(view: dict[str, Any], clock: Clock) -> str:
 
 
 def find_past(view: dict[str, Any], slug: str) -> dict[str, Any] | None:
+    """By slug; a raw "<provider>-<id>" link (a notification's) is normalised the same way."""
+    wanted = {slug, attention.past_slug({"id": slug})}
     return next((iv for iv in (view.get("performance") or {}).get("interviews") or []
-                 if attention.past_slug(iv) == slug), None)
+                 if attention.past_slug(iv) in wanted), None)
 
 
 def recording_block(rec: dict[str, Any] | None, interview_id: str = "") -> str:
@@ -388,7 +416,8 @@ def past_detail_page(view: dict[str, Any], iv: dict[str, Any], clock: Clock) -> 
     when = clock.short_date(iv["date"]) if iv["date"] else ""
     rec = iv.get("recording") or {}
     actions = menu([menu_item(f"Open in {rec['provider']}", "external", rec["url"], external=True) if rec.get("url") else "",
-                    menu_item("Fix company", "pencil", attrs=' data-sheet="fix-company"') if iv.get("id") else ""])
+                    menu_item("Fix company", "pencil", attrs=' data-sheet="fix-company"') if iv.get("id") else "",
+                    remove_item(iv)])
     sub = (f'{outcome_chip(iv, True)}'
            + (f'<span class="score-chip num" title="Overall, out of 10">{score(iv["overall"])}<span class="of">/10</span></span>'
               if iv.get("overall") is not None else "")
@@ -405,3 +434,35 @@ def past_detail_page(view: dict[str, Any], iv: dict[str, Any], clock: Clock) -> 
   {skills_block(iv, labels)}
 </div>
 {company_sheet("interview:" + (iv.get("id") or ""), iv["company"]) if iv.get("id") else ""}"""
+
+
+def review_block(state: str) -> str:
+    if state == "unavailable":
+        return ('<p class="muted">Review not available: the coach found no interview to score in this call '
+                '(too short, or no transcript).</p>')
+    if state == "sent":
+        return '<p class="muted">The coach review was sent to Telegram; its scorecard appears here shortly.</p>'
+    return '<p class="muted" aria-live="polite">Review pending… The coach reviews the call within a few minutes.</p>'
+
+
+def recording_detail_page(iv: dict[str, Any], clock: Clock) -> str:
+    """A stored recording without a scorecard (yet): title, date, company, the player, the
+    transcript's key moments (/valr/api/recording) and the review state."""
+    when = clock.short_date(iv["date"]) if iv.get("date") else ""
+    rec = iv.get("recording") or {}
+    actions = menu([menu_item(f"Open in {rec['provider']}", "external", rec["url"], external=True) if rec.get("url") else "",
+                    menu_item("Fix company", "pencil", attrs=' data-sheet="fix-company"'),
+                    remove_item(iv)])
+    sub = (outcome_chip(iv)
+           + (f'<span class="muted">With {e(", ".join(iv["interviewers"]))}</span>' if iv.get("interviewers") else ""))
+    title = iv.get("title") or ""
+    eyebrow = " · ".join(x for x in (when, title if title != past_name(iv) else "") if x)
+    head = page_head(e(past_name(iv)), eyebrow=e(eyebrow), crumb="/valr/interviews/past|Past interviews",
+                     actions=actions, sub=sub)
+    return f"""{head}
+{unidentified_note(iv.get('company') or '')}
+<div class="review">
+  <section class="card" id="recording"><h2 class="card-title">{icon('video', 18)}Recording</h2>{recording_block(iv.get('recording'), iv['id'])}</section>
+  <section class="card" id="coach"><h2 class="card-title">{icon('lightbulb', 18)}Coach review</h2>{review_block(iv.get('review') or 'pending')}</section>
+</div>
+{company_sheet("interview:" + iv["id"], iv.get("company") or "")}"""

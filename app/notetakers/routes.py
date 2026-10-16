@@ -14,6 +14,9 @@ token, see app/valr_dashboard.action_owner):
   to stream, from Fathom's official download API, cached (app/notetakers/media.py):
   {status: completed | processing | busy | unavailable | failed | expired, url?, expires_at?,
   content_type?, message?}. `refresh=1` when the player's URL stopped working.
+- `POST /valr/api/recordings/remove` {id, action: delete | hide}: the owner's "Delete
+  recording" (a phone upload: audio, transcript, row, notification, evaluation) or "Hide" (a
+  Fathom/Fireflies/Granola recording, which stays at the provider).
 - `GET /valr/api/past-interviews?days=60` (1-180): past interviews, newest first, each with
   its matched recording (no provider call: what webhooks and syncs stored), plus
   recordings that matched no calendar event. For the Past Interviews page.
@@ -237,6 +240,62 @@ async def set_company(request: Request) -> JSONResponse:
                         headers=NO_CACHE)
 
 
+class RemoveRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    id: str = Field(min_length=3, max_length=140)
+    action: str = Field(pattern="^(delete|hide)$")
+
+
+async def _exists(connection: Any, table: str) -> bool:
+    cursor = await connection.execute("SELECT to_regclass(%s) IS NOT NULL", (table,))
+    return bool((await cursor.fetchone())[0])
+
+
+async def remove(connection: Any, provider: str, external_id: str, action: str) -> str:
+    """The owner's "Delete recording" (phone: VALR's own data) or "Hide" (a notetaker's: it lives
+    at the provider, so only VALR's listing forgets it). -> a message. Logs no names."""
+    await store.setup(connection)
+    if action == "hide":
+        if provider == "phone":
+            raise HTTPException(400, "Phone recordings are deleted, not hidden.")
+        await store.hide(connection, provider, external_id, "hidden")
+        logger.info("VALR recording hidden (%s)", provider)
+        return "Hidden from Past interviews. It stays in your notetaker."
+    if provider != "phone":
+        raise HTTPException(400, "Only phone recordings can be deleted here; hide this one instead.")
+    from app import phone_recordings
+    await phone_recordings.setup(connection)
+    # The audio chunks and the upload row (its sealed transcript and its SHA-256: the same file
+    # can be sent again), the recording row, its notification and its evaluation entry.
+    await phone_recordings.drop_upload(connection, external_id)
+    await store.delete_recording(connection, provider, external_id)
+    for table, column in (("notifications", "source_id"), ("post_call_reports", None)):
+        if not await _exists(connection, table):
+            continue
+        if column:
+            await connection.execute(f"DELETE FROM {table} WHERE {column} = %s", (f"{provider}:{external_id}",))
+        else:
+            await connection.execute(f"DELETE FROM {table} WHERE provider = %s AND external_id = %s",
+                                     (provider, external_id))
+    await store.hide(connection, provider, external_id, "deleted")  # A scorecard of it, if any, stays out too.
+    logger.info("VALR phone recording deleted by the owner")
+    return "Recording deleted."
+
+
+@router.post("/valr/api/recordings/remove")
+async def remove_recording(request: Request) -> JSONResponse:
+    """Owner only, same origin, CSRF: {id: "<provider>:<id>", action: delete | hide}."""
+    await valr_dashboard.action_owner(request)
+    try:
+        body = RemoveRequest.model_validate_json(await request.body())
+    except ValidationError:
+        raise HTTPException(400, "Expected {id, action}.") from None
+    provider, external_id = parse_id(body.id)
+    async with pool().connection() as connection:
+        message = await remove(connection, provider, external_id, body.action)
+    return JSONResponse({"ok": True, "message": message, "next": "/valr/interviews/past"}, headers=NO_CACHE)
+
+
 PAST_CALENDAR = timedelta(days=3)  # calendar_events keeps 3 days of the past (app/calendar_sync.py).
 
 
@@ -303,6 +362,8 @@ async def past_interviews(request: Request, days: int = 60) -> JSONResponse:
     async with pool().connection() as connection:
         await store.setup(connection)
         rows = await store.between(connection, now - timedelta(days=days), now)
+        gone = await store.hidden(connection)
+        rows = [r for r in rows if (r["provider"], r["external_id"]) not in gone]
         await calendar_sync.setup(connection)
         events = await calendar_sync.upcoming(connection, now - min(PAST_CALENDAR, timedelta(days=days)), now)
     items = past_view(events, rows, now)

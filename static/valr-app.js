@@ -213,6 +213,29 @@ document.addEventListener("click", async event => {
   }
 });
 
+// Past interview ⋯ "Delete recording" (phone uploads) / "Hide" (Fathom, Fireflies): confirm, then post.
+document.addEventListener("click", async event => {
+  const button = event.target.closest("[data-recording-remove]");
+  if (!button) return;
+  const action = button.dataset.recordingRemove;
+  const ask = action === "delete"
+    ? "Delete this recording? Its audio, transcript, notification and coach review are removed for good. The same file can be sent again."
+    : "Hide this recording from Past interviews? It stays in your notetaker.";
+  if (!confirm(ask)) return;
+  button.setAttribute("aria-busy", "true");
+  button.disabled = true;
+  try {
+    const reply = await postJson("/valr/api/recordings/remove", {id: button.dataset.id, action});
+    toast(reply.message || "Done.");
+    setTimeout(() => location.assign(reply.next || "/valr/interviews/past"), 700);
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    button.removeAttribute("aria-busy");
+    button.disabled = false;
+  }
+});
+
 // Merge: filter the company list as you type.
 document.querySelector("[data-merge-search]")?.addEventListener("input", event => {
   const q = event.target.value.trim().toLowerCase();
