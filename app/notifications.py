@@ -6,6 +6,13 @@ Where they come from (all in the research worker):
   the classifier's decision. Dropped mail, newsletters, job-board alerts, his own sent mail and
   automatic "application received" receipts never notify. Only incremental passes notify
   (never the first backfill), and only for mail under VALR_NOTIFY_MAX_AGE_HOURS (48) old;
+- every kept inbound job email that is still UNREAD in Gmail (`sync_unread`, after each Gmail
+  sync): older mail too, up to 30 days, so the bell shows all his unread job mail. These items
+  are created silently (push and Telegram "skipped"): only genuinely new mail pings the phone.
+  The unread set is one messages.list ("is:unread newer_than:30d") per sync, plus the UNREAD
+  label changes in the Gmail history. Reading the mail in Gmail reads its item; marking it
+  unread again in Gmail brings the dot back. Reading an item in VALR does not touch Gmail
+  (that needs the gmail.modify scope; VALR only has gmail.readonly);
 - a processed call recording (`from_recording`);
 - a calendar change (`from_calendar`, called by the calendar sync in app/interview_worker.py):
   an interview-like event added, moved (its time changed) or cancelled. The first sync (no
@@ -30,6 +37,9 @@ immediate items wait until 08:00, except one tied to an interview in the next
 VALR_NOTIFY_URGENT_HOURS (12). The three switches (immediate alerts, daily digest, quiet hours)
 are in Settings (`notify_settings`), seeded from VALR_NOTIFY_IMMEDIATE / VALR_NOTIFY_DIGEST /
 VALR_NOTIFY_QUIET_HOURS (all 1). VALR_NOTIFY_DIGEST_AT (09:00) sets the digest time.
+
+Max age: a new email pushes (and goes to Telegram) only under VALR_NOTIFY_MAX_AGE_HOURS (48)
+old; an unread one stays in the bell up to 30 days (KEEP_FOR), dated by when it arrived.
 
 Dedupe: one notification per Gmail thread within 10 minutes (a later, more important email in
 the same thread upgrades it instead); every source has a unique `source_id`, so a re-run never
@@ -426,6 +436,18 @@ class Store:
             "UPDATE notifications SET read_at = %s WHERE read_at IS NULL AND lead_id = %s", (now, lead_id))
         return int(getattr(cursor, "rowcount", 0) or 0)
 
+    async def email_items(self, since: datetime) -> dict[str, dict[str, Any]]:
+        """{gmail message id: {id, read_at}} for the items made from an email since `since`."""
+        cursor = await self.c.execute(
+            "SELECT source_id, id, read_at FROM notifications WHERE source_id LIKE 'gmail:%%' AND created_at >= %s",
+            (since,))
+        return {str(r[0]).removeprefix("gmail:"): {"id": int(r[1]), "read_at": r[2]} for r in await cursor.fetchall()}
+
+    async def mark_unread(self, ids: list[int]) -> int:
+        cursor = await self.c.execute(
+            "UPDATE notifications SET read_at = NULL WHERE read_at IS NOT NULL AND id = ANY(%s)", (ids,))
+        return int(getattr(cursor, "rowcount", 0) or 0)
+
     async def purge(self, before: datetime) -> None:
         await self.c.execute("DELETE FROM notifications WHERE created_at < %s", (before,))
 
@@ -507,6 +529,77 @@ async def from_email(store: Any, email: Any, decision: Any, touch: Any, new_thre
             "link": lead_link(""), "gmail_url": touch.url or "", "thread_id": email.thread_id,
             "action": (decision.action or "")[:120]}
     return await add(store, note, now)
+
+
+# Unread mail (app/lead_worker.py, after each Gmail sync).
+
+QUIET_KINDS = ("newsletter", "job_board_alert", "own_reply")  # Kept for context, never bell items.
+
+
+def unread_kind(touch: Any, new_thread: bool) -> str | None:
+    """The kind of a kept inbound email shown because it is unread: its usual kind, else
+    "update" (an automatic "application received" is not news, but it is unread job mail)."""
+    if (getattr(touch, "category", "") or "") in QUIET_KINDS:
+        return None
+    return email_kind(touch.category or "", touch.action_requested, touch.stage_hint or "", new_thread,
+                      touch.title or "", touch.summary or "") or "update"
+
+
+def silent_note(touch: Any, new_thread: bool) -> dict[str, Any] | None:
+    """A bell item for a kept inbound email touchpoint, dated when the mail arrived, that is
+    never pushed nor sent on Telegram."""
+    if touch.kind != "email" or touch.direction != "in" or not touch.id.startswith("gmail:"):
+        return None
+    kind = unread_kind(touch, new_thread)
+    if kind is None:
+        return None
+    lead_id = getattr(touch, "lead_id", "") or ""
+    return {"source_id": touch.id, "kind": kind, "importance": importance(kind),
+            "title": email_title(kind, touch.company, touch.action or "", new_thread),
+            "body": (touch.summary or "")[:240], "company": (touch.company or "")[:120],
+            "link": lead_link(lead_id), "gmail_url": touch.url or "", "thread_id": touch.thread or None,
+            "lead_id": lead_id or None, "action": (touch.action or "")[:120], "created_at": touch.at,
+            "tg_state": "skipped", "push_state": "skipped"}
+
+
+async def sync_unread(store: Any, kept: list[Any], unread: set[str] | None, complete: bool,
+                      changes: dict[str, bool], now: datetime, first_in_thread: set[str] = frozenset()) -> dict[str, int]:
+    """Makes the bell match Gmail's unread job mail.
+
+    `kept`: the kept email touchpoints of the last 30 days; `unread`: Gmail's unread message
+    ids of the last 30 days (None when the list could not be fetched), `complete` when that
+    list was not cut short; `changes`: {message id: True (marked unread) | False (read)} from
+    the Gmail history; `first_in_thread`: touch ids that started their thread.
+
+    - an unread kept inbound email without an item gets one, silently;
+    - an unread item whose mail is read in Gmail is read (only when the list is complete, or
+      the history says so: a cut list never reads anything by mistake);
+    - an item whose mail was marked unread again in Gmail (history) is unread again.
+    Reading an item in VALR is kept: a mail that stays unread in Gmail does not undo it."""
+    out = {"added": 0, "read": 0, "unread": 0}
+    since = now - KEEP_FOR
+    items = await store.email_items(since)
+    # The list is fetched after the history, so it wins; without it, the history alone.
+    unread_now = set(unread) if unread is not None else {i for i, v in changes.items() if v}
+    for touch in kept:
+        message_id = touch.id.removeprefix("gmail:")
+        if message_id not in unread_now or message_id in items or touch.at < since:
+            continue
+        note = silent_note(touch, touch.id in first_in_thread)
+        if note is not None and await store.insert(note) is not None:
+            out["added"] += 1
+    if unread is not None and complete:
+        read = {i for i in items if i not in unread}
+    else:
+        read = {i for i, v in changes.items() if not v and i not in unread_now}
+    gone = [items[i]["id"] for i in read if i in items and items[i]["read_at"] is None]
+    if gone:
+        out["read"] = await store.mark_read(gone, now)
+    back = [items[i]["id"] for i, v in changes.items()
+            if v and i in unread_now and i in items and items[i]["read_at"] is not None]
+    if back:
+        out["unread"] = await store.mark_unread(back)
+    return out
 
 
 async def after_rebuild(store: Any, leads: list[Any], now: datetime) -> int:

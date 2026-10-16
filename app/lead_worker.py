@@ -17,8 +17,11 @@
   (app/leads.build) and saved.
 - `gmail_watch`: users.watch on VALR_GMAIL_TOPIC, daily.
 - Notifications (app/notifications.py): a kept inbound email in an incremental pass becomes a
-  bell item (`notify_email`); after each rebuild, email notifications are linked to their lead
-  and anything due goes out on Telegram (`notify_rebuild`).
+  bell item (`notify_email`); after every sync, the bell is matched to Gmail's unread job mail
+  (`notify_unread`: one messages.list "is:unread newer_than:30d" plus the history's UNREAD
+  label changes; older unread mail is added silently, mail read in Gmail is read in VALR);
+  after each rebuild, email notifications are linked to their lead and anything due goes out
+  on Telegram (`notify_rebuild`). `python -m app.lead_worker unread` runs the unread pass now.
 
 Settings: VALR_LEADS=1 turns the schedules on; VALR_GMAIL_TOPIC; VALR_LEADS_BACKFILL_DAYS (30),
 VALR_LEADS_BACKFILL_MAX (500), VALR_LEADS_LLM_PER_DAY (300), VALR_LEADS_POLL_MINUTES (30),
@@ -138,6 +141,40 @@ async def notify_email(connection: Any, email: Email, decision: Decision, touch:
         logger.warning("VALR notification not created: %s", type(error).__name__)
 
 
+UNREAD_CAP = 1000  # Unread messages listed per sync (10 list pages at most).
+
+
+async def notify_unread(connection: Any, http: httpx.AsyncClient, token: str, changes: dict[str, bool],
+                        now: datetime) -> dict[str, int]:
+    """The bell matched to Gmail's unread job mail (notifications.sync_unread). Never fails the
+    sync: a rate limit or an error only skips the list this time (the history's label changes
+    still apply)."""
+    from app import notifications
+    try:
+        unread, complete = await gmail_api.unread_ids(http, token, UNREAD_CAP)
+    except gmail_api.GmailRateLimited:
+        unread, complete = None, False
+        logger.info("VALR notifications: unread list rate limited; next sync")
+    except httpx.HTTPError as error:
+        unread, complete = None, False
+        logger.warning("VALR notifications: unread list failed (%s)", type(error).__name__)
+    try:
+        store = notifications.Store(connection)
+        await store.setup()
+        hidden = await leads_store.overrides(connection)  # Mail of a lead he dismissed is not job mail.
+        kept = [t for t in await leads_store.kept_inbound(connection, now - notifications.KEEP_FOR)
+                if t.id not in hidden.dismissed_touches and t.thread not in hidden.dismissed_threads]
+        firsts = await leads_store.thread_starters(connection, [t.thread for t in kept if t.thread])
+        result = await notifications.sync_unread(store, kept, unread, complete, changes, now, firsts)
+    except Exception as error:  # noqa: BLE001 - the bell catches up on the next sync
+        logger.warning("VALR notifications: unread pass failed (%s)", type(error).__name__)
+        return {"added": 0, "read": 0, "unread": 0}
+    if any(result.values()):
+        logger.info("VALR notifications: unread mail %d added (silently), %d read in Gmail, %d unread again",
+                    result["added"], result["read"], result["unread"])
+    return result
+
+
 async def notify_rebuild(connection: Any, built: list[Any], bot: Any = None) -> None:
     """After a lead rebuild: link email notifications to their lead, then Telegram for anything
     due. Never fails the refresh."""
@@ -224,16 +261,19 @@ class LeadActivities:
             if status == "reconnect needed":
                 await self.alert_reconnect(connection, state)
             return summary
+        changes: dict[str, bool] = {}  # UNREAD label changes in the history: message id -> unread.
         try:
             if not state.get("backfill_done_at"):
                 await self.backfill(connection, token, state, now, summary)
             else:
-                await self.incremental(connection, token, state, now, summary)
+                await self.incremental(connection, token, state, now, summary, changes)
         except gmail_api.GmailRateLimited as error:
             # Decisions so far are saved (per batch); the workflow resumes in a few minutes.
             summary.mode, summary.more, summary.error = PAUSED, True, RATE_LIMITED
             await leads_store.save_state(connection, last_sync_at=now, last_error=RATE_LIMITED)
             logger.warning("VALR leads: Gmail rate limited (%s); paused, resuming later", error.reason)
+        else:
+            await notify_unread(connection, self.http, token, changes, datetime.now(timezone.utc))
         logger.info("VALR leads: Gmail %s (%s): %d new, %d kept, %d dropped, %d deferred, %d model calls, "
                     "$%.4f, %d left", summary.mode, request.reason, summary.fetched, summary.kept,
                     summary.dropped, summary.deferred, summary.llm_calls, summary.usd, summary.left)
@@ -274,12 +314,14 @@ class LeadActivities:
         await leads_store.save_state(connection, **values)
 
     async def incremental(self, connection: Any, token: str, state: dict[str, Any], now: datetime,
-                          summary: GmailSyncSummary) -> None:
-        """Messages added since the stored historyId, plus earlier deferred ones. The historyId
-        moves on only when every new message fits in this run."""
+                          summary: GmailSyncSummary, changes: dict[str, bool] | None = None) -> None:
+        """Messages added since the stored historyId, plus earlier deferred ones (and, into
+        `changes`, the UNREAD label changes). The historyId moves on only when every new
+        message fits in this run."""
         summary.mode = "history"
         try:
-            refs, new_history = await gmail_api.history(self.http, token, int(state["history_id"]))
+            refs, new_history = await gmail_api.history(self.http, token, int(state["history_id"]),
+                                                        unread=changes)
         except gmail_api.HistoryGone:
             summary.mode = "recovery"
             logger.warning("VALR leads: Gmail historyId too old; searching the last 3 days")
@@ -905,8 +947,9 @@ async def ensure_lead_schedules(client: Any) -> None:
 
 
 async def cli(command: str) -> None:
-    """`python -m app.lead_worker sync|watch|stats|repair-companies [--dry-run]`: counts and
-    company names only, no content."""
+    """`python -m app.lead_worker sync|watch|stats|unread|repair-companies [--dry-run]`: counts
+    and company names only, no content. `unread`: the bell matched to Gmail's unread job mail
+    now (otherwise it runs after every sync)."""
     from dataclasses import asdict
     from temporalio.client import Client
     from app.lead_workflow import SYNC_WORKFLOW_ID, TASK_QUEUE, GmailSyncWorkflow, GmailWatchWorkflow
@@ -919,6 +962,16 @@ async def cli(command: str) -> None:
         cap = re.search(r"--max-model-calls[= ](\d+)", command)
         print(json.dumps(await repair_companies(dry_run="--dry-run" in command, verbose="--verbose" in command,
                                                 max_model_calls=int(cap.group(1)) if cap else 500), indent=2))
+        return
+    if command == "unread":
+        from app.interview_worker import gmail_access
+        async with await connect() as connection, httpx.AsyncClient(timeout=30) as http:
+            await leads_store.setup(connection)
+            token, status = await gmail_access(connection, http)
+            if not token:
+                print(json.dumps({"error": f"Gmail {status}"}))
+                return
+            print(json.dumps(await notify_unread(connection, http, token, {}, datetime.now(timezone.utc))))
         return
     if command == "stats":
         async with await connect() as connection:
@@ -951,7 +1004,7 @@ if __name__ == "__main__":
     import sys
     from dotenv import load_dotenv
     load_dotenv(Path(__file__).resolve().parent.parent / ".env")
-    if sys.argv[1:2] not in (["sync"], ["watch"], ["stats"], ["repair-companies"], ["transcript-companies"]):
-        sys.exit("usage: python -m app.lead_worker sync|watch|stats|"
+    if sys.argv[1:2] not in (["sync"], ["watch"], ["stats"], ["unread"], ["repair-companies"], ["transcript-companies"]):
+        sys.exit("usage: python -m app.lead_worker sync|watch|stats|unread|"
                  "repair-companies|transcript-companies [--dry-run] [--verbose] [--max-model-calls N]")
     asyncio.run(cli(" ".join(sys.argv[1:6])))

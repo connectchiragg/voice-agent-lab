@@ -4,10 +4,14 @@
 - `watch`: push notifications for the mailbox to a Cloud Pub/Sub topic (users.watch). Google
   stops a watch after 7 days and recommends calling it again once a day; the response's
   historyId and expiration are stored.
-- `history`: message ids added since a historyId (history.list, messageAdded only, paged
-  and capped). A 404 means that historyId is too old: `HistoryGone`, and the caller falls
-  back to a short search.
+- `history`: message ids added since a historyId (history.list, paged and capped), and,
+  when asked (`unread`), which messages gained or lost the UNREAD label in that time (the
+  labelAdded / labelRemoved history types): reading a mail in Gmail reads its bell item. A
+  404 means that historyId is too old: `HistoryGone`, and the caller falls back to a short
+  search.
 - `search`: message ids for a query (messages.list), paged and capped; the backfill.
+- `unread_ids`: the ids of unread mail of the last 30 days (one messages.list,
+  "is:unread newer_than:30d"): which bell items are still unread.
 - `message`: one message (format "full"), parsed into a lead_classify.Email. Its text stays
   in memory for the classifier; only metadata, the decision and a derived summary are kept.
 
@@ -183,10 +187,16 @@ async def stop(http: httpx.AsyncClient, token: str) -> None:
         response.raise_for_status()
 
 
-async def history(http: httpx.AsyncClient, token: str, start: int,
-                  max_pages: int = 10) -> tuple[list[dict[str, Any]], int]:
-    """-> (message refs {id, threadId, labelIds}, the newest historyId seen)."""
-    params: dict[str, Any] = {"startHistoryId": str(start), "historyTypes": "messageAdded",
+HISTORY_TYPES = ["messageAdded", "labelAdded", "labelRemoved"]
+UNREAD = "UNREAD"
+
+
+async def history(http: httpx.AsyncClient, token: str, start: int, max_pages: int = 10,
+                  unread: dict[str, bool] | None = None) -> tuple[list[dict[str, Any]], int]:
+    """-> (message refs {id, threadId, labelIds}, the newest historyId seen). `unread`, when
+    given, is filled with {message id: True (marked unread) | False (read)} for every UNREAD
+    label change, the last one winning."""
+    params: dict[str, Any] = {"startHistoryId": str(start), "historyTypes": HISTORY_TYPES,
                               "maxResults": 500}
     refs: dict[str, dict[str, Any]] = {}
     latest = start
@@ -202,6 +212,12 @@ async def history(http: httpx.AsyncClient, token: str, start: int,
                 message = added.get("message") or {}
                 if message.get("id"):
                     refs[message["id"]] = message
+            if unread is not None:
+                for key, value in (("labelsAdded", True), ("labelsRemoved", False)):
+                    for change in item.get(key) or []:
+                        message_id = (change.get("message") or {}).get("id")
+                        if message_id and UNREAD in (change.get("labelIds") or []):
+                            unread[message_id] = value
         if not body.get("nextPageToken"):
             break
         params["pageToken"] = body["nextPageToken"]
@@ -220,6 +236,15 @@ async def search(http: httpx.AsyncClient, token: str, query: str, cap: int) -> l
             break
         params["pageToken"] = body["nextPageToken"]
     return refs[:cap]
+
+
+UNREAD_QUERY = "is:unread newer_than:30d"
+
+
+async def unread_ids(http: httpx.AsyncClient, token: str, cap: int = 1000) -> tuple[set[str], bool]:
+    """-> (ids of unread mail of the last 30 days, complete: False when the cap cut the list)."""
+    refs = await search(http, token, UNREAD_QUERY, cap + 1)
+    return {ref["id"] for ref in refs[:cap] if ref.get("id")}, len(refs) <= cap
 
 
 async def message(http: httpx.AsyncClient, token: str, message_id: str) -> dict[str, Any] | None:
