@@ -1,6 +1,6 @@
 """Past interviews, filled in: company, interviewers and outcome from what VALR stores.
 
-performance.json (the coach's scores) often lacks the company ("Unknown company"), never has
+performance.json (the coach's scores) often lacks the company, never has
 the interviewers, and knows the outcome only when the transcript said so. This fills them in,
 in order of trust:
 
@@ -16,6 +16,7 @@ A lead matches by the invitees' domain, by a contact's email (compared as a one-
 recording never stores addresses) or by the company name. Pure functions; tests in
 tests/test_valr_pages.py.
 """
+from app.company_names import NOT_IDENTIFIED
 import re
 from typing import Any
 
@@ -65,7 +66,7 @@ def match_lead(company: str, row: dict[str, Any] | None, leads: list[dict[str, A
     if len(wanted) >= 3:
         for lead in leads:
             have = key(lead.get("company") or "")
-            if lead.get("company") != "Unknown company" and len(have) >= 3 and (
+            if lead.get("company") != NOT_IDENTIFIED and len(have) >= 3 and (
                     have == wanted or (min(len(have), len(wanted)) >= 5 and (have.startswith(wanted) or wanted.startswith(have)))):
                 return lead
     return None
@@ -77,16 +78,23 @@ def lead_outcome(lead: dict[str, Any]) -> tuple[str, str] | None:
 
 
 def enrich(interview: dict[str, Any], row: dict[str, Any] | None, leads: list[dict[str, Any]],
-           owner: set[str] | None = None) -> dict[str, Any]:
-    """One performance interview, with company, interviewers and an outcome chip filled in."""
+           owner: set[str] | None = None, manual: str = "") -> dict[str, Any]:
+    """One performance interview, with company (and how we know it), interviewers and an
+    outcome chip filled in. `manual`: the owner's "Set company", which always wins."""
     owner = base.owner_words() if owner is None else owner
-    candidates = [interview.get("company") or "", (row or {}).get("company") or "",
-                  (row or {}).get("event_company") or ""]
-    company = next((c for c in candidates if c and base.is_company(c, owner)), "")
+    row = row or {}
+    domain = row.get("company_domain") or ""
+    candidates = [(row.get("company") or "", row.get("company_how") or "from the recording's invitees"),
+                  (base.company_from_domain(domain), f"attendee domain {domain}"),
+                  (interview.get("company") or "", "named by the coach's scorecard"),
+                  (row.get("event_company") or "", "named in the calendar")]
+    company, how = next(((c, h) for c, h in candidates if c and base.is_company(c, owner)), ("", ""))
     lead = match_lead(company, row, leads)
-    if not company and lead and lead.get("company") != "Unknown company":
-        company = lead["company"]
-    out = {**interview, "company": company, "interviewers": names(row)[:6]}
+    if not company and lead and lead.get("company") != NOT_IDENTIFIED:
+        company, how = lead["company"], "a lead with the same people or domain"
+    if manual:
+        company, how = manual, "set by you"
+    out = {**interview, "company": company, "company_how": how, "interviewers": names(row)[:6]}
     if interview.get("outcome") not in ("advanced", "rejected") and lead:
         chip = lead_outcome(lead)
         if chip:

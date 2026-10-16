@@ -5,6 +5,7 @@ people with their emails and the India pay snapshot beside it, and the deeper re
 folded under "More research". Past detail: the recording, how it came across
 (impression cues), the feedback and the scores.
 """
+from app.company_names import NOT_IDENTIFIED
 from typing import Any
 
 from app.valr_page import (CALL_STATUS, HEADS_UP, OUTCOME, PERSON, Clock, chip, countdown, e,
@@ -199,6 +200,7 @@ def detail_page(view: dict[str, Any], block: dict[str, Any], slot: dict[str, Any
 <div class="iv-meta">{status_label(slot, clock)}<span class="mono small ice">{countdown(slot['start'])}</span>
   {f'<span class="muted small">Calendar title: {e(lab["raw"])}</span>' if lab['raw'] else ''}</div>
 <div class="iv-reminder">{reminder(block, view, clock)}</div>
+{company_fix("slot:" + slot["ref"], lab["company"] if lab["company"] != NOT_IDENTIFIED else "", slot.get("company_how", ""))}
 <div class="detail-grid">
   <div class="detail-main">
     <section class="card" id="briefing"><h2 class="card-title">Your briefing</h2>{summary}</section>
@@ -219,6 +221,23 @@ def detail_page(view: dict[str, Any], block: dict[str, Any], slot: dict[str, Any
 </details>"""
 
 
+# Company: how we know it, and the owner's "Set company".
+
+def company_fix(entity_id: str, company: str, how: str = "") -> str:
+    """"Company: Zinnov · how we know: attendee domain zinnov.com", folded small, with "Set
+    company" (static/valr-app.js posts /valr/api/interviews/company)."""
+    from app.valr_ui.leads import linkify
+    shown = company or NOT_IDENTIFIED
+    how = how or ("not identified yet: set it here" if not company else "")
+    return (f'<details class="how small" data-company-fix="{e(entity_id)}"><summary class="muted">Company: {e(shown)}'
+            f'{" · how we know" if how else ""}</summary>'
+            + (f'<p class="muted small">{linkify(how)}</p>' if how else "")
+            + f'<div class="fix-row"><label class="sr-only" for="co-{e(entity_id)}">Company</label>'
+            f'<input id="co-{e(entity_id)}" data-company-input maxlength="80" autocomplete="off" placeholder="Company name" '
+            f'value="{e(company)}"><button class="btn small" type="button" data-company-save>Set company</button></div>'
+            '</details>')
+
+
 # Past interviews.
 
 def outcome_chip(iv: dict[str, Any], with_evidence: bool = False) -> str:
@@ -237,7 +256,7 @@ def past_list(view: dict[str, Any], clock: Clock) -> str:
     rows = "".join(f"""
 <li class="iv"><a class="iv-link" href="/valr/interviews/past/{e(attention.past_slug(iv))}">
   <span class="iv-time num">{e(clock.short_date(iv['date']) if iv['date'] else '–')}</span>
-  <span class="iv-main"><span class="iv-company">{e(iv['company'] or 'Unknown company')}</span>
+  <span class="iv-main"><span class="iv-company">{e(iv['company'] or NOT_IDENTIFIED)}</span>
     <span class="iv-title muted small">{e(iv['round'])}{(' · ' + e(iv['stage'])) if iv['stage'] else ''}{(' · with ' + e(', '.join(iv['interviewers'][:2]))) if iv.get('interviewers') else ''}</span></span>
   <span class="iv-side">{outcome_chip(iv)}<span class="score-sm num">{score(iv['overall'])}<span class="of">/10</span></span>
     {f'<span class="iv-open mono">{icon("play", 12)} Recording</span>' if iv.get('recording') else ''}</span>
@@ -311,10 +330,11 @@ def past_detail_page(view: dict[str, Any], iv: dict[str, Any], clock: Clock) -> 
         + "</li>" for q in iv["questions"])
     when = clock.short_date(iv["date"]) if iv["date"] else ""
     head = page_head(e(f"{when} · {iv['round']}" + (f" · {iv['stage']}" if iv["stage"] else "")),
-                     e(iv["company"] or "Unknown company"), crumb="/valr/interviews/past|Past interviews")
+                     e(iv["company"] or NOT_IDENTIFIED), crumb="/valr/interviews/past|Past interviews")
     return f"""{head}
 <div class="iv-meta">{outcome_chip(iv, True)}<span class="score-md num">{score(iv['overall'])}<span class="of">/10</span></span>
   {f'<span class="muted small">With {e(", ".join(iv["interviewers"]))}</span>' if iv.get("interviewers") else ''}</div>
+{company_fix("interview:" + (iv.get("id") or ""), iv["company"], iv.get("company_how", "")) if iv.get("id") else ""}
 <div class="detail-grid">
   <div class="detail-main">
     <section class="card" id="recording"><h2 class="card-title">Recording</h2>{recording_block(iv.get('recording'), iv.get('id') or '')}</section>

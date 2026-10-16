@@ -447,10 +447,10 @@ def test_interview_labels_from_attendee_domains():
     slot = {"title": "L2- Alex", "company": "", "interviewers": [
         {"name": "Recruiter", "email": "talent@quillworks.example"}, {"name": "Sam", "email": "sam@quillworks.example"},
         {"name": "Me", "email": "someone@gmail.com"}]}
-    assert wording.interview_label(slot) == {"company": "quillworks", "round": "Round 2",
-                                             "headline": "Round 2 · quillworks", "raw": "L2- Alex"}
-    assert wording.company_from_people([{"email": "a@hr.acme.co.example"}]) == "acme"
-    assert wording.interview_label({"title": "Chat", "company": "", "interviewers": []})["company"] == "Unknown company"
+    assert wording.interview_label(slot) == {"company": "Quillworks", "round": "Round 2",
+                                             "headline": "Round 2 · Quillworks", "raw": "L2- Alex"}
+    assert wording.company_from_people([{"email": "a@hr.acme.co.example"}]) == "Acme"
+    assert wording.interview_label({"title": "Chat", "company": "", "interviewers": []})["company"] == "Company not identified"
 
 
 def test_written_briefing_and_prep_filter():
@@ -599,7 +599,9 @@ def test_no_owner_name_in_the_code_only_in_settings(monkeypatch):
     assert interviews.owner_name() == "there" and config.settings().candidate_name == "Candidate"
     monkeypatch.setenv("VALR_CANDIDATE_NAME", "Sam Rivera")
     assert interviews.owner_name() == "Sam" and config.settings().candidate_name == "Sam Rivera"
-    assert {"sam", "rivera"} <= calendar_ics.not_company_words()
+    from app import company_names
+    assert {"sam", "rivera"} <= company_names.owner_words()
+    assert not calendar_ics.is_company_name("Rivera") and not calendar_ics.is_company_name("L2- Sam")
     monkeypatch.setenv("VALR_OWNER_NAME", "Alex")
     assert interviews.owner_name() == "Alex"
 

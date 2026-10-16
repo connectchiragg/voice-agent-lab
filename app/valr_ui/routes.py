@@ -68,6 +68,31 @@ async def load_rows(interviews_: list[dict[str, Any]]) -> dict[str, dict[str, An
     return {f"{p}:{i}": row for (p, i), row in rows.items()}
 
 
+async def load_overrides(entity_ids: list[str]) -> dict[str, str]:
+    """The owner's "Set company" names (app/company_resolver.company_overrides)."""
+    if not entity_ids or research.pool is None:
+        return {}
+    try:
+        from app import company_resolver
+        async with research.pool.connection() as connection:
+            await company_resolver.setup(connection)
+            return await company_resolver.overrides(connection, entity_ids)
+    except Exception as error:  # noqa: BLE001 - the page still renders with the resolver's names.
+        logger.warning("VALR company overrides unavailable: %s", type(error).__name__)
+        return {}
+
+
+async def with_slot_names(view: dict[str, Any]) -> dict[str, Any]:
+    """Upcoming slots with the owner's "Set company" applied."""
+    slots = [slot for block in view.get("blocks") or [] for slot in block.get("slots") or []]
+    manual = await load_overrides([f"slot:{slot.get('ref')}" for slot in slots if slot.get("ref")])
+    for slot in slots:
+        name = manual.get(f"slot:{slot.get('ref')}")
+        if name:
+            slot["company"], slot["company_how"] = name, "set by you"
+    return view
+
+
 async def with_details(view: dict[str, Any]) -> dict[str, Any]:
     """The past interviews with company, interviewers and outcome filled in (app/valr_ui/past.py)."""
     perf = view.get("performance") or {}
@@ -77,7 +102,9 @@ async def with_details(view: dict[str, Any]) -> dict[str, Any]:
     rows = await load_rows(ivs)
     found = past.all_leads(await load_leads())
     owner = past.base.owner_words()
-    filled = [past.enrich(iv, rows.get(iv.get("id") or ""), found, owner) for iv in ivs]
+    manual = await load_overrides([f"interview:{iv.get('id')}" for iv in ivs])
+    filled = [past.enrich(iv, rows.get(iv.get("id") or ""), found, owner, manual.get(f"interview:{iv.get('id')}", ""))
+              for iv in ivs]
     return {**view, "performance": {**perf, "interviews": filled}}
 
 
@@ -127,8 +154,9 @@ async def render(request: Request, name: str, **params: str) -> HTMLResponse:
     if name == "home":
         body = home.page(view, clock, items, await load_leads())
     elif name == "interviews":
-        body = interviews.upcoming_page(view, clock)
+        body = interviews.upcoming_page(await with_slot_names(view), clock)
     elif name == "interview":
+        view = await with_slot_names(view)
         found = interviews.find_slot(view, params["ref"])
         if found:
             body = interviews.detail_page(view, *found, clock)

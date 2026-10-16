@@ -181,6 +181,10 @@ def main() -> None:
     routes.load_recording = load_recording
     routes.load_rows = load_rows
 
+    async def load_overrides(entity_ids):
+        return {}  # No "Set company" names are stored in the preview.
+    routes.load_overrides = load_overrides
+
     class Pool:
         def connection(self):
             class Context:

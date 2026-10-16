@@ -64,7 +64,7 @@ def test_fathom_lists_with_api_key_header_and_pages_by_cursor():
     first = items[0]
     assert first.share_url == "https://fathom.video/calls/4242"
     assert first.embed_url == ""  # The undocumented iframe is gone; the video plays from the download API.
-    assert first.company == "Orbit" and first.company_domain == "orbit.example"
+    assert first.company == "Orbit Labs" and first.company_domain == "orbit.example"  # The title's spelling.
     assert first.interviewers == ["Ana Ruiz"] and first.invitee_hashes == [base.email_hash("ana.ruiz@orbit.example")]
     assert "ana.ruiz@orbit.example" not in json.dumps(first.public())  # Never an address stored.
     assert "ana.ruiz@orbit.example" in first.attendee_emails
@@ -988,5 +988,5 @@ def test_backfill_fills_company_and_people_of_stored_recordings(monkeypatch):
             return await notetakers.backfill_details(object(), http)
     assert run(go()) == {"listed": 2, "updated": 1}  # Only the stored one; nothing new is taken in.
     row = fake.recordings[("fathom", "4242")]
-    assert row["company"] == "Orbit" and row["interviewers"] == ["Ana Ruiz"]
+    assert row["company"] == "Orbit Labs" and row["interviewers"] == ["Ana Ruiz"]
     assert ("fathom", "9999") not in fake.recordings

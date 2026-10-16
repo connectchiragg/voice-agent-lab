@@ -12,10 +12,12 @@
 - `GET /valr/api/leads`: {leads, contacts, links, stages, generated_at, gmail}: every lead
   rebuilt from the stored touchpoints at request time (temperatures are "now").
 - `POST /valr/api/leads/sync`: a sync now (owner, CSRF, same-origin JSON like the cockpit).
-- `POST /valr/api/leads/<id>/override` {action: dismiss | stage | merge, stage?, into?}: the
+- `POST /valr/api/leads/<id>/override` {action: dismiss | stage | merge | rename, stage?, into?,
+  company?}: the
   owner's corrections, stored in `lead_overrides` and applied by every rebuild. Dismiss hides
   the lead and its touchpoints and Gmail threads for good (a new thread or event may start it
-  again); a stage stays until set back to automatic (""); merge folds it into another lead.
+  again); a stage stays until set back to automatic (""); merge folds it into another lead;
+  rename ("Set company") names the company ("" goes back to the resolver's name).
 
 The page and its JSON need the owner's Access login (app/valr_dashboard.owner).
 """
@@ -31,7 +33,7 @@ from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from temporalio.common import WorkflowIDConflictPolicy
 from temporalio.service import RPCError
 
@@ -155,9 +157,10 @@ async def leads_json(request: Request) -> JSONResponse:
 
 class OverrideRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
-    action: Literal["dismiss", "stage", "merge"]
+    action: Literal["dismiss", "stage", "merge", "rename"]
     stage: str = ""  # For "stage": one of leads.STAGES, or "" for automatic again.
     into: str = ""  # For "merge": the lead to merge into.
+    company: str = Field(default="", max_length=80)  # For "rename": the company name.
 
 
 async def apply_override(connection: Any, lead_id: str, body: OverrideRequest, email: str,
@@ -167,6 +170,10 @@ async def apply_override(connection: Any, lead_id: str, body: OverrideRequest, e
     lead = built.get(lead_id)
     if lead is None:
         raise LookupError("Unknown lead.")
+    if body.action == "rename":
+        name = " ".join(body.company.split())
+        await leads_store.add_override(connection, lead_id, "rename", name, by=email)
+        return f"Company set to {name}." if name else "Company name is automatic again."
     if body.action == "dismiss":
         await leads_store.add_override(connection, lead_id, "dismiss",
                                        touch_ids=[t.id for t in lead.touches],
@@ -190,7 +197,7 @@ async def lead_override(request: Request, lead_id: str) -> JSONResponse:
     try:
         body = OverrideRequest.model_validate_json(await request.body())
     except ValidationError as error:
-        raise HTTPException(400, "Expected {action: dismiss|stage|merge, stage?, into?}.") from error
+        raise HTTPException(400, "Expected {action: dismiss|stage|merge|rename, stage?, into?, company?}.") from error
     if research.pool is None:
         raise HTTPException(503, "Postgres is unavailable.")
     try:

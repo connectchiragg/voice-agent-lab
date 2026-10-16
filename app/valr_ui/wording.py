@@ -4,6 +4,7 @@ kind of reminder a block actually got (a Telegram heads-up or a phone call).
 
 Pure functions; unit-tested in tests/test_valr_pages.py.
 """
+from app.company_names import NOT_IDENTIFIED
 import re
 from collections import Counter
 from typing import Any
@@ -28,18 +29,9 @@ STOP_START = {"your", "the", "a", "an", "and", "or", "of", "to", "with", "in", "
 # Interview labels.
 
 def company_from_people(people: list[dict[str, Any]]) -> str:
-    """The most common attendee domain, as a name: "talent@quillworks.example" -> "quillworks"."""
-    domains = Counter()
-    for person in people:
-        domain = str(person.get("email") or "").rpartition("@")[2].lower()
-        if domain and domain not in GENERIC_DOMAINS:
-            domains[domain] += 1
-    if not domains:
-        return ""
-    parts = domains.most_common(1)[0][0].split(".")
-    while len(parts) > 1 and parts[-1] in SUFFIXES:
-        parts.pop()
-    return parts[-1] if parts and parts[-1] not in SUFFIXES else ""
+    """The outside people's company domain as a name (app/company_names.py): "Quillworks"."""
+    from app import company_names
+    return company_names.from_people([str(p.get("email") or "") for p in people if not p.get("is_self")])[0]
 
 
 def round_from_title(title: str) -> str:
@@ -57,11 +49,13 @@ def round_from_title(title: str) -> str:
 def interview_label(slot: dict[str, Any]) -> dict[str, str]:
     """{"company", "round", "headline", "raw"}: the company (from the calendar, else the
     attendees' domain), the round, "Round 2 · quillworks" and the raw title, kept secondary."""
-    company = slot.get("company") or company_from_people(slot.get("interviewers") or [])
+    from app import company_names
+    company = slot.get("company") if company_names.is_company(slot.get("company") or "") else ""
+    company = company or company_from_people(slot.get("interviewers") or [])
     title = slot.get("title") or ""
     rnd = round_from_title(title)
     headline = " · ".join(x for x in (rnd, company) if x) or title or "Interview"
-    return {"company": company or "Unknown company", "round": rnd, "headline": headline,
+    return {"company": company or NOT_IDENTIFIED, "round": rnd, "headline": headline,
             "raw": title if title and title != headline else ""}
 
 

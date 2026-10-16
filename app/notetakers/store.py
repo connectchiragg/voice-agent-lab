@@ -56,6 +56,7 @@ ALTER TABLE notetaker_recordings ADD COLUMN IF NOT EXISTS company text;
 ALTER TABLE notetaker_recordings ADD COLUMN IF NOT EXISTS company_domain text;
 ALTER TABLE notetaker_recordings ADD COLUMN IF NOT EXISTS interviewers text;    -- JSON list of names
 ALTER TABLE notetaker_recordings ADD COLUMN IF NOT EXISTS invitee_hashes text;  -- JSON list
+ALTER TABLE notetaker_recordings ADD COLUMN IF NOT EXISTS company_how text;     -- app/company_resolver.py
 CREATE TABLE IF NOT EXISTS recording_media (
     provider      text NOT NULL,
     external_id   text NOT NULL,
@@ -75,7 +76,7 @@ CREATE INDEX IF NOT EXISTS notetaker_recordings_by_event ON notetaker_recordings
 
 FIELDS = ("provider", "external_id", "title", "started_at", "ended_at", "share_url", "embed_url",
           "event_key", "origin", "received_at", "eval_status", "eval_detail", "event_title",
-          "event_company", "event_start", "company", "company_domain", "interviewers", "invitee_hashes")
+          "event_company", "event_start", "company", "company_domain", "interviewers", "invitee_hashes", "company_how")
 DETAILS = ("company", "company_domain", "interviewers", "invitee_hashes")
 
 

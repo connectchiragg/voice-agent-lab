@@ -52,7 +52,9 @@ def recording(item: dict[str, Any], with_meeting: bool = False) -> Recording:
     end = item.get("recording_end_time") or item.get("scheduled_end_time")
     invitees = [i for i in item.get("calendar_invitees") or [] if isinstance(i, dict)]
     emails = [str(i.get("email") or "").lower() for i in invitees if i.get("email")]
-    details = invitee_details(invitees, owner_emails())
+    recorder = item.get("recorded_by") if isinstance(item.get("recorded_by"), dict) else {}
+    details = invitee_details(invitees, owner_emails() | ({str(recorder.get("email")).lower()} if recorder.get("email") else set()),
+                              str(item.get("meeting_title") or item.get("title") or ""), str(recorder.get("name") or ""))
     return Recording(
         provider=NAME, external_id=str(item.get("recording_id") or ""),
         title=str(item.get("title") or item.get("meeting_title") or ""),

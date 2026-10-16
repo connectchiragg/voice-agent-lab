@@ -9,6 +9,7 @@ read as a task for the owner ("Reconnect Google in 2 days") rather than a fault.
 
 Plain words only: no env vars, workflows or codes. Pure; tested in tests/test_valr_pages.py.
 """
+from app.company_names import NOT_IDENTIFIED
 import math
 from datetime import datetime, timedelta
 from typing import Any
@@ -34,7 +35,7 @@ def parse(text: str | None) -> datetime | None:
 
 def who(block: dict[str, Any]) -> str:
     names = [wording.interview_label(s)["company"] for s in block.get("slots") or []]
-    names = [n for n in dict.fromkeys(names) if n and n != "Unknown company"]
+    names = [n for n in dict.fromkeys(names) if n and n != NOT_IDENTIFIED]
     return " and ".join(names[:2]) or "your interview"
 
 
