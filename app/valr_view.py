@@ -734,6 +734,14 @@ async def collect(pool: Any, now: datetime | None = None) -> dict[str, Any]:
         view["dials_paused"] = {"enabled": paused["enabled"], "updated_at": iso(paused["updated_at"])}
         view["dial_env"] = os.getenv("VALR_BRIEFING_DIAL", "1") == "1"
         try:
+            chosen = await interview_store.flag_choice(connection, interview_store.AUTO_DIAL)
+        except Exception as error:  # noqa: BLE001
+            logger.warning("VALR reach choice unavailable: %s", type(error).__name__)
+            chosen = None
+        auto = telegram_api.auto_dial() if chosen is None else chosen
+        view["reach"] = {"auto_dial": auto, "source": "default" if chosen is None else "settings",
+                         "default_auto_dial": telegram_api.auto_dial()}
+        try:
             cursor = await connection.execute(
                 "SELECT count(*) FROM briefing_blocks WHERE state = 'briefed'")
             view["_briefed_ever"] = bool((await cursor.fetchone() or [0])[0])
@@ -744,6 +752,14 @@ async def collect(pool: Any, now: datetime | None = None) -> dict[str, Any]:
         except Exception as error:  # noqa: BLE001
             logger.warning("VALR timeline unavailable: %s", type(error).__name__)
             view["blocks"], view["errors"] = [], view["errors"] + ["timeline"]
+        try:
+            refs = [slot["ref"] for block in view["blocks"] for slot in block["slots"]]
+            ticked = await interview_store.prep_checks(connection, refs)
+            for block in view["blocks"]:
+                for slot in block["slots"]:
+                    slot["prep_done"] = sorted(ticked.get(slot["ref"], ()))
+        except Exception as error:  # noqa: BLE001
+            logger.warning("VALR prep checks unavailable: %s", type(error).__name__)
         try:
             await google_oauth.setup(connection)
             google = await google_oauth.status(connection)
@@ -774,7 +790,9 @@ async def collect(pool: Any, now: datetime | None = None) -> dict[str, Any]:
             logger.warning("VALR post-call reports unavailable: %s", type(error).__name__)
             view["post_call"] = None
     # telegram: a heads-up at T-30 and calls only on request; call: the automatic T-30 dial.
-    view["mode"] = "call" if telegram_api.auto_dial() else "telegram"
+    view.setdefault("reach", {"auto_dial": telegram_api.auto_dial(), "source": "default",
+                              "default_auto_dial": telegram_api.auto_dial()})
+    view["mode"] = "call" if view["reach"]["auto_dial"] else "telegram"
     # The next T-30 step (a heads-up, or the dial; VALR_BRIEFING_DIAL=0 stops only the dial).
     view["next_call"] = next_call(view["blocks"], now, paused["enabled"] or (
         view["mode"] == "call" and not view["dial_env"]))

@@ -163,3 +163,11 @@ def test_models_and_reasoning_levels():
     from app import interview_agents
     assert interview_agents.RESEARCHER_EFFORT == "medium" and interview_agents.WRITER_EFFORT == "high"
     assert interview_agents.WRITER_MAX_TOKENS >= 12000  # Thinking counts toward max_tokens.
+
+
+def test_the_briefing_prompt_names_the_owner_from_settings(monkeypatch):
+    monkeypatch.delenv("VALR_OWNER_NAME", raising=False)
+    monkeypatch.delenv("VALR_CANDIDATE_NAME", raising=False)
+    assert agents.owner() == "the candidate"
+    monkeypatch.setenv("VALR_OWNER_NAME", "Alex")
+    assert "for Alex, a candidate" in agents.SLOT_HOW.format(subject="x", notes_max=3, owner=agents.owner())

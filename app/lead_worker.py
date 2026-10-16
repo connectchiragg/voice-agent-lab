@@ -41,16 +41,16 @@ DEFERRED_PER_PASS = 40
 RECOVERY_QUERY = "newer_than:3d -in:chats"
 CONCURRENCY = 4
 FATHOM_MEETINGS = "https://api.fathom.ai/external/v1/meetings"
-DETAIL_URL = "/valr#performance"  # When no recording is known.
+DETAIL_URL = "/valr/performance"  # When no recording is known.
 
 
 def detail_url(interview_id: str) -> str:
-    """The cockpit's scorecard anchor for an interview id like "fathom:1000", built as
-    valr-eval builds it (#past-fathom-1000); /valr#performance when there is none."""
+    """The past interview's page for an id like "fathom:1000": /valr/interviews/past/fathom-1000
+    (the slug of app/valr_ui/attention.past_slug); /valr/performance when there is none."""
     interview_id = str(interview_id or "")
     if ":" not in interview_id:
         return DETAIL_URL
-    return "/valr#past-" + "".join(ch if ch.isalnum() else "-" for ch in interview_id)
+    return "/valr/interviews/past/" + "".join(ch if ch.isascii() and ch.isalnum() else "-" for ch in interview_id)[:80]
 
 
 def enabled() -> bool:

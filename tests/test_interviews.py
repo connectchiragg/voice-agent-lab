@@ -24,9 +24,10 @@ STRANGER = "tel:+15550100099"
 def owner_env(monkeypatch):
     monkeypatch.setenv("VALR_OWNER_PHONE", OWNER_PHONE)
     monkeypatch.setenv("VALR_OWNER_EMAILS", "owner@example.com")
+    monkeypatch.setenv("VALR_OWNER_NAME", "Sam")  # Fictional; never the app's default.
     monkeypatch.delenv("VALR_OWNER_KEYS", raising=False)
     monkeypatch.setattr(interviews, "profile_block",
-                        lambda: "Private candidate context:\n## Profile\nChirag, Bengaluru. Comp: target "
+                        lambda: "Private candidate context:\n## Profile\nSam, Bengaluru. Comp: target "
                                 "secret-figure.\n\n## Self-evaluation from recent interviews\nWeak: system design.")
     interviews.briefings.clear()
     memory.calls.clear()
@@ -65,12 +66,12 @@ def test_prompt_has_the_profile_only_for_the_owner():
     as_caller("owner-call", OWNER)
     as_caller("other-call", STRANGER)
     owner_prompt = interviews.prompt_note("owner-call")
-    assert f"You are {ASSISTANT_NAME}, Chirag's personal interview assistant" in owner_prompt
+    assert f"You are {ASSISTANT_NAME}, Sam's personal interview assistant" in owner_prompt
     assert "secret-figure" in owner_prompt and "<profile>" in owner_prompt
     assert interviews.prompt_note("other-call") == "" and interviews.prompt_note("anon") == ""
     system = to_chat_messages([{"role": "user", "parts": [{"text": "hi"}], "status": "completed"}],
                               interviews.prompt_note("other-call"))[0]["content"]
-    assert "secret-figure" not in system and "Chirag" not in system
+    assert "secret-figure" not in system and "Sam" not in system
     assert interviews.reply_max_tokens("owner-call") == interviews.OWNER_REPLY_MAX_TOKENS
     assert interviews.reply_max_tokens("other-call") is None
 
@@ -96,7 +97,7 @@ def test_briefing_prompt_and_greeting():
     # The evaluation part of the profile is shortened on briefing calls (token budget).
     assert len(prompt) < 4 * 2600
     greeting = interviews.greeting("brief-call", "")
-    assert greeting.startswith(f"Hi Chirag, it's {ASSISTANT_NAME}. Got your brief for your 4:00 PM "
+    assert greeting.startswith(f"Hi Sam, it's {ASSISTANT_NAME}. Got your brief for your 4:00 PM "
                                "interview with Acme, in about 15 minutes")
 
 
@@ -112,7 +113,7 @@ def test_block_calls_route_greeting_and_prompt_to_interview_mode():
     callbacks.calls["cb"] = callbacks.CallbackCall("briefing-x", 1, "your 4:00 PM interview with Acme",
                                                    "block:briefing-x")
     try:
-        assert callbacks.greeting("cb").startswith(f"Hi Chirag, it's {ASSISTANT_NAME}, back with your brief")
+        assert callbacks.greeting("cb").startswith(f"Hi Sam, it's {ASSISTANT_NAME}, back with your brief")
         assert callbacks.prompt_note("cb") == ""  # The briefing is in interviews.prompt_note.
     finally:
         callbacks.calls.pop("cb")
@@ -178,13 +179,13 @@ def test_calendar_labels_are_speakable_and_never_invented():
     assert interviews.describe(event, zone) == {
         "label": "Acme, with Dev, at four p.m.", "calendar_title": "Interview with Acme"}
     start = datetime(2026, 10, 16, 6, 0, tzinfo=timezone.utc)  # 11:30 AM IST.
-    rohan = SlotEvent("s", "Chirag Goel and Rohan Mehta", start.isoformat(),
+    rohan = SlotEvent("s", "Sam Rivera and Rohan Mehta", start.isoformat(),
                         (start + timedelta(minutes=30)).isoformat(), company="Brightline",
                         company_domain="brightline.example",
                         attendees=[Person("rohan@brightline.example", "Rohan Mehta"),
-                                   Person("owner@example.com", "Chirag Goel", is_self=True)])
+                                   Person("owner@example.com", "Sam Rivera", is_self=True)])
     assert interviews.spoken_label(rohan, zone) == "Brightline, with Rohan, at eleven thirty a.m."
-    northwind = SlotEvent("z", "Chirag -In Person Post offer connect at Northwind Bengaluru [In-person]",
+    northwind = SlotEvent("z", "Sam -In Person Post offer connect at Northwind Bengaluru [In-person]",
                        "2026-10-16T07:15:00+00:00", "2026-10-16T08:15:00+00:00", company="Northwind")
     assert interviews.spoken_label(northwind, zone) == "Northwind, post-offer connect, at twelve forty-five p.m."
     nameless = SlotEvent("n", "Sync", "2026-10-16T03:35:00+00:00", "2026-10-16T04:00:00+00:00",
@@ -241,7 +242,7 @@ def test_proposal_says_the_labels_verbatim_with_the_capped_promise(monkeypatch):
 
 def test_owner_greeting_uses_his_name():
     as_caller("g", OWNER)
-    assert callbacks.greeting("g") in [line.format(name="Chirag", assistant=ASSISTANT_NAME)
+    assert callbacks.greeting("g") in [line.format(name="Sam", assistant=ASSISTANT_NAME)
                                        for line in interviews.OWNER_GREETINGS]
     as_caller("h", STRANGER)
     assert callbacks.greeting("h") == f"Hi, this is {ASSISTANT_NAME}. How can I help?"
@@ -263,7 +264,7 @@ def test_a_failed_turn_is_continued_not_repeated():
 def test_owner_prompt_is_compact_on_normal_calls(monkeypatch):
     long_eval = "x" * 3000
     monkeypatch.setattr(interviews, "profile_block",
-                        lambda: "Private:\n## Profile\nChirag.\n\n## Self-evaluation\n" + long_eval)
+                        lambda: "Private:\n## Profile\nSam.\n\n## Self-evaluation\n" + long_eval)
     as_caller("n", OWNER)
     normal = interviews.prompt_note("n")
     interviews.briefings["n"] = block()
@@ -362,7 +363,7 @@ def gmail_handler(request: httpx.Request) -> httpx.Response:
     if request.url.path.endswith("/threads"):
         assert "newer_than:180d" in request.url.params["q"]
         return httpx.Response(200, json={"threads": [{"id": "t1"}]})
-    body = ("Hi Chirag,\nYour system design round is on Tuesday at 4 pm.\nThe salary range is "
+    body = ("Hi Sam,\nYour system design round is on Tuesday at 4 pm.\nThe salary range is "
             "flexible.\nUnrelated chatter here.\nOn Mon, Asha wrote:\n> old quoted text about interview")
     return httpx.Response(200, json={"messages": [{"payload": {
         "mimeType": "text/plain", "body": {"data": b64(body)},

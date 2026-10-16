@@ -3,7 +3,9 @@
 # target (Python 3.13 with crewai) and (re)starts the `voice-research` container on the
 # `voice-agent-lab` network. Needs Temporal and Postgres running (deploy/temporal-setup.sh)
 # and ANTHROPIC_API_KEY in .env.research (chmod 600), which only this container reads.
-# Safe to run again. Run from the source directory:  sh deploy/research-setup.sh
+# /data (read-only) and /data-live (writable: performance.json) come from
+# deploy/valr-data-live.sh. Safe to run again. Run from the source directory:
+#   sh deploy/research-setup.sh
 set -eu
 cd "$(dirname "$0")/.."
 DOCKER=${DOCKER:-sudo docker}
@@ -17,6 +19,6 @@ $DOCKER rm -f voice-research >/dev/null 2>&1 || true
 # The research worker's RAM is capped so a runaway job cannot starve the live calls.
 $DOCKER run -d --name voice-research --restart unless-stopped --network voice-agent-lab \
   --env-file .env --env-file .env.research --memory 768m --no-healthcheck \
-  $( [ -d /srv/valr-data ] && echo "-v /srv/valr-data:/data:ro" ) "$IMAGE"
+  $(sh deploy/valr-data-live.sh worker) "$IMAGE"
 sleep 5
 $DOCKER logs voice-research 2>&1 | tail -3

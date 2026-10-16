@@ -321,13 +321,16 @@ def test_page_leads_with_the_narrative_and_folds_the_numbers():
             "post_call": {"pending": 1, "queued": 0, "failed": 0,
                           "recent": [{"title": "Northwind Labs", "status": "pending_telegram",
                                       "updated_at": "2026-10-10T10:00:00+00:00"}]}}
-    html = valr_page.performance(view, valr_page.Clock("UTC", datetime(2026, 10, 16, tzinfo=timezone.utc)))
+    from app.valr_ui import interviews as interview_pages, performance as performance_page
+    clock = valr_page.Clock("UTC", datetime(2026, 10, 16, tzinfo=timezone.utc))
+    html = performance_page.page(view, clock)
     order = [html.index(x) for x in ("Where you stand", "What's working", "What's costing you",
                                      "This week's focus", "The numbers behind this", 'id="perf-chart"')]
     assert order == sorted(order)
-    assert '<details class="numbers">' in html  # folded when there is a coach read
-    assert "How the interviewer reacted" in html and 'id="past-fathom-901"' in html
-    assert "1 post-call report pending" in html
+    assert '<details class="numbers" id="numbers">' in html  # folded when there is a coach read
+    assert "1 post-call report pending" in html and 'href="/valr/interviews/past/fathom-901"' in html
+    past = interview_pages.past_detail_page(view, view["performance"]["interviews"][-1], clock)
+    assert "How the interviewer reacted" in past
 
 
 # ---------- post-call report ----------
@@ -341,7 +344,7 @@ def test_report_renders_html_without_pay_figures_or_contacts(tmp_path):
         k: report[k] for k in ("verdict", "went_well", "to_fix", "impression_evidence", "outcome_signals")}
         | {"drill": post_call.clean(report["drill"])}, "valr.example.com", "https://fathom.example.com/share/abc")
     assert "<b>Post-call: Northwind Labs · system design round · 10 Oct</b>" in text and "Say instead:" in text
-    assert "https://valr.example.com/valr#past-fathom-901" in text and 'href="https://fathom.example.com/share/abc"' in text
+    assert "https://valr.example.com/valr/interviews/past/fathom-901" in text and 'href="https://fathom.example.com/share/abc"' in text
     assert not re.search(r"\b77\b", text) and "@" not in text and "555" not in text
     assert report["impression"] in ("engaged", "neutral", "cool")
     assert len(text) <= 4000
