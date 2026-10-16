@@ -281,7 +281,7 @@ def number(value: Any) -> float | None:
     return round(float(value), 2) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
 
 
-STAGES = {"pre_seed": "Pre-seed", "seed": "Seed", "series_a": "Series A", "series_b": "Series B",
+STAGES = {"pre_seed_seed": "Pre-seed / Seed", "pre_seed": "Pre-seed", "seed": "Seed", "series_a": "Series A", "series_b": "Series B",
           "series_c": "Series C", "series_d": "Series D", "series_a_b": "Series A–B",
           "series_c_plus": "Series C+", "growth": "Growth stage", "growth_early": "Early growth",
           "growth_late": "Late-stage", "late": "Late-stage", "public": "Public", "enterprise": "Enterprise",
@@ -306,7 +306,7 @@ def company_name(value: Any) -> str:
     e.g. "Fathom", a round label or the owner's name)."""
     from app import company_names
     text = scrub(value or "").strip()
-    return "" if text.lower() in RECORDERS or not company_names.is_company(text) else text
+    return "" if text.lower() in RECORDERS else company_names.display(text)
 
 
 def day_label(date: str) -> str:

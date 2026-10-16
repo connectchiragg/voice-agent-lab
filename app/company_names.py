@@ -58,7 +58,7 @@ AGENCY_DOMAINS = frozenset("""
     shl.com hirevue.com testgorilla.com mettl.com imocha.io xobin.com glider.ai interviewvector.com
     intervue.io barraiser.com incruiter.com flocareer.com gloroots.com recrew.ai recrew.in recrew.com
     watsonsearchpartner.com watsonsearchpartners.com successpact.com crossover.com andela.com
-    weekday.works weekday.so weekday.contact randstad.com adecco.com michaelpage.com hays.com roberthalf.com teamlease.com quesscorp.com
+    weekday.works weekday.so weekday.contact quickhyre.ai quickhyre.com randstad.com adecco.com michaelpage.com hays.com roberthalf.com teamlease.com quesscorp.com
     abcconsultants.net kellyservices.com manpowergroup.com ciel.co.in xpheno.com
     """.split())
 # Calendar, video and notetaker tools.
@@ -325,7 +325,9 @@ def normalize(name: str) -> str:
 
 # Trailing words that are never part of a brand when comparing spellings ("FurtherAI engineering",
 # "Razorpay Software", "Aspireapp").
-BRAND_JUNK = frozenset("engineering software app careers jobs hiring team recruiting hr".split())
+BRAND_JUNK = frozenset("engineering software app careers jobs hiring team recruiting hr "
+                       "india usa us uk emea apac europe singapore".split())  # Trailing region words too.
+STRIP_TLDS = ("com", "net", "org", "co", "in", "co.in", "biz")  # ".ai" / ".io" are often part of a brand.
 
 
 def brand(name: str) -> str:
@@ -334,6 +336,9 @@ def brand(name: str) -> str:
     "Guickly (Stealth Startup)" -> "Guickly", "Razorpay Software" -> "Razorpay",
     "Aspireapp" -> "Aspire")."""
     text = normalize(tidy(normalize(name)))
+    match = re.fullmatch(r"([A-Za-z0-9][\w-]{2,})\.(" + "|".join(re.escape(t) for t in STRIP_TLDS) + r")", text)
+    if match:  # "Cermati.com" -> "Cermati" (a lower-case raw domain is humanised by tidy already).
+        text = match.group(1)
     tokens = text.split()
     while len(tokens) > 1 and tokens[-1].lower().strip(".,-") in BRAND_JUNK:
         tokens.pop()
@@ -610,6 +615,14 @@ def firm(found: Resolution, people: Iterable[str] = ()) -> str:
     if found.source not in ("attendees", "sender", "stated") or is_person(found.name, people):
         return ""
     return found.name
+
+
+def display(name: str, owner: Iterable[str] | None = None) -> str:
+    """Any stored company name as shown: cleaned like the resolver's own output ("Razorpay
+    Software Private Limited" -> "Razorpay", "Cermati.com" -> "Cermati", "Revantage Global
+    Services India" -> "Revantage Global Services"); "" when it is not a company."""
+    shown = brand(name or "")
+    return shown if shown and is_company(shown, owner) else ""
 
 
 def label(name: str, owner: Iterable[str] | None = None) -> str:

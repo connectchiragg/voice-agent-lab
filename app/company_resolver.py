@@ -38,11 +38,13 @@ from app import company_names as names
 
 logger = logging.getLogger("valr")
 MODEL = "claude-haiku-5-5"
-RESOLVER_VERSION = 4  # Bump when the rules change: cached answers from older rules are ignored.
+RESOLVER_VERSION = 5  # Bump when the rules change: cached answers from older rules are ignored.
 CONFIDENT = 0.7      # Below this (or needs_web) one web search follows.
 SHOW = 0.5           # Below this after research: "Company not identified".
 MAX_TOKENS = 300
 SNIPPET_CHARS = 300
+TRANSCRIPT_CHARS = 1800
+INTRO_SECONDS = 120
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS company_resolutions (
@@ -111,6 +113,7 @@ class Evidence:
     snippet: str = ""                           # in memory only
     stated: str = ""                            # a company the source itself gave
     role: str = ""
+    transcript: str = ""                        # a call's first ~2 minutes; in memory only, never logged
 
     def all_emails(self) -> list[str]:
         return [e for _, e in self.people if e]
@@ -129,7 +132,8 @@ class Evidence:
         title = " ".join(names.words(re.sub(r"^(re|fwd?|fw)\s*:\s*", "", self.title.strip(), flags=re.I)))
         sender = names.domain_of(self.sender_email) + "|" + " ".join(names.words(self.sender_name))
         raw = json.dumps([RESOLVER_VERSION, self.company_domains(), title, sender if self.sender_email else "",
-                          names.key(self.stated)])
+                          names.key(self.stated), hashlib.sha256(self.transcript.encode()).hexdigest()[:16]
+                          if self.transcript else ""])
         return hashlib.sha256(raw.encode()).hexdigest()[:32]
 
     def render(self, candidates: list[dict[str, str]]) -> str:
@@ -143,6 +147,9 @@ class Evidence:
             lines.append(f"Email start: {' '.join(self.snippet.split())[:SNIPPET_CHARS]}")
         if self.stated:
             lines.append(f"Current name (strong evidence): {self.stated[:80]}")
+        if self.transcript:
+            lines.append("Call transcript, first two minutes (introductions often name the company): "
+                         + " ".join(self.transcript.split())[:TRANSCRIPT_CHARS])
         lines.append("Rule candidates: " + (json.dumps(candidates) if candidates else "none"))
         return "\n".join(lines).replace("</evidence>", "")
 
@@ -494,20 +501,23 @@ def as_dict(d: Decision) -> dict[str, Any]:
 EXISTING = 0.75  # How much a plausible existing name is trusted.
 
 
-def existing_confidence(name: str, agencies: Any = ()) -> float:
-    return EXISTING if name and names.is_company(name) and not names.is_agency_name(name, agencies) else 0.0
+def existing_confidence(name: str, agencies: Any = (), everyone: Any = ()) -> float:
+    """A plausible stored name is trusted; a person's name, an agency or junk is not."""
+    if not name or not names.is_company(name) or names.is_agency_name(name, agencies):
+        return 0.0
+    return 0.0 if names.is_person(name, (), everyone) else EXISTING
 
 
-def keep_or_change(old: str, new: Decision, agencies: Any = ()) -> bool:
+def keep_or_change(old: str, new: Decision, agencies: Any = (), everyone: Any = ()) -> bool:
     """True when `new` may replace `old`: a higher confidence, not an agency or platform, and
     an empty answer never replaces a plausible name. The same company is always fine."""
     if new.company and old and names.same(new.company, old):
         return True
     if not new.company:
-        return existing_confidence(old, agencies) == 0.0
+        return existing_confidence(old, agencies, everyone) == 0.0
     if names.is_agency_name(new.company, agencies) or (new.agency and names.same(new.agency, new.company)):
         return False
-    return new.confidence > existing_confidence(old, agencies)
+    return new.confidence > existing_confidence(old, agencies, everyone)
 
 
 def learn_agencies(touches: Any) -> set[str]:
@@ -521,3 +531,12 @@ def learn_agencies(touches: Any) -> set[str]:
         if domain and stated and not names.same(stated, names.from_domain(domain)):
             seen.setdefault(domain, set()).add(names.key(stated).replace(" ", ""))
     return {d for d, companies in seen.items() if len(companies) >= 2}
+
+
+def intro(meeting: dict | None, seconds: int = INTRO_SECONDS) -> tuple[str, list[str]]:
+    """(the first `seconds` of a normalised meeting's turns as "Speaker: text", the speakers)."""
+    turns = [t for t in (meeting or {}).get("turns") or [] if isinstance(t, dict)]
+    early = [t for t in turns if (t.get("start") or 0) <= seconds] or turns[:8]
+    text = " ".join(f"{t.get('speaker') or 'Someone'}: {t.get('text') or ''}" for t in early)
+    speakers = sorted({str(t.get("speaker")) for t in early if t.get("speaker")})
+    return text[:TRANSCRIPT_CHARS], speakers

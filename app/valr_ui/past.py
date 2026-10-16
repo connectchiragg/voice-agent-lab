@@ -94,6 +94,9 @@ def enrich(interview: dict[str, Any], row: dict[str, Any] | None, leads: list[di
         company, how = lead["company"], "a lead with the same people or domain"
     if manual:
         company, how = manual, "set by you"
+    else:
+        from app import company_names
+        company = company_names.display(company) if company else ""  # "Razorpay Software Private Limited" -> "Razorpay"
     out = {**interview, "company": company, "company_how": how, "interviewers": names(row)[:6]}
     if interview.get("outcome") not in ("advanced", "rejected") and lead:
         chip = lead_outcome(lead)
