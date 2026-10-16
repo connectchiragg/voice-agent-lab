@@ -1,12 +1,12 @@
-/* Lead temperature: four bands and Closed, the globe's labels and tooltip, the band pills.
-   Loaded by the leads hero (app/valr_ui/home.py) on Home and Leads.
+/* Lead temperature: four bands and Closed, the band words, the globe's legend, labels and
+   tooltip. Loaded on every app page (bands also colour Leads and Home's "Your move").
 
    Each band has a key colour (its warm end) and a "-lo" colour (its cold end); a score is
    drawn on a smooth ramp between the two inside its band, so the step between bands is
    large and the change within one is small. Blue -> teal -> amber -> red keeps the four
    apart for all three kinds of colour blindness (tests/leads-globe.test.mjs measures it,
    OKLab distance under Machado simulation). Closed is a neutral grey, never "cold".
-   static/leads-globe.js reads these tokens; the globe panel is always dark. */
+   static/leads-globe.js reads these tokens; the globe stage is always dark. */
 :root {
   --band-cold-lo: #3553a8; --band-cold: #4f7be6;
   --band-cool-lo: #23877c; --band-cool: #2fb3a0;
@@ -30,7 +30,7 @@
   --band-hot-lo: #cf4e2c; --band-hot: #b02a1d;
   --band-closed-lo: #c3c8d0; --band-closed: #c3c8d0;
 }
-/* The globe sits on a night-sky panel in both themes: the dark set, always. */
+/* The globe sits on a night-sky stage in both themes: the dark set, always. */
 .hero-globe {
   --band-cold-lo: #3553a8; --band-cold: #4f7be6;
   --band-cool-lo: #23877c; --band-cool: #2fb3a0;
@@ -39,83 +39,64 @@
   --band-closed-lo: #5a6170; --band-closed: #5a6170;
 }
 
-/* A band swatch and pill: "Hot 82". --f (0..1) is where the score sits inside its band. */
-.band-sw { display: inline-block; width: 10px; height: 10px; border-radius: 50%; flex: none; vertical-align: -1px;
+/* A band swatch and the band word ("● Hot"). --f (0..1) is where the score sits in its band. */
+.band-sw { display: inline-block; width: 9px; height: 9px; border-radius: 50%; flex: none; vertical-align: 0;
   background: color-mix(in oklab, var(--lo) calc((1 - var(--f, 1)) * 100%), var(--hi)); }
 .b-cold { --lo: var(--band-cold-lo); --hi: var(--band-cold); }
 .b-cool { --lo: var(--band-cool-lo); --hi: var(--band-cool); }
 .b-warm { --lo: var(--band-warm-lo); --hi: var(--band-warm); }
 .b-hot { --lo: var(--band-hot-lo); --hi: var(--band-hot); }
 .b-closed { --lo: var(--band-closed-lo); --hi: var(--band-closed); }
-.band-pill { display: inline-flex; align-items: center; gap: 7px; white-space: nowrap; padding: 3px 8px 3px 6px;
-  border: 1px solid color-mix(in oklab, var(--hi) 55%, transparent); font: 500 0.6875rem/1.2 var(--mono);
-  letter-spacing: 0.06em; text-transform: uppercase; color: var(--bone); }
-.band-pill .num { font-variant-numeric: tabular-nums; color: var(--ash); letter-spacing: 0; }
-.band-pill.b-closed { border-style: dashed; }
+.band-pill { display: inline-flex; align-items: center; gap: 7px; white-space: nowrap; height: 24px; padding: 0 10px 0 8px;
+  border-radius: 999px; font: 600 0.75rem/1 var(--font-ui); color: var(--text);
+  background: color-mix(in oklab, var(--hi) 14%, transparent); }
+.band-pill.b-closed { background: var(--surface-2); color: var(--text-3); }
 
-/* The band legend on the globe and the band chips on Leads. */
-.band-legend { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 14px; pointer-events: auto; }
-.band-legend .legend-item { gap: 7px; }
-.band-legend .legend-item .num { color: var(--ash); }
-.globe-toggle { display: inline-flex; align-items: center; gap: 7px; padding: 6px 10px; border: 1px dashed var(--hairline-strong, var(--hairline));
-  background: rgba(5, 7, 12, 0.55); cursor: pointer; font: 500 0.6875rem/1 var(--mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--ash); }
-.globe-toggle input { width: 14px; height: 14px; margin: 0; accent-color: var(--band-closed); }
-.globe-toggle:has(input:checked) { color: var(--bone); border-style: solid; }
-.globe-toggle:has(input:focus-visible) { outline: 2px solid var(--ice); outline-offset: 1px; }
-.hero-globe.compact .band-legend .legend-item { display: none; }
-.pick-link .band-sw { margin-right: -1px; }
-.chips-sep { flex: none; width: 1px; align-self: stretch; background: var(--hairline-strong); margin: 0 4px; }
+/* The globe's legend (Home's stage caption). */
+.band-legend { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 6px; }
+.legend-item { display: inline-flex; align-items: center; gap: 7px; height: 28px; padding: 0 11px 0 9px; border-radius: 999px;
+  background: rgba(255, 255, 255, .06); border: 1px solid rgba(255, 255, 255, .08); color: #e6e9f2; font-size: 0.8125rem; font-weight: 500;
+  text-decoration: none !important; transition: background 120ms ease; }
+.legend-item:hover { background: rgba(255, 255, 255, .12); }
+.legend-item .band-sw { box-shadow: 0 0 8px 1px color-mix(in oklab, var(--hi) 70%, transparent); }
+.legend-item .num { color: #9aa3b5; font-variant-numeric: tabular-nums; }
+.legend-extra { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; margin-top: 4px; color: #9aa3b5; font-size: 0.75rem; }
+.legend-size { display: inline-flex; align-items: center; gap: 4px; }
+.legend-size i { display: inline-block; border-radius: 50%; background: #9aa3b5; }
+.legend-size i:nth-child(1) { width: 4px; height: 4px; }
+.legend-size i:nth-child(2) { width: 6px; height: 6px; }
+.legend-size i:nth-child(3) { width: 9px; height: 9px; }
+.legend-note { margin-right: 4px; }
+.globe-toggle { display: inline-flex; align-items: center; gap: 7px; cursor: pointer; color: #c3c9d6; }
+.globe-toggle input { width: 14px; height: 14px; margin: 0; accent-color: #9b9cfc; }
+.globe-toggle .num { color: #9aa3b5; }
 
-/* Home, wide screens: the globe beside the hero copy, not under it. */
-@media (min-width: 900px) {
-  /* Wide screens: the copy in a left column, the globe filling the rest of a taller panel. */
-  .hero-globe:not(.compact) { height: 660px; }
-  .hero-globe:not(.compact) .hero-copy { max-width: 340px; }
-  .hero-globe:not(.compact) .hero-title { font-size: clamp(2.4rem, 1.6rem + 2vw, 3.4rem); }
-  .hero-globe:not(.compact) .globe { left: 320px; }
-  .hero-globe.compact { height: 560px; }
-  .hero-globe.compact .hero-copy { max-width: 260px; padding-right: 0; }
-  .hero-globe.compact .globe { left: 240px; }
-}
-/* Narrow screens: the globe below the hero copy, so the copy never covers the hot leads. */
-@media (max-width: 899.98px) {
-  .hero-globe:not(.compact) { height: 720px; }
-  .hero-globe:not(.compact) .globe { top: 250px; }
-  .hero-globe.compact { height: 540px; }
-  .hero-globe.compact .globe { top: 100px; }
-}
-
-/* The globe's labels: every live lead gets one; a label that would overlap a nearer one is
-   hidden until its lead is hovered or focused. Back-side labels fade out. */
+/* The globe: canvas, labels, leader lines and the tooltip. */
+.globe { position: relative; overflow: hidden; touch-action: pan-y; }
+.globe-canvas { position: absolute; inset: 0; display: block; cursor: grab; }
+.globe-canvas:active { cursor: grabbing; }
 .globe-labels { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
-.globe-label { position: absolute; left: 0; top: 0; display: flex; align-items: center; gap: 5px; padding: 1px 2px; border: 0; margin: 0;
-  background: transparent; white-space: nowrap; font: 600 0.6875rem/1 var(--display); letter-spacing: 0.03em; text-transform: uppercase;
-  font-stretch: condensed; color: var(--bone); text-shadow: 0 1px 5px #05070c, 0 0 2px #05070c; cursor: pointer; pointer-events: auto; will-change: transform, opacity; }
+.globe-label { position: absolute; left: 0; top: 0; display: flex; align-items: center; gap: 6px; padding: 3px 8px 3px 6px; margin: 0;
+  border: 1px solid rgba(255, 255, 255, .08); border-radius: 999px; background: rgba(9, 12, 28, .62);
+  backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); white-space: nowrap; color: #eef0f6;
+  font: 500 11px/1.2 "Inter", ui-sans-serif, system-ui, sans-serif; letter-spacing: .005em;
+  cursor: pointer; pointer-events: auto; will-change: transform, opacity; -webkit-font-smoothing: antialiased; }
+.globe-label::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--hi, #9aa3b5); flex: none; }
+.globe-label.is-hot { --hi: var(--band-hot); font-weight: 600; border-color: color-mix(in oklab, var(--band-hot) 40%, transparent); }
+.globe-label.is-warm { --hi: var(--band-warm); }
+.globe-label.is-cool { --hi: var(--band-cool); color: rgba(238, 240, 246, .88); }
+.globe-label.is-cold { --hi: var(--band-cold); color: rgba(238, 240, 246, .74); }
+.globe-label.is-closed { --hi: var(--band-closed); color: #9aa3b5; }
 .globe-label.is-culled { opacity: 0 !important; pointer-events: none; }
-.globe-label.is-forced, .globe-label:focus-visible { opacity: 1 !important; pointer-events: auto; z-index: 2; }
-.globe-label:focus-visible { outline: 1px solid var(--ice); outline-offset: 1px; }
-.globe-label.is-hot { font-weight: 700; }
-/* Lower bands a little dimmer, never hidden. */
-.globe-label.is-cool { color: rgba(228, 233, 242, 0.84); }
-.globe-label.is-cold { color: rgba(228, 233, 242, 0.68); }
-.globe-label.is-closed { color: var(--ash); }
+.globe-label.is-forced, .globe-label:focus-visible { opacity: 1 !important; pointer-events: auto; z-index: 2; background: rgba(9, 12, 28, .92); }
+.globe-label:focus-visible { outline: 2px solid #9b9cfc; outline-offset: 1px; }
+.globe-label.is-dim { opacity: .28 !important; }
 .globe-leaders { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
-.globe-leaders line { stroke: rgba(228, 233, 242, 0.7); stroke-width: 1; }
-/* A list row the pointer is on (static/valr-app.js turns the globe to it). */
-.leads-table tr[data-lead-row]:hover td { background: var(--glow-2); }
-.globe-label.is-dim { opacity: 0.25 !important; }
-.globe-tip { position: absolute; left: 0; top: 0; z-index: 3; pointer-events: none; padding: 7px 10px; max-width: 280px;
-  background: rgba(8, 12, 22, 0.94); border: 1px solid var(--hairline); border-left: 3px solid var(--tip, var(--signal));
-  color: var(--bone); font: 500 0.75rem/1.35 var(--mono); white-space: nowrap; }
-.globe-tip b { font-family: var(--display); font-size: 0.875rem; font-weight: 500; }
-.globe-tip[hidden] { display: none; }
-
-/* Leads list: the band pill and the ball-in-court line. */
-.leads-table td.temp { white-space: nowrap; }
-.court { display: block; margin-top: 2px; font-size: var(--fs-xs); color: var(--ash); }
-.court.you { color: var(--warn); }
-.court-line { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; padding: 8px 10px; margin: 10px 0;
-  border-left: 3px solid var(--hairline-strong); background: var(--glow-2); }
-.court-line.you { border-left-color: var(--warn); }
-.court-line.them { border-left-color: var(--signal); }
-.todo-sub { display: block; margin-left: 26px; font-size: var(--fs-xs); color: var(--ash); }
+.globe-leaders line { stroke: rgba(200, 208, 230, .45); stroke-width: 1; }
+.globe-tip { position: absolute; left: 0; top: 0; z-index: 3; pointer-events: none; padding: 8px 12px; max-width: 300px;
+  border-radius: 10px; background: rgba(9, 12, 28, .94); border: 1px solid rgba(255, 255, 255, .1);
+  box-shadow: 0 12px 32px -8px rgba(0, 0, 0, .6), inset 3px 0 0 var(--tip, #9b9cfc);
+  color: #c3c9d6; font: 500 12px/1.4 "Inter", ui-sans-serif, system-ui, sans-serif; white-space: nowrap; }
+.globe-tip b { color: #fff; font-weight: 600; }
+.globe-unsupported::after { content: "Your browser can't draw the globe; the Leads page lists every company.";
+  position: absolute; inset: auto 24px 24px; color: #9aa3b5; font-size: 13px; }

@@ -15,7 +15,13 @@
 // colour and size say different things. Every lead has a label, placed in a free slot around
 // its dot or further out with a leader line (`placeLabels`); one is hidden only when no slot is
 // free, or while its dot is on the far side (it fades in as the dot turns to the front).
-// Hovering a node or label shows "Company · band · score · stage · last touch".
+// Hovering a node or label shows "Company · band · stage · last touch" (no score: the band is
+// the word the owner reads).
+//
+// Look: a lit core with a soft indigo rim and an outer atmosphere glow, faint latitude and
+// longitude lines on the near side only, every lead a bright dot with an additive halo (hot
+// ones larger), leads on the far side dimmed rather than hidden, and a sparse, slowly drifting
+// starfield behind. Reduced motion: no rotation, no drift.
 //
 // Options: onSelect({type: "lead", id, lead} | null), maxNodes (default 150), labels (most
 // labels drawn, default 150: every drawn lead), reducedMotion (default: the media query; true = no
@@ -71,7 +77,7 @@ export function nodeRadius(lead) {
   return STAGE_SIZE[lead.stage] ?? 3.4;
 }
 
-/** "Acme · Hot · 82 · Interviewing · 3 days ago" */
+/** "Acme · Hot · Interviewing · 3 days ago" */
 export function tipText(lead, now = new Date()) {
   const band = BAND_LABEL[bandOf(lead)];
   const stage = lead.stage_label || STAGE_LABEL[lead.stage] || lead.stage || "";
@@ -81,8 +87,7 @@ export function tipText(lead, now = new Date()) {
     const days = Math.floor((now - at) / 86400000);
     touch = days < 1 ? "today" : days === 1 ? "yesterday" : `${days} days ago`;
   }
-  const score = Number.isFinite(Number(lead.temperature)) ? String(Math.round(lead.temperature)) : "–";
-  return [lead.company, band, score, stage, touch].filter(Boolean).join(" · ");
+  return [lead.company, band, stage, touch].filter(Boolean).join(" · ");
 }
 
 /** Nodes on a sphere of `radius`: {nodes[{id, pos, r, band, temperature, ref}], hidden}. */
@@ -227,14 +232,66 @@ export async function mount(el, data, options = {}) {
   }
   const gridGeometry = new THREE.BufferGeometry();
   gridGeometry.setAttribute("position", new THREE.Float32BufferAttribute(grid, 3));
-  world.add(new THREE.LineSegments(gridGeometry, new THREE.LineBasicMaterial({ color: ink, transparent: true, opacity: 0.07 })));
-  const core = new THREE.Mesh(new THREE.SphereGeometry(RADIUS * 0.985, 48, 32),
-    new THREE.MeshBasicMaterial({ color: signal, transparent: true, opacity: 0.035, depthWrite: false }));
+  const gridLines = new THREE.LineSegments(gridGeometry, new THREE.LineBasicMaterial({ color: ink, transparent: true, opacity: 0.11 }));
+  gridLines.renderOrder = 1;
+  world.add(gridLines);
+  // The core: dark at the centre, an indigo rim towards the edge. It writes depth first, so the
+  // far side's grid lines stay hidden and the sphere reads as a solid, lit body.
+  const shaded = (vertex, fragment, uniforms, extra = {}) => new THREE.ShaderMaterial({ uniforms, vertexShader: vertex, fragmentShader: fragment, transparent: true, ...extra });
+  const VERTEX = "varying vec3 vN; varying vec3 vV; void main(){ vec4 mv = modelViewMatrix * vec4(position, 1.0); vN = normalize(normalMatrix * normal); vV = normalize(-mv.xyz); gl_Position = projectionMatrix * mv; }";
+  const coreMaterial = shaded(VERTEX,
+    "uniform vec3 inner; uniform vec3 rim; varying vec3 vN; varying vec3 vV; void main(){ float f = 1.0 - max(dot(vN, vV), 0.0); float r = pow(f, 2.4); gl_FragColor = vec4(mix(inner, rim, r), 0.82 + 0.18 * r); }",
+    { inner: { value: new THREE.Color("#0a1030") }, rim: { value: new THREE.Color(signal).lerp(new THREE.Color("#8f93ff"), 0.4) } });
+  const core = new THREE.Mesh(new THREE.SphereGeometry(RADIUS * 0.985, 64, 48), coreMaterial);
+  core.renderOrder = 0;
   world.add(core);
+  // The atmosphere: a back-facing shell, glowing at the limb.
+  const glowMaterial = shaded(VERTEX,
+    "uniform vec3 glow; varying vec3 vN; varying vec3 vV; void main(){ float i = pow(clamp(0.72 + dot(vN, vV), 0.0, 1.0), 3.2); gl_FragColor = vec4(glow * i, i); }",
+    { glow: { value: new THREE.Color("#5b62ff") } }, { side: THREE.BackSide, blending: THREE.AdditiveBlending, depthWrite: false });
+  const atmosphere = new THREE.Mesh(new THREE.SphereGeometry(RADIUS * 1.16, 64, 48), glowMaterial);
+  scene.add(atmosphere);
+  // A sparse starfield, far behind.
+  const starPositions = [];
+  let seed = 7;
+  const rand = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+  for (let i = 0; i < (small ? 260 : 520); i++) {
+    const u = rand() * 2 - 1, a = rand() * Math.PI * 2, d = 620 + rand() * 420, r = Math.sqrt(1 - u * u);
+    starPositions.push(Math.cos(a) * r * d, u * d, Math.sin(a) * r * d);
+  }
+  const starGeometry = new THREE.BufferGeometry();
+  starGeometry.setAttribute("position", new THREE.Float32BufferAttribute(starPositions, 3));
+  const stars = new THREE.Points(starGeometry, new THREE.PointsMaterial({ color: 0xb9c2ff, size: 1.4, sizeAttenuation: false,
+    transparent: true, opacity: 0.55, depthWrite: false }));
+  scene.add(stars);
+  // The halo every lead wears: a soft radial sprite, added on top.
+  const haloCanvas = document.createElement("canvas");
+  haloCanvas.width = haloCanvas.height = 64;
+  const hc = haloCanvas.getContext("2d");
+  const grad = hc.createRadialGradient(32, 32, 0, 32, 32, 32);
+  grad.addColorStop(0, "rgba(255,255,255,1)"); grad.addColorStop(0.25, "rgba(255,255,255,.55)");
+  grad.addColorStop(0.6, "rgba(255,255,255,.12)"); grad.addColorStop(1, "rgba(255,255,255,0)");
+  hc.fillStyle = grad; hc.fillRect(0, 0, 64, 64);
+  const haloTexture = new THREE.CanvasTexture(haloCanvas);
 
   const ball = new THREE.SphereGeometry(1, small ? 12 : 20, small ? 8 : 14);
   let graph = null, meshes = [], byId = new Map(), labelEls = new Map(), sizes = new Map();
   let selected = null, hovered = null, focused = null, dirty = true, inside = false;
+
+  // Far-side leads stay visible but faint; the near side is bright.
+  const worldPos = new THREE.Vector3();
+  function shade() {
+    for (const mesh of meshes) {
+      mesh.getWorldPosition(worldPos);
+      const depth = worldPos.z / RADIUS;
+      const t = Math.max(0, Math.min(1, (depth + 0.25) / 0.5));
+      const front = 0.16 + 0.84 * t * t * (3 - 2 * t);
+      const fade = mesh.userData.fade ?? 1;
+      mesh.material.opacity = front * fade;
+      const halo = mesh.children[0];
+      if (halo) halo.material.opacity = halo.userData.base * front * fade;
+    }
+  }
 
   function clear() {
     for (const mesh of meshes) {
@@ -251,17 +308,20 @@ export async function mount(el, data, options = {}) {
     for (const node of graph.nodes) {
       // CSS strings are read as sRGB, so the nodes match the page's own colours.
       const color = new THREE.Color(`rgb(${bandColor(node.temperature, node.band, palette).join(",")})`);
-      const material = new THREE.MeshBasicMaterial({ color, transparent: true, opacity: node.band === "closed" ? 0.6 : 1 });
+      const material = new THREE.MeshBasicMaterial({ color: color.clone().lerp(new THREE.Color("#ffffff"), 0.18), transparent: true,
+        opacity: node.band === "closed" ? 0.6 : 1, depthTest: false });
       const mesh = new THREE.Mesh(ball, material);
       mesh.position.set(...node.pos);
-      mesh.scale.setScalar(node.r);
+      mesh.scale.setScalar(node.r * 0.55);
+      mesh.renderOrder = 3;
       mesh.userData = node;
       world.add(mesh); meshes.push(mesh); byId.set(node.id, mesh);
-      if (node.band === "hot") {  // A soft halo on hot leads.
-        const halo = new THREE.Mesh(ball, new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.18, depthWrite: false }));
-        halo.scale.setScalar(1.8); halo.userData = { halo: true };
-        mesh.add(halo);
-      }
+      const halo = new THREE.Sprite(new THREE.SpriteMaterial({ map: haloTexture, color, transparent: true, depthTest: false, depthWrite: false,
+        blending: THREE.AdditiveBlending, opacity: node.band === "hot" ? 0.8 : node.band === "closed" ? 0.2 : 0.45 }));
+      halo.scale.setScalar(node.band === "hot" ? 5.4 : 3.8);
+      halo.renderOrder = 2;
+      halo.userData = { halo: true, base: halo.material.opacity };
+      mesh.add(halo);
     }
     graph.nodes.slice(0, maxLabels).forEach((node) => {
       const label = document.createElement("button");
@@ -283,8 +343,8 @@ export async function mount(el, data, options = {}) {
   function highlight() {
     for (const mesh of meshes) {
       const node = mesh.userData;
-      mesh.material.opacity = (node.band === "closed" ? 0.6 : 1) * (selected && node.id !== selected ? 0.35 : 1);
-      mesh.scale.setScalar(node.r * (node.id === selected || node.id === hovered ? 1.3 : 1));
+      node.fade = (node.band === "closed" ? 0.6 : 1) * (selected && node.id !== selected ? 0.35 : 1);
+      mesh.scale.setScalar(node.r * 0.55 * (node.id === selected || node.id === hovered ? 1.35 : 1));
     }
     for (const [id, label] of labelEls) label.classList.toggle("is-dim", !!selected && id !== selected && id !== hovered);
     dirty = true;
@@ -434,7 +494,7 @@ export async function mount(el, data, options = {}) {
     if (!zoomed) {  // Fit the sphere and its labels in the narrower side.
       const half = Math.atan(Math.tan(camera.fov * Math.PI / 360) * Math.min(1, camera.aspect));
       // The sphere fills most of the panel; a portrait panel keeps room for side labels.
-      distance = Math.max(220, (RADIUS * (camera.aspect < 1 ? 1.3 : 1.12)) / Math.tan(half));
+      distance = Math.max(220, (RADIUS * (camera.aspect < 1 ? 1.34 : 1.24)) / Math.tan(half));
     }
     dirty = true;
   }
@@ -510,9 +570,11 @@ export async function mount(el, data, options = {}) {
     } else if (!dragging && auto && !selected && !hovered && !focused && !inside && performance.now() - lastInput > 2500) {
       rotate(0.0011, 0);  // Slow enough to read the labels as they come round.
     }
+    if (auto) { stars.rotation.y += 0.00012; dirty = true; }
     camera.position.set(0, 0, distance);
     camera.lookAt(0, 0, 0);
     if (!dirty) return;
+    shade();
     renderer.render(scene, camera);
     drawLabels();
     dirty = false;
@@ -532,7 +594,8 @@ export async function mount(el, data, options = {}) {
     get hidden() { return graph ? graph.hidden : 0; },
     destroy() {
       alive = false; cancelAnimationFrame(frame); observer.disconnect(); io.disconnect();
-      clear(); gridGeometry.dispose(); ball.dispose(); renderer.dispose();
+      clear(); gridGeometry.dispose(); ball.dispose(); starGeometry.dispose(); haloTexture.dispose();
+      coreMaterial.dispose(); glowMaterial.dispose(); renderer.dispose();
       canvas.remove(); labels.remove(); tip.remove();
     },
   };

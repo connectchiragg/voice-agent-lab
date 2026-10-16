@@ -131,3 +131,50 @@ def reminder_kind(block: dict[str, Any], mode: str) -> str:
     if block.get("state") in CALL_STATES:
         return "call"
     return "heads_up" if mode == "telegram" else "call"
+
+
+# Leads, in the owner's words (no classifier labels, no repeated company names).
+
+ROLE_PREFIX = re.compile(r"^(?:recruiter|hiring manager|hr|talent|coordinator|interviewer|founder|agency|they)\s*:\s*", re.I)
+AGE = re.compile(r"\s*\((yesterday|today|\d+\s+(?:day|week|hour)s?\s+ago)\)\s*$", re.I)
+VERBS = {"share": "Send", "send": "Send", "decide": "Decide", "confirm": "Confirm", "reply": "Reply",
+         "book": "Book", "pick": "Pick", "choose": "Pick", "complete": "Finish", "fill": "Fill in"}
+
+
+def age_words(text: str) -> str:
+    """"(2 days ago)" -> "2 days", "(yesterday)" -> "1 day", "(today)" -> "today"."""
+    text = text.lower().strip()
+    if text == "yesterday":
+        return "1 day"
+    return text.removesuffix(" ago")
+
+
+def ask_line(reason: str) -> str:
+    """"Recruiter: share your availability for a screen (2 days ago)" ->
+    "Send your availability for a screen · 2 days"."""
+    text = (reason or "").strip()
+    age = AGE.search(text)
+    text = AGE.sub("", text)
+    text = ROLE_PREFIX.sub("", text).strip()
+    if text:
+        first, _, rest = text.partition(" ")
+        verb = VERBS.get(first.lower())
+        text = (verb + (" " + rest if rest else "")) if verb else text[:1].upper() + text[1:]
+    return text + (f" · {age_words(age.group(1))}" if age and text else "")
+
+
+def waiting_line(reason: str) -> str:
+    """"Waiting on Pikeworks for 1 day" -> "Waiting on them · 1 day" (the row already names them)."""
+    match = re.match(r"^\s*waiting on .+? for (.+?)\s*$", reason or "", re.I)
+    if match:
+        return f"Waiting on them · {match.group(1)}"
+    return (reason or "").strip()
+
+
+def without_company(text: str, company: str) -> str:
+    """"Interview: Arcworks · Panel" -> "Panel"; "Arcworks: offer" -> "Offer"."""
+    out = re.sub(r"^\s*interview\s*:\s*", "", text or "", flags=re.I)
+    if company:
+        out = re.sub(rf"^\s*{re.escape(company)}\s*(?::|·|-|–)\s*", "", out, flags=re.I)
+    out = out.strip()
+    return out[:1].upper() + out[1:]

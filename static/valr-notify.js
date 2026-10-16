@@ -5,6 +5,9 @@
 // by day (Today, Yesterday, Earlier), several items of one company in a day folded into one
 // row. Opening does not mark anything read: clicking an item does (then it opens its page);
 // "Mark all read" marks everything. Built with DOM calls only; pure parts are exported.
+// The same rule holds for the server-rendered items (Home's "New" strip and the panel's first
+// list, app/valr_ui/shell.note_item): a red dot stays until that item is clicked. Every
+// [data-notif-count] on the page (the bell's badge, the strip's count) shows one number.
 
 export const POLL_MS = 60000;
 
@@ -41,7 +44,7 @@ function el(doc, tag, attrs = {}, text = "") {
   return node;
 }
 
-function ago(iso, now = Date.now()) {
+export function ago(iso, now = Date.now()) {
   const minutes = Math.max(0, Math.round((now - Date.parse(iso)) / 60000));
   if (minutes < 1) return "just now";
   if (minutes < 60) return `${minutes} min ago`;
@@ -50,17 +53,19 @@ function ago(iso, now = Date.now()) {
 }
 
 function itemNode(doc, item, onOpen, origin) {
-  const li = el(doc, "li", {class: `notif-item${item.read ? "" : " unread"} notif-${item.importance}`});
+  const li = el(doc, "li", {class: `notif-item${item.read ? "" : " unread"} notif-${item.importance} kind-${item.kind}`,
+                            "data-notif-id": String(item.id)});
   const link = el(doc, "a", {class: "notif-main", href: safeHref(item.link, origin) || "/valr/leads"});
-  link.append(el(doc, "span", {class: "notif-dot", "aria-hidden": "true"}),
-              el(doc, "span", {class: "notif-title"}, item.title),
-              el(doc, "span", {class: "notif-meta mono"}, `${item.label} · ${ago(item.created_at)}`));
-  if (item.body) link.append(el(doc, "span", {class: "notif-body small muted"}, item.body));
+  const title = el(doc, "span", {class: "notif-title"}, item.title);
+  if (!item.read) title.append(el(doc, "span", {class: "sr-only"}, " (unread)"));
+  link.append(el(doc, "span", {class: "notif-dot", "aria-hidden": "true"}), title,
+              el(doc, "span", {class: "notif-meta"}, [item.company, item.label, ago(item.created_at)].filter(Boolean).join(" · ")));
+  if (item.body) link.append(el(doc, "span", {class: "notif-body"}, item.body));
   link.addEventListener("click", event => { event.preventDefault(); onOpen(item, link.getAttribute("href")); });
   li.append(link);
   const gmail = safeHref(item.gmail_url);
   if (gmail) {
-    const a = el(doc, "a", {class: "notif-gmail small", href: gmail, target: "_blank", rel: "noopener noreferrer"}, "Open in Gmail");
+    const a = el(doc, "a", {class: "notif-gmail", href: gmail, target: "_blank", rel: "noopener noreferrer"}, "Open in Gmail");
     a.addEventListener("click", () => onOpen(item, null));
     li.append(a);
   }
@@ -70,9 +75,9 @@ function itemNode(doc, item, onOpen, origin) {
 export function renderList(doc, box, items, onOpen, origin = "") {
   box.replaceChildren();
   const days = groupByDay(items);
-  if (!days.length) { box.append(el(doc, "p", {class: "muted small"}, "Nothing new. Emails that matter will show up here.")); return; }
+  if (!days.length) { box.append(el(doc, "p", {class: "notif-empty"}, "You're all caught up.")); return; }
   for (const day of days) {
-    box.append(el(doc, "p", {class: "notif-group mono"}, day.day));
+    box.append(el(doc, "p", {class: "notif-group"}, day.day));
     const list = el(doc, "ul", {class: "notif-items"});
     for (const row of day.rows) {
       if (row.items.length < 2) { list.append(itemNode(doc, row.items[0], onOpen, origin)); continue; }
@@ -112,22 +117,42 @@ function toast(text) {
 function startBell() {
   const bell = document.querySelector("[data-notif]");
   if (!bell) return;
-  const count = bell.querySelector("[data-notif-count]");
   const box = bell.querySelector("[data-notif-list]");
   const actions = Number(bell.dataset.actionCount || 0);
-  const show = unread => { count.textContent = badgeCount(unread, actions); };
+  const show = unread => {
+    const text = badgeCount(unread, actions);
+    document.querySelectorAll("[data-notif-count]").forEach(node => { node.textContent = text; });
+    bell.classList.toggle("has-unread", Boolean(text));
+  };
+  const cleared = id => document.querySelectorAll(`[data-notif-id="${CSS.escape(String(id))}"]`)
+    .forEach(node => { node.classList.remove("unread"); node.querySelector(".sr-only")?.remove(); });
   const open = async (item, href) => {
     if (!item.read) {
       try { show((await api("/valr/api/notifications/read", {ids: [item.id]})).unread); } catch { /* still open it */ }
       item.read = true;
+      cleared(item.id);
     }
     if (href) location.href = href;
   };
+  // Server-rendered items (Home's strip, the panel before it loads): the same click rule.
+  document.addEventListener("click", event => {
+    const link = event.target.closest("[data-notif-item]");
+    if (!link || link.closest("[data-notif-list]")?.dataset.loaded) return;
+    const item = {id: Number(link.dataset.notifItem), read: !link.closest(".notif-item")?.classList.contains("unread")};
+    if (link.hasAttribute("data-notif-stay")) { open(item, null); return; }
+    event.preventDefault();
+    open(item, link.getAttribute("href"));
+  });
+  document.addEventListener("click", event => {
+    if (event.target.closest("[data-notif-show]")) { bell.open = true; bell.querySelector("summary")?.focus(); }
+    if (event.target.closest("[data-notif-close]")) { bell.open = false; bell.querySelector("summary")?.focus(); }
+  });
   const load = async () => {
     try {
       const data = await api("/valr/api/notifications");
       show(data.unread);
       renderList(document, box, data.items, open, location.origin);
+      box.dataset.loaded = "1";
     } catch (error) { box.replaceChildren(el(document, "p", {class: "muted small"}, `Couldn't load: ${error.message}`)); }
   };
   const poll = async () => {

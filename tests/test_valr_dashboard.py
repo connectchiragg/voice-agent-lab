@@ -85,33 +85,36 @@ def test_page_and_state_need_a_verified_access_login(client):
 
 def test_attendee_emails_are_shown_to_the_owner_and_phone_numbers_are_not(client):
     upcoming = client.get("/valr/interviews", headers=GOOD).text
-    for text in (detail(client) + upcoming, client.get("/valr/api/state", headers=GOOD).text):
+    state = client.get("/valr/api/state", headers=GOOD).text
+    for text in (detail(client) + upcoming, state):
         assert "maya.lin@juniper.example" in text and "talent@juniper.example" in text  # Attendees.
         assert "greenhouse" not in text.lower() and "555 0134" not in text  # Tools; phone numbers.
-        assert "[phone hidden]" in text
-        assert "[email hidden]" in text and "priya@juniper.example" not in text  # Free text stays scrubbed.
+        assert "priya@juniper.example" not in text  # Free text stays scrubbed.
+    assert "[phone hidden]" in state and "[email hidden]" in state
     page = detail(client)
-    assert "Maya Lin" in page and "Recruiter, not researched" in page
+    assert "[phone hidden]" not in page and "Calendar title" not in page  # No raw debug text on the page.
+    assert "Maya Lin" in page and ">Recruiter<" in page
     assert 'href="mailto:maya.lin@juniper.example"' in page
     assert "45–60 LPA" in page  # India pay stays visible to the owner.
-    assert "+1 228 888 8007" in client.get("/valr", headers=GOOD).text  # VALR's own number, to call it.
+    assert "+1 228 888 8007" in client.get("/valr/settings", headers=GOOD).text  # VALR's own number, in Advanced.
 
 
 def test_plain_language_and_ist_times(client):
     import re
     page = "".join(client.get(path, headers=GOOD).text for path in (
-        "/valr", "/valr/interviews", "/valr/performance", "/valr/settings", "/valr/leads",
+        "/valr", "/valr/interviews", "/valr/progress", "/valr/settings", "/valr/leads",
         "/valr/interviews/past/fathom-1005")) + detail(client)
-    for heading in ("Who you're meeting", "What to expect in this round", "Likely questions",
-                    "Pay snapshot", "Prep checklist", "From your emails &amp; past rounds", "This week's focus", "Where you stand",
+    for heading in ("People", "What to expect in this round", "Likely questions",
+                    "Pay", "Prep", "From your emails and past rounds", "This week's focus", "Where you stand",
                     "How the interviewer reacted"):
         assert heading in page, heading
     visible = re.sub(r"<[^>]+>", " ", re.sub(r"<script.*?</script>|<[^>]*=\"[^\"]*\"", " ", page, flags=re.S))
     for jargon in ("R1", "R2", "R3", "slot", "workflow", "cache hit", " block"):
         assert jargon not in visible, jargon
-    times = re.findall(r"\b\d{1,2}:\d{2} (?:AM|PM) IST\b", page)
-    assert times and not re.search(r">\d{2}:\d{2}<", page)  # 12-hour IST, never bare 24-hour times.
-    assert "Times in IST" in page
+    times = re.findall(r"\b\d{1,2}:\d{2} (?:AM|PM)\b", page)
+    clock_times = re.sub(r'<span class="cue-at[^>]*>[^<]*</span>', "", page)  # Recording timestamps (mm:ss).
+    assert times and not re.search(r">\d{2}:\d{2}<", clock_times)  # 12-hour times, never bare 24-hour ones.
+    assert "Times in IST" not in page  # He lives in IST: no footer saying so.
 
 
 def test_pause_flag_round_trip_needs_owner_and_csrf(client):
@@ -136,8 +139,8 @@ def test_pause_flag_round_trip_needs_owner_and_csrf(client):
     assert client.flags == {interview_store.DIALS_PAUSED: True}
     page = client.get("/valr", headers=GOOD).text
     # The default is a Telegram heads-up (no automatic call), so it is the heads-ups that pause.
-    assert "Paused" in page and "Resume heads-ups" in page and "Heads-ups are paused" in page
-    assert "Paused: no heads-up" in client.get("/valr/interviews", headers=GOOD).text
+    assert "Reminders are paused" in page and 'data-paused="false">Resume' in page
+    assert ">Paused<" in client.get("/valr/interviews", headers=GOOD).text
     assert client.get("/valr/api/state", headers=GOOD).json()["next_call"] is None
     client.post("/valr/api/dials", content=json.dumps({"paused": False}),
                 headers={**json_headers, "X-CSRF-Token": csrf})
@@ -251,9 +254,9 @@ async def _view():
 
 
 @pytest.mark.parametrize("scenario,expected", [
-    ("empty", {"/valr": ["Google isn't connected", "No phone number on file", "None yet"],
-               "/valr/interviews": ["Connect your Google Calendar"],
-               "/valr/performance": ["Your scores appear after"],
+    ("empty", {"/valr": ["Google isn't connected", "No phone number on file", "Connect Google to see your interviews here."],
+               "/valr/interviews": ["Connect Google to see your interviews here."],
+               "/valr/progress": ["Your progress appears after"],
                "/valr/settings": ["Connect Google", "Missing"]}),
     ("error", {"/valr/interviews": ["We couldn't load your interviews just now"],
                "/valr": ["Google access expired", "Reconnect Google", "The last calendar sync failed"]}),
@@ -336,14 +339,14 @@ def test_telegram_mode_tile_statuses_and_start_code(client, monkeypatch):
     monkeypatch.setattr(telegram_api, "setup", none)
     monkeypatch.setattr(telegram_api, "new_code", new_code)
     home = client.get("/valr", headers=GOOD).text
-    assert "Next Telegram heads-up" in home and "A Telegram message 30 minutes" in home
-    assert "Pause heads-ups" in home and "Telegram isn't connected" in home and "tries again" not in home
+    assert "Connect Telegram to get a reminder" in home and 'href="/valr/settings#telegram"' in home
+    assert "Telegram isn't connected" in html.unescape(home) and "tries again" not in home  # Broken: on the alert line.
     upcoming = client.get("/valr/interviews", headers=GOOD).text
-    assert "Telegram heads-up at" in upcoming and "Calling at 4:10 PM" in upcoming
+    assert "VALR calls you at <time" in upcoming and ">4:10 PM</time>" in upcoming
     settings = client.get("/valr/settings", headers=GOOD).text
-    assert "Open Telegram &amp; connect" in settings and 'data-action="tglink"' in settings
+    assert "Connect Telegram" in settings and 'data-action="tglink"' in settings
     assert "TELEGRAM_" not in settings and "FATHOM_API_KEY" not in settings  # No server talk.
-    assert "connect it in Settings" in client.get("/valr/system", headers=GOOD).text
+    assert client.get("/valr/system", headers=GOOD, follow_redirects=False).headers["location"] == "/valr/settings#advanced"
     csrf = token(client)
     headers = {**GOOD, "Content-Type": "application/json", "X-CSRF-Token": csrf}
     monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)

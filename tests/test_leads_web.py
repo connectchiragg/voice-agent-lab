@@ -143,8 +143,10 @@ def test_page_and_json_need_the_owner(page):
         assert response.status_code == 200 and response.headers["cache-control"] == "no-store"
     data = page.get("/valr/api/leads", headers=GOOD).json()
     assert {"leads", "contacts", "links", "stages", "gmail"} <= set(data)
-    html = page.get("/valr/leads", headers=GOOD).text
-    assert "Juniper Robotics" in html and "/static/leads-globe.js" in html  # The app's Leads page, real data.
+    html = page.get("/valr/leads?tab=all", headers=GOOD).text
+    assert "Juniper Robotics" in html  # The app's Leads page, real data.
+    html = page.get("/valr", headers=GOOD).text
+    assert "/static/leads-globe.js" in html  # The globe is Home's hero.
     for tag in ('id="leads-data">', 'id="leads-raw">'):
         assert tag in html and "<" not in html.split(tag, 1)[1].split("</script>")[0]
 

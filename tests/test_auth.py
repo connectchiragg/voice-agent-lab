@@ -254,8 +254,9 @@ def test_the_owner_gets_a_session_and_the_gmail_grant_is_untouched(client, env):
     assert google.requests[0]["redirect_uri"] == [f"{SITE}/oauth/google/callback"]
     cookie = {"Cookie": f"{core.COOKIE}={cookie_of(done)}"}
     page = client.get("/valr", headers=cookie)
-    assert page.status_code == 200 and "other-owner@example.com" in page.text
-    assert 'action="/logout"' in page.text and "Sign out" in page.text  # The top bar.
+    assert page.status_code == 200 and 'aria-label="Account"' in page.text
+    assert "other-owner@example.com" not in page.text  # Owner-only app: no address on show.
+    assert 'action="/logout"' in page.text and "Sign out" in page.text  # The top bar's account menu.
 
 
 def test_a_session_ends_when_the_owner_leaves_the_list(client, env, monkeypatch):

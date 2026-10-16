@@ -3,8 +3,11 @@
 No chart library and no JavaScript: each chart is a <figure> with its name, a one-line
 takeaway (app/valr_ui/trends.py), the picture (role="img", labelled with the takeaway),
 native hover titles on every dot, and a visually hidden table of the same numbers for
-screen readers. Colours come from the theme's CSS variables (static/valr-perf.css), so the
-charts follow the light and dark themes; the SVG scales to the card's width.
+screen readers. Every chart shares one grammar (static/valr-ds.css, "Charts"): the same
+padding, dashed gridlines at round values, first and last dates on the x axis, the series
+in the accent colour, averages as a dashed neutral line, healthy ranges as a soft green band,
+and the latest value written next to the last point. Colours are theme tokens, so the charts
+follow light and dark; the SVG scales to the card's width.
 """
 from typing import Any
 
@@ -12,7 +15,7 @@ from app.valr_page import e, short_day
 from app.valr_ui import trends
 
 W = 360
-PAD_L, PAD_R, PAD_T, PAD_B = 30, 12, 10, 22
+PAD_L, PAD_R, PAD_T, PAD_B = 28, 36, 12, 22
 SHAPES = {"Screen": "circle", "Technical": "square", "Hiring manager": "diamond", "Founder": "triangle", "Other": "ring"}
 
 
@@ -60,6 +63,20 @@ def grid(lo: float, hi: float, height: int, ticks: list[tuple[float, str]]) -> s
     return "".join(out)
 
 
+def annotate(x: float, y: float, text: str) -> str:
+    """The latest value, written just right of the last point."""
+    return (f'<circle class="tc-last" cx="{x:.1f}" cy="{y:.1f}" r="6.5"/>'
+            f'<text class="tc-annot" x="{x + 9:.1f}" y="{y + 4:.1f}">{e(text)}</text>')
+
+
+def area(coords: list[tuple[float, float]], height: int) -> str:
+    """A soft fill under a line, down to the x axis."""
+    if len(coords) < 2:
+        return ""
+    base = height - PAD_B
+    return (f'<path class="tc-area" d="{path(coords)}L{coords[-1][0]:.1f},{base:.1f}L{coords[0][0]:.1f},{base:.1f}Z"/>')
+
+
 def dates(pts: list[dict[str, Any]], height: int) -> str:
     if not pts:
         return ""
@@ -86,16 +103,16 @@ def table(caption: str, head: list[str], rows: list[list[str]]) -> str:
 
 def figure(key: str, name: str, takeaway: str, body: str, data: str = "", wide: bool = False) -> str:
     return (f'<figure class="tc{" tc-wide" if wide else ""}" id="chart-{e(key)}" aria-labelledby="tc-{e(key)}-name tc-{e(key)}-take">'
-            f'<figcaption><p class="label" id="tc-{e(key)}-name">{e(name)}</p>'
+            f'<figcaption><p class="tc-name" id="tc-{e(key)}-name">{e(name)}</p>'
             f'<p class="tc-take" id="tc-{e(key)}-take">{e(takeaway)}</p></figcaption>{body}{data}</figure>')
 
 
 def empty(text: str) -> str:
-    return f'<div class="tc-empty"><p class="muted small">{e(text)}</p></div>'
+    return f'<div class="tc-empty"><p>{e(text)}</p></div>'
 
 
 def few_note(n: int) -> str:
-    return "" if n >= trends.MIN_POINTS else f'<p class="tc-note small muted">Needs {trends.MIN_POINTS}+ interviews to show a trend.</p>'
+    return "" if n >= trends.MIN_POINTS else f'<p class="tc-note">Needs {trends.MIN_POINTS}+ interviews to show a trend.</p>'
 
 
 # ---------- the charts ----------
@@ -107,17 +124,21 @@ def overall_chart(data: dict[str, Any]) -> str:
     h = 160
     n = len(pts)
     inner = grid(0, 10, h, [(0, "0"), (5, "5"), (10, "10")])
+    coords = [(x_at(i, n), y_at(p["y"], 0, 10, h)) for i, p in enumerate(pts)]
     if n >= trends.MIN_POINTS:
-        inner += f'<path class="tc-avg" d="{path([(x_at(i, n), y_at(p["avg"], 0, 10, h)) for i, p in enumerate(pts)])}"/>'
-    for i, p in enumerate(pts):
+        avg = [(x_at(i, n), y_at(p["avg"], 0, 10, h)) for i, p in enumerate(pts)]
+        inner += area(avg, h) + f'<path class="tc-avg" d="{path(avg)}"/>'
+    if n > 1:
+        inner += f'<path class="tc-line faint" d="{path(coords)}"/>'
+    for p, (x, y) in zip(pts, coords):
         inner += (f'<g class="tc-pt"><title>{e(tip(p, f"{p["y"]:.1f} out of 10"))}</title>'
-                  f'{marker(SHAPES[p["round"]], x_at(i, n), y_at(p["y"], 0, 10, h))}</g>')
-    inner += dates(pts, h)
+                  f'{marker(SHAPES[p["round"]], x, y)}</g>')
+    inner += annotate(*coords[-1], f'{pts[-1]["y"]:.1f}') + dates(pts, h)
     used = [r for r in trends.ROUND_ORDER if any(p["round"] == r for p in pts)]
     legend = "".join(f'<li><svg viewBox="0 0 12 12" aria-hidden="true">{marker(SHAPES[r], 6, 6)}</svg>{e(r)}</li>' for r in used)
     legend += ('<li><svg viewBox="0 0 16 12" aria-hidden="true"><path class="tc-avg" d="M1,6L15,6"/></svg>Average of 3</li>'
                if n >= trends.MIN_POINTS else "")
-    body = svg(name, data["takeaway"], h, inner) + f'<ul class="tc-legend small">{legend}</ul>' + few_note(n)
+    body = svg(name, data["takeaway"], h, inner) + f'<ul class="tc-legend">{legend}</ul>' + few_note(n)
     rows = [[p["date"], p["company"], p["round"], f'{p["y"]:.1f}', f'{p["avg"]:.1f}'] for p in pts]
     return figure("overall", name, data["takeaway"], body,
                   table("Overall score per interview, out of 10", ["Date", "Company", "Round", "Score", "Average of 3"], rows))
@@ -141,7 +162,7 @@ def sparkline(pts: list[dict[str, Any]]) -> str:
 
 def delta(t: dict[str, Any]) -> str:
     if t["dir"] is None:
-        return '<span class="sk-delta muted">needs 3+</span>'
+        return '<span class="sk-delta"></span>'
     change = t["change"]
     if t["dir"] == "up":
         return f'<span class="sk-delta up"><span aria-hidden="true">↑</span> +{change:.1f}<span class="sr-only"> climbing</span></span>'
@@ -156,9 +177,7 @@ def skills_chart(data: dict[str, Any]) -> str:
         return figure("skills", name, data["takeaway"], empty("Skill scores appear after your first reviewed interview."))
     items = "".join(f'<li><span class="sk-name">{e(r["label"])}</span>{sparkline(r["points"])}'
                     f'<span class="sk-last num">{r["latest"]:.1f}</span>{delta(r["trend"])}</li>' for r in rows)
-    body = (f'<ul class="sk" role="list">{items}</ul>'
-            f'<p class="tc-note small muted">Last {trends.SPARK_POINTS} interviews per skill; the number is the latest score '
-            f'out of 10, the arrow the change over the last {trends.TREND_WINDOW}.</p>')
+    body = f'<ul class="sk" role="list">{items}</ul>'
     data_rows = [[r["label"], f'{r["latest"]:.1f}', "–" if r["trend"]["change"] is None else f'{r["trend"]["change"]:+.1f}',
                   ", ".join(f'{p["y"]:.1f}' for p in r["points"])] for r in rows]
     return figure("skills", name, data["takeaway"], body,
@@ -174,19 +193,18 @@ def reactions_chart(data: dict[str, Any]) -> str:
     inner = grid(0, 10, h, [(0, "0"), (5, "5"), (10, "10")])
     coords = [(x_at(i, n), y_at(p["y"], 0, 10, h)) for i, p in enumerate(pts)]
     if n > 1:
-        inner += f'<path class="tc-line" d="{path(coords)}"/>'
+        inner += area(coords, h) + f'<path class="tc-line" d="{path(coords)}"/>'
     for p, (x, y) in zip(pts, coords):
         inner += f'<g class="tc-pt"><title>{e(tip(p, f"reaction {p["y"]:.1f} out of 10"))}</title>{marker("circle", x, y)}</g>'
-    inner += dates(pts, h)
+    inner += annotate(*coords[-1], f'{pts[-1]["y"]:.1f}') + dates(pts, h)
     body = svg(name, data["takeaway"], h, inner) + few_note(n)
     total = data["warm"] + data["flat"]
     if total:
         warm_pct = round(data["warm"] / total * 100)
         body += (f'<div class="wf" aria-hidden="true"><span class="wf-warm" style="width:{warm_pct}%"></span>'
                  f'<span class="wf-flat" style="width:{100 - warm_pct}%"></span></div>'
-                 f'<p class="wf-key small"><span><i class="k-warm"></i>Warm {data["warm"]}</span>'
-                 f'<span><i class="k-flat"></i>Flat {data["flat"]}</span>'
-                 f'<span class="muted">acknowledgements, last {data["counted"]} interview{"s" if data["counted"] != 1 else ""}</span></p>')
+                 f'<p class="wf-key"><span><i class="k-warm"></i>Warm reactions {data["warm"]}</span>'
+                 f'<span><i class="k-flat"></i>Flat {data["flat"]}</span></p>')
     rows = [[p["date"], p["company"], f'{p["y"]:.1f}'] for p in pts]
     if total:
         rows.append(["Last few interviews", "Warm vs flat acknowledgements", f'{data["warm"]} warm, {data["flat"]} flat'])
@@ -195,7 +213,7 @@ def reactions_chart(data: dict[str, Any]) -> str:
 
 
 def band_chart(pts: list[dict[str, Any]], lo: float, hi: float, band: tuple[float, float], ticks: list[tuple[float, str]],
-               fmt, label: str, title: str) -> str:
+               fmt, label: str, title: str, short=None) -> str:
     h, n = 104, len(pts)
     top, bottom = y_at(band[1], lo, hi, h), y_at(band[0], lo, hi, h)
     inner = f'<rect class="tc-band" x="{PAD_L}" y="{top:.1f}" width="{W - PAD_L - PAD_R}" height="{bottom - top:.1f}"/>'
@@ -207,6 +225,8 @@ def band_chart(pts: list[dict[str, Any]], lo: float, hi: float, band: tuple[floa
         inside = band[0] <= p["y"] <= band[1]
         inner += (f'<g class="tc-pt"><title>{e(tip(p, fmt(p["y"]) + ("" if inside else " (outside the healthy range)")))}</title>'
                   f'{marker("circle", x, y, "dot in" if inside else "dot out")}</g>')
+    if short and pts:
+        inner += annotate(*coords[-1], short(pts[-1]["y"]))
     inner += dates(pts, h)
     return svg(title, label, h, inner)
 
@@ -217,14 +237,14 @@ def talk_chart(data: dict[str, Any]) -> str:
         return figure("talk", name, data["takeaway"], empty("Appears once an interview has a transcript VALR can read."))
     body = ""
     if share:
-        body += '<p class="tc-sub small">How much of the conversation was you <span class="tc-key">shaded: healthy, 50–72%</span></p>' + band_chart(
+        body += '<p class="tc-sub">Your share of the talking <span class="tc-key"><i></i>Healthy 50–72%</span></p>' + band_chart(
             [{**p, "y": p["y"] * 100} for p in share], 0, 100, (trends.TALK_BAND[0] * 100, trends.TALK_BAND[1] * 100),
-            [(0, "0%"), (100, "100%")], lambda v: f"{v:.0f}% of the words", "healthy 50–72%", "Your share of the talking")
+            [(0, "0%"), (100, "100%")], lambda v: f"{v:.0f}% of the words", "healthy 50–72%", "Your share of the talking", lambda v: f"{v:.0f}%")
     if answers:
         top = max(120, -(-max(p["y"] for p in answers) // 30) * 30)
-        body += '<p class="tc-sub small">Average answer length <span class="tc-key">shaded: healthy, under 90 s</span></p>' + band_chart(
+        body += '<p class="tc-sub">Average answer length <span class="tc-key"><i></i>Healthy under 90 s</span></p>' + band_chart(
             answers, 0, top, (0, trends.ANSWER_LIMIT), [(0, "0s"), (top, f"{top:.0f}s")],
-            lambda v: f"{v:.0f} seconds per answer", "healthy under 90 s", "Average answer length")
+            lambda v: f"{v:.0f} seconds per answer", "healthy under 90 s", "Average answer length", lambda v: f"{v:.0f}s")
     rows = [[p["date"], p["company"], f'{p["y"] * 100:.0f}%', ""] for p in share]
     by_date = {(p["date"], p["company"]): p for p in answers}
     for r in rows:
@@ -246,12 +266,8 @@ def funnel_chart(data: dict[str, Any], leads_note: bool) -> str:
     if not steps[0][1]:
         return figure("funnel", name, data["takeaway"], empty("Your first interview starts this chart."))
     body = bars([(label, value, str(value)) for label, value in steps], steps[0][1], "funnel")
-    extra = " · ".join(x for x in (f"No word yet: {data['unknown']}" if data["unknown"] else "",
-                                   f"Didn't move on: {data['rejected']}" if data["rejected"] else "") if x)
-    if extra:
-        body += f'<p class="tc-note small muted">{e(extra)}</p>'
     if leads_note:
-        body += '<p class="tc-note small muted">Offers appear here when the leads tracker is connected.</p>'
+        body += '<p class="tc-note">Offers appear here once Google is connected.</p>'
     return figure("funnel", name, data["takeaway"], body,
                   table("Where interviews led", ["Step", "Count"], [[label, str(v)] for label, v in steps]))
 
@@ -260,8 +276,7 @@ def rounds_chart(data: dict[str, Any]) -> str:
     rows = data["rows"]
     if len(rows) < 2:
         return ""
-    body = bars([(r["round"], r["avg"], f'{r["avg"]:.1f} · {r["n"]}') for r in rows], 10)
-    body += '<p class="tc-note small muted">Average score out of 10 · number of interviews.</p>'
+    body = bars([(f'{r["round"]} ({r["n"]})', r["avg"], f'{r["avg"]:.1f}') for r in rows], 10)
     return figure("rounds", "Score by round type", data["takeaway"], body,
                   table("Average score by round type", ["Round", "Average out of 10", "Interviews"],
                         [[r["round"], f'{r["avg"]:.1f}', str(r["n"])] for r in rows]))

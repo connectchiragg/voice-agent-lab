@@ -560,14 +560,11 @@ def test_setup_checklist_items_are_links_or_buttons_that_do_the_step(client):
     page = client.get("/valr/settings", headers=GOOD).text  # The checklist lives on Settings now.
     setup = page.split('id="setup"', 1)[1].split('id="g-conn"', 1)[0]
     cards = page.split('id="notetakers"', 1)[1]
-    assert 'href="/oauth/google/start"' in setup
-    for name in ("fathom", "fireflies"):
-        assert f'data-connect-open="{name}"' in setup
+    # Done steps say so; an open step either has its button or says what needs fixing.
+    assert setup.count("Done") == 4 and "Connect Telegram" in setup and "4 of 5 done" in setup
     for name in ("fathom", "fireflies", "granola"):
         assert f'data-connect="{name}"' in cards and f'id="nt-{name}"' in cards
     assert 'type="password"' in cards and 'value="' not in cards.split('type="password"', 1)[1][:200]
-    assert 'href="tel:+12288888007"' in setup
-    assert "How VALR checks it" in setup and "owner phone number" in setup
     assert 'data-import="granola"' in cards
     assert "Done" in setup and "Finish setting up" in setup  # Telegram isn't linked in the sample.
 

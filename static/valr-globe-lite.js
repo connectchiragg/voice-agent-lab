@@ -138,7 +138,7 @@ export function mount(el, data, {onSelect} = {}) {
     projected.length = 0;
     for (const n of leads) projected.push({n, s: screen(rotate(n.p))});
     projected.sort((a, b) => a.s[2] - b.s[2]);
-    ctx.font = "500 11px 'JetBrains Mono', ui-monospace, monospace";
+    ctx.font = "500 11px Inter, ui-sans-serif, system-ui, sans-serif";
     for (const {n, s} of projected) {
       const [x, y, z] = s;
       const front = z > -0.05;
@@ -161,7 +161,7 @@ export function mount(el, data, {onSelect} = {}) {
       }
       const labelled = front && z > 0.25 && (["interviewing", "final", "offer"].includes(n.lead.stage) || n.lead.waiting_on_you);
       if (labelled || isSel || isHover) {
-        const text = n.lead.company.toUpperCase();
+        const text = n.lead.company;
         ctx.fillStyle = "rgba(5,7,12,0.7)";
         const w = ctx.measureText(text).width;
         ctx.fillRect(x + size + 6, y - 9, w + 10, 18);

@@ -114,6 +114,7 @@ def touch(direction="in", company="Acme"):
     ("recruiter_outreach", False, "sourced", True, "Staff Backend role", "new_lead"),
     ("interviewer_followup", False, "", False, "Thanks for your time", "reply"),
     ("application_update", False, "applied", False, "Thank you for applying", None),
+    ("application_update", False, "applied", False, "Your application moved to the hiring team", "update"),  # FYI: a dot too.
     ("newsletter", None, "", True, "Weekly jobs", None),
     ("job_board_alert", None, "", True, "10 new jobs", None),
     ("own_reply", None, "", False, "Re: hi", None),
@@ -153,6 +154,10 @@ def test_dedupe_per_thread_within_ten_minutes_and_upgrade():
     # A more important email in the same thread upgrades the item instead of adding one.
     run(n.from_email(store, email("m3"), decision(category="offer"), touch(), False, NOW + timedelta(minutes=5)))
     assert len(store.rows) == 1 and store.rows[0]["kind"] == "offer" and store.rows[0]["importance"] == "immediate"
+    # Read, then another email lands in the same thread: the item is unread again (its dot comes back).
+    store.rows[0]["read_at"] = NOW + timedelta(minutes=6)
+    run(n.from_email(store, email("m3b"), decision(), touch(), False, NOW + timedelta(minutes=7)))
+    assert len(store.rows) == 1 and store.rows[0]["read_at"] is None
     # After 10 minutes the thread notifies again; a re-run of the same message never does.
     run(n.from_email(store, email("m4"), decision(), touch(), False, NOW + timedelta(minutes=16)))
     assert len(store.rows) == 2

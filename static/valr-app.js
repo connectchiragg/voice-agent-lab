@@ -1,11 +1,13 @@
-// The VALR app shell: light/dark toggle, old /valr#... links, the leads globe (valr-leads'
-// static/leads-globe.js with the raw /valr/api/leads JSON; static/valr-globe-lite.js as the
-// fallback), the lead peek on Home, instant lead search, the lead corrections and "Check Gmail
-// now", and closing the attention popover. static/valr.js does the rest.
+// The VALR app shell: light/dark, old /valr#... links, menus and sheets, the leads globe
+// (valr-leads' static/leads-globe.js with the raw /valr/api/leads JSON; static/valr-globe-lite.js
+// as the fallback) with its lead peek on Home, the Leads filters and corrections, "Check email
+// now", "Fix company" and "Hear the briefing". static/valr.js does the rest.
 
-// Theme: system -> light -> dark -> system. Kept in this browser only.
 const root = document.documentElement;
 const THEME = "valr-theme";
+const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+// Theme: system -> the other one -> back to system. Kept in this browser only.
 document.querySelector("[data-theme-toggle]")?.addEventListener("click", () => {
   const system = matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
   const now = root.dataset.theme || system;
@@ -22,8 +24,8 @@ document.querySelector("[data-theme-toggle]")?.addEventListener("click", () => {
 // Links from before the redesign: /valr#iv-slot-... -> /valr/interviews/slot-..., the
 // scorecard anchors in leads and Telegram post-call reports (/valr#past-<provider>-<id>) ->
 // /valr/interviews/past/<provider>-<id>, and the old sections -> their pages.
-const OLD_SECTIONS = {"#performance": "/valr/performance", "#upcoming": "/valr/interviews", "#setup": "/valr/settings",
-                      "#notetakers": "/valr/settings#notetakers", "#system": "/valr/system"};
+const OLD_SECTIONS = {"#performance": "/valr/progress", "#upcoming": "/valr/interviews", "#setup": "/valr/settings",
+                      "#notetakers": "/valr/settings#notetakers", "#system": "/valr/settings#advanced"};
 if (location.pathname === "/valr" || location.pathname === "/valr/") {
   const hash = location.hash;
   const slot = hash.match(/^#iv-(slot-[\w-]+)$/);
@@ -32,24 +34,69 @@ if (location.pathname === "/valr" || location.pathname === "/valr/") {
   else if (past) location.replace(`/valr/interviews/past/${past[1]}`);
   else if (OLD_SECTIONS[hash]) location.replace(OLD_SECTIONS[hash]);
 }
+if (location.hash === "#advanced") document.getElementById("advanced")?.setAttribute("open", "");
 
-// The attention popover: close on Escape or a click outside.
-const popover = document.querySelector("details[data-popover]");
+// Menus and the bell (<details>): one open at a time; Escape or a click outside closes them.
+const popovers = () => document.querySelectorAll("details[data-menu][open], details[data-popover][open]");
 document.addEventListener("click", event => {
-  if (popover?.open && !popover.contains(event.target)) popover.open = false;
+  popovers().forEach(box => { if (!box.contains(event.target)) box.open = false; });
+  const item = event.target.closest(".menu-item");
+  if (item && !item.matches("[data-sheet]")) setTimeout(() => { const box = item.closest("details"); if (box) box.open = false; }, 0);
 });
-document.addEventListener("keydown", event => {
-  if (event.key === "Escape" && popover?.open) {
-    popover.open = false;
-    popover.querySelector("summary")?.focus();
+document.addEventListener("toggle", event => {
+  const box = event.target;
+  if (box.open && box.matches?.("details[data-menu], details[data-popover]")) {
+    popovers().forEach(other => { if (other !== box && !other.contains(box)) other.open = false; });
   }
+}, true);
+document.addEventListener("keydown", event => {
+  if (event.key !== "Escape") return;
+  popovers().forEach(box => { box.open = false; box.querySelector("summary")?.focus(); });
 });
 
-// The globe: the real 3D one (async mount, raw API JSON, node = {type, id, lead|contact}),
-// else the lite one (sync mount, normalised leads, onSelect(lead)).
+// Sheets: [data-sheet="<dialog id>"] opens it (and [data-focus] focuses a field inside).
+document.addEventListener("click", event => {
+  const opener = event.target.closest("[data-sheet]");
+  if (opener) {
+    const dialog = document.getElementById(opener.dataset.sheet);
+    if (!dialog) return;
+    opener.closest("details")?.removeAttribute("open");
+    dialog.showModal();
+    const target = opener.dataset.focus && dialog.querySelector(opener.dataset.focus);
+    setTimeout(() => (target || dialog.querySelector("input, select, button:not([data-sheet-close])"))?.focus(), 30);
+    return;
+  }
+  if (event.target.closest("[data-sheet-close]")) event.target.closest("dialog")?.close();
+  else if (event.target.matches("dialog.sheet")) event.target.close();  // The backdrop.
+});
+
+// Filters that apply themselves (the form still works without JavaScript).
+document.addEventListener("change", event => {
+  if (event.target.matches("[data-autosubmit]")) event.target.form?.submit();
+});
+
+// Hear the briefing: the written script, read aloud by the browser's own voice.
+document.addEventListener("click", event => {
+  const button = event.target.closest("[data-hear]");
+  if (!button) return;
+  const label = button.querySelector("span");
+  if (!("speechSynthesis" in window)) { toast("This browser can't read aloud. Use Call me instead."); return; }
+  if (speechSynthesis.speaking) { speechSynthesis.cancel(); if (label) label.textContent = "Hear the briefing"; return; }
+  const text = document.getElementById(button.dataset.hear)?.content?.textContent?.trim();
+  if (!text) return;
+  const say = new SpeechSynthesisUtterance(text);
+  say.lang = "en-IN";
+  say.onend = () => { if (label) label.textContent = "Hear the briefing"; };
+  speechSynthesis.speak(say);
+  if (label) label.textContent = "Stop reading";
+});
+
+// The globe: the real 3D one (async mount, raw API JSON, node = {type, id, lead}), else the
+// lite one (sync mount, normalised leads, onSelect(lead)).
 const globe = document.querySelector("[data-globe]");
 const source = document.querySelector("#leads-data");
 const rawSource = document.querySelector("#leads-raw");
+const BAND = {hot: "Hot", warm: "Warm", cool: "Cool", cold: "Cold", closed: "Closed"};
 function esc(text) {
   const node = document.createElement("span");
   node.textContent = text ?? "";
@@ -61,15 +108,12 @@ function json(el) {
 function peek(lead) {
   const box = document.querySelector("[data-lead-peek]");
   if (!box || !lead) return;
-  const band = {hot: "Hot", warm: "Warm", cool: "Cool", cold: "Cold", closed: "Closed"}[lead.band] || "";
-  const temp = Number.isFinite(lead.temperature) ? ` · ${band} ${lead.temperature}` : "";
-  box.innerHTML = `<button class="peek-close" type="button" aria-label="Close">✕</button>
-    <span class="label"><span class="sw st-${esc(lead.stage)}" aria-hidden="true"></span> ${esc(lead.stage_label || lead.stage)}${esc(temp)}</span>
+  const band = BAND[lead.band] || "";
+  box.innerHTML = `<button class="icon-btn peek-close" type="button" aria-label="Close">×</button>
+    <span class="peek-meta"><span class="band-sw b-${esc(lead.band)}" aria-hidden="true"></span>${esc(band)} · ${esc(lead.stage_label || lead.stage)}</span>
     <span class="peek-title">${esc(lead.company)}</span>
-    <span class="muted small">${esc(lead.role)}</span>
-    ${lead.waiting_on === "you" && lead.waiting_reason ? `<span class="small court you">Your move: ${esc(lead.waiting_reason)}</span>` : ""}
-    ${lead.next_step ? `<span class="small">Next: ${esc(lead.next_step)}</span>` : ""}
-    <a class="hero-link mono" href="/valr/leads?lead=${encodeURIComponent(lead.id)}#lead">Open lead →</a>`;
+    ${lead.role ? `<span class="peek-sub">${esc(lead.role)}</span>` : ""}
+    <a class="btn sm on-stage" href="/valr/leads?lead=${encodeURIComponent(lead.id)}#lead">Open lead</a>`;
   box.hidden = false;
   box.querySelector(".peek-close").addEventListener("click", () => { box.hidden = true; });
 }
@@ -79,43 +123,27 @@ async function mountGlobe() {
   const raw = json(rawSource);
   if (!data) return;
   const byId = new Map((data.leads || []).map(l => [l.id, l]));
-  const onLeads = globe.dataset.mode === "leads";
-  const selected = new URLSearchParams(location.search).get("lead");
-  function choose(id) {
-    if (!id) return;
-    if (onLeads) {
-      const params = new URLSearchParams(location.search);
-      params.set("lead", id);
-      location.assign(`/valr/leads?${params}#lead`);
-    } else {
-      peek(byId.get(id));
-    }
-  }
-  const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
-  // Closed leads are drawn only while "Show closed" is ticked (or the Closed filter is on).
+  function choose(id) { if (id) peek(byId.get(id)); }
+  // Closed leads are drawn only while "Show closed" is ticked.
   const toggle = document.querySelector("[data-globe-closed]");
   const shown = () => ({leads: (raw?.leads || []).filter(l => l.status !== "closed" || toggle?.checked)});
-  const closedLeads = (raw?.leads || []).filter(l => l.status === "closed");
-  for (const lead of closedLeads) byId.set(lead.id, {...lead, stage_label: lead.stage_label, role: ""});
+  for (const lead of (raw?.leads || []).filter(l => l.status === "closed")) byId.set(lead.id, {...lead, role: ""});
   if (raw?.leads?.length && /leads-globe\.js/.test(globe.dataset.src || "")) {
     try {
       const module = await import(globe.dataset.src);
       const view = await module.mount(globe, shown(), {
         onSelect(node) { if (node?.type === "lead") choose(node.id); },
-        // Every live lead is drawn and labelled (static/leads.css keeps the hero copy off the globe).
-        maxNodes: 150, labels: 150, reducedMotion: reduced,
+        maxNodes: 150, labels: 150, reducedMotion,
       });
       if (view?.supported !== false) {
         toggle?.addEventListener("change", () => view.update(shown()));
-        // The list is the full index: pointing at a row (or focusing its link) turns the globe to that lead.
-        let pointed = null;
-        const point = id => { if (id !== pointed) { pointed = id; view.hover?.(id); } };
-        document.querySelectorAll("tr[data-lead-row]").forEach(row => {
-          row.addEventListener("mouseenter", () => point(row.dataset.leadRow));
-          row.addEventListener("focusin", () => point(row.dataset.leadRow));
+        // Pointing at a "Your move" row turns the globe to that lead.
+        document.querySelectorAll(".move-main").forEach(row => {
+          const id = new URL(row.href).searchParams.get("lead");
+          row.addEventListener("mouseenter", () => view.hover?.(id));
+          row.addEventListener("focus", () => view.hover?.(id));
+          row.addEventListener("mouseleave", () => view.hover?.(null));
         });
-        document.querySelector(".leads-table")?.addEventListener("mouseleave", () => point(null));
-        if (selected) { view.select?.(selected); view.focus?.(selected); }
         globe.dataset.globeKind = "3d";
         return;
       }
@@ -127,14 +155,13 @@ async function mountGlobe() {
   }
   try {
     const module = await import(globe.dataset.fallback || "/static/valr-globe-lite.js");
-    const view = module.mount(globe, data, {onSelect(lead) { choose(lead?.id); }});
+    module.mount(globe, data, {onSelect(lead) { choose(lead?.id); }});
     globe.dataset.globeKind = "lite";
-    if (selected) view?.select?.(selected);
   } catch {}
 }
 mountGlobe();
 
-// Leads: the owner's corrections (stage, merge, dismiss) and "Check Gmail now".
+// Toasts and posts (with the page's CSRF token).
 const csrfToken = document.querySelector('meta[name="csrf-token"]')?.content ?? "";
 function toast(text) {
   const box = document.querySelector(".toast");
@@ -151,6 +178,8 @@ async function postJson(path, body) {
   if (!response.ok) throw new Error(typeof reply.detail === "string" ? reply.detail : `Not saved (HTTP ${response.status}).`);
   return reply;
 }
+
+// Leads: the owner's corrections (company, stage, merge, dismiss) and "Check email now".
 document.addEventListener("click", async event => {
   const fix = event.target.closest("[data-fix]");
   const sync = event.target.closest("[data-leads-sync]");
@@ -160,7 +189,7 @@ document.addEventListener("click", async event => {
   button.disabled = true;
   try {
     if (sync) {
-      toast((await postJson("/valr/api/leads/sync", {})).message || "Gmail sync started.");
+      toast((await postJson("/valr/api/leads/sync", {})).message || "Checking your email.");
       return;
     }
     const box = fix.closest("[data-lead-fix]");
@@ -184,6 +213,19 @@ document.addEventListener("click", async event => {
   }
 });
 
+// Merge: filter the company list as you type.
+document.querySelector("[data-merge-search]")?.addEventListener("input", event => {
+  const q = event.target.value.trim().toLowerCase();
+  const select = event.target.closest("[data-lead-fix]")?.querySelector("[data-fix-into]");
+  if (!select) return;
+  let first = null;
+  for (const option of select.options) {
+    option.hidden = Boolean(q) && !option.textContent.toLowerCase().includes(q);
+    if (!option.hidden && !first) first = option;
+  }
+  if (first) select.value = first.value;
+});
+
 // Leads: filter the rows as you type (the form still works without JavaScript).
 const search = document.querySelector("[data-lead-search]");
 search?.addEventListener("input", () => {
@@ -193,7 +235,7 @@ search?.addEventListener("input", () => {
   });
 });
 
-// Interviews: "Set company" (the owner's name for it always wins over the resolver's).
+// "Fix company" on an interview (the owner's name for it always wins over the resolver's).
 document.addEventListener("click", async event => {
   const save = event.target.closest("[data-company-save]");
   if (!save) return;
