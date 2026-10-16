@@ -141,3 +141,12 @@ def test_mode_defaults_and_config_errors(monkeypatch):
         Gateway()
     with pytest.raises(ValueError):
         Gateway(mode="anthropic", guard="maybe")
+
+
+def test_a_client_timeout_applies_to_requests_without_their_own():
+    openrouter = FakeClient(is_byok=True)
+    gw = gateway(openrouter, FakeClient())
+    gw.client(timeout=60).messages.create(model="claude-haiku-5-5", max_tokens=10, messages=[])
+    gw.client(timeout=60).messages.create(model="claude-haiku-5-5", max_tokens=10, messages=[], timeout=5)
+    gw.client().messages.create(model="claude-haiku-5-5", max_tokens=10, messages=[])
+    assert [call.get("timeout") for call in openrouter.calls] == [60, 5, None]

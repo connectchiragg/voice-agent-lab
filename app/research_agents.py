@@ -267,7 +267,7 @@ def anthropic_client() -> Any:
     """Messages client for the inner calls (search, claim check, classify): see app/llm_gateway.py."""
     global _anthropic
     if _anthropic is None:
-        _anthropic = llm_gateway.shared().client()
+        _anthropic = llm_gateway.shared().client(timeout=60)  # As before: 60 s per request.
     return _anthropic
 
 
