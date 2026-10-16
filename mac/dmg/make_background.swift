@@ -14,15 +14,15 @@
 // Finder draws the icon names itself, in dark text whenever the window has a background
 // picture, so the design stays light and they read cleanly.
 //
-// Fonts: Instrument Serif and Inter (the site's faces) when installed, otherwise New York and
-// SF Pro, the closest system faces.
+// Fonts: Instrument Serif and Inter (the site's faces) from mac/dmg/fonts, falling back to
+// New York and SF Pro, the closest system faces.
 import CoreGraphics
 import CoreText
 import Foundation
 import ImageIO
 import UniformTypeIdentifiers
 
-let DEFAULT = "a"
+let DEFAULT = "b"
 let W: CGFloat = 660, H: CGFloat = 400
 let APP = CGPoint(x: 170, y: 190), APPS = CGPoint(x: 490, y: 190)
 let ICON: CGFloat = 128
@@ -36,6 +36,10 @@ let outURL = args.count > 1 ? URL(fileURLWithPath: args[1]) : here.appendingPath
 func rgb(_ hex: UInt32, _ a: CGFloat = 1) -> CGColor {
     CGColor(srgbRed: CGFloat((hex >> 16) & 0xFF) / 255, green: CGFloat((hex >> 8) & 0xFF) / 255,
             blue: CGFloat(hex & 0xFF) / 255, alpha: a)
+}
+// The site's faces ship in mac/dmg/fonts (SIL OFL); register them for this process only.
+for name in ["InstrumentSerif-Regular.ttf", "Inter.ttf"] {
+    CTFontManagerRegisterFontsForURL(here.appendingPathComponent("fonts/\(name)") as CFURL, .process, nil)
 }
 let space = CGColorSpace(name: CGColorSpace.sRGB)!
 func gradient(_ stops: [(UInt32, CGFloat, CGFloat)]) -> CGGradient {
