@@ -74,8 +74,11 @@ Rules:
   label (L2, Round 2, Screen, Interview, Final, Sync...), a calendar/video/notetaker tool (Zoom,
   Google Meet, Fathom...), an ATS or job board (Greenhouse, Lever, Ashby, Workday, LinkedIn...),
   or a free-mail domain.
-- A recruiting agency is not the company unless it is the employer: give the client company if
-  it is named, and put the agency in "agency".
+- A recruiting agency, staffing firm or assessment/interview platform (SHL, HackerRank, HireVue,
+  Gloroots, Recrew, search partners...) is not the company unless it is the employer: give the
+  client company if it is named (e.g. "a role at Deriv"), and put the agency in "agency".
+- The current name, when given, is strong evidence: keep it unless the evidence clearly
+  contradicts it. An agency's email domain never contradicts it.
 - Use the company's usual written name ("Acme Robotics", not "acme-robotics.com").
 - If you cannot tell, set company "" and a low confidence; set needs_web true when a web search
   of the domain or people would settle it.
@@ -111,11 +114,11 @@ class Evidence:
     def all_emails(self) -> list[str]:
         return [e for _, e in self.people if e]
 
-    def company_domains(self) -> list[str]:
-        found = [names.registrable(names.domain_of(e)) for e in self.all_emails()]
-        found += [names.registrable(d) for d in self.domains]
+    def company_domains(self, agencies: Any = ()) -> list[str]:
+        found = [names.registrable(names.domain_of(e), agencies) for e in self.all_emails()]
+        found += [names.registrable(d, agencies) for d in self.domains]
         if self.sender_email:
-            found.append(names.registrable(names.domain_of(self.sender_email)))
+            found.append(names.registrable(names.domain_of(self.sender_email), agencies))
         mine = names.owner_domains()
         return sorted({d for d in found if d and d not in mine})
 
@@ -135,7 +138,7 @@ class Evidence:
         if self.snippet:
             lines.append(f"Email start: {' '.join(self.snippet.split())[:SNIPPET_CHARS]}")
         if self.stated:
-            lines.append(f"Company the source stated: {self.stated[:80]}")
+            lines.append(f"Current name (strong evidence): {self.stated[:80]}")
         lines.append("Rule candidates: " + (json.dumps(candidates) if candidates else "none"))
         return "\n".join(lines).replace("</evidence>", "")
 
@@ -162,15 +165,22 @@ HOW = {"attendees": "attendee domain {domain}", "sender": "Gmail sender domain {
        "stated": "named by the source", "lead": "a lead with the same people"}
 
 
-def rules(ev: Evidence, owner_emails: set[str] = frozenset(), leads: Any = ()) -> tuple[Decision, bool, list[dict[str, str]]]:
-    """(the rules' answer, confident?, candidates with reasons for the model)."""
+def rules(ev: Evidence, owner_emails: set[str] = frozenset(), leads: Any = (),
+          agencies: Any = ()) -> tuple[Decision, bool, list[dict[str, str]]]:
+    """(the rules' answer, confident?, candidates with reasons for the model). Confident only
+    when one company domain names it and nothing (the current name, the title) disagrees."""
     found = names.resolve(attendees=ev.all_emails() + [f"x@{d}" for d in ev.domains], sender_email=ev.sender_email,
                           sender_name=ev.sender_name, title=ev.title, stated=ev.stated, leads=leads,
-                          owner_emails=owner_emails)
+                          owner_emails=owner_emails, agencies=agencies)
     candidates = []
-    for domain in ev.company_domains():
+    for domain in ev.company_domains(agencies):
         if names.from_domain(domain):
             candidates.append({"name": names.from_domain(domain), "reason": f"outside email domain {domain}"})
+    for email in ev.all_emails() + ([ev.sender_email] if ev.sender_email else []):
+        domain = names.domain_of(email)
+        if names.is_agency(domain, agencies):
+            candidates.append({"name": names.agency_name(domain),
+                               "reason": f"recruiting agency / assessment platform domain {domain}: NOT the employer"})
     titled = names.from_title(ev.title)
     if titled:
         candidates.append({"name": titled, "reason": "named in the title"})
@@ -181,18 +191,19 @@ def rules(ev: Evidence, owner_emails: set[str] = frozenset(), leads: Any = ()) -
         ats = names.from_ats(ev.sender_name, ev.title)
         candidates.append({"name": ats or "-", "reason": "sender is an ATS/scheduler (a recruiter's tool)"})
     decision = Decision(found.name, found.domain, 0.0, "rules" if found.name else "none",
-                        HOW.get(found.source, "").format(domain=found.domain))
-    domains = [d for d in ev.company_domains() if names.from_domain(d)]
-    confident = (found.source in ("attendees", "sender") and len(domains) == 1
-                 and (not titled or names.same(titled, found.name)))
+                        HOW.get(found.source, "").format(domain=found.domain), agency=found.agency)
+    domains = [d for d in ev.company_domains(agencies) if names.from_domain(d)]
+    confident = (found.source in ("attendees", "sender") and len(domains) == 1 and not found.conflict
+                 and (not titled or names.same(titled, found.name)) and (not spoken or names.same(spoken, found.name)))
     decision.confidence = 0.9 if confident else (0.4 if found.name else 0.0)
     return decision, confident, candidates
 
 
-def enforce(company: str, owner_emails: set[str] = frozenset()) -> str:
-    """The model's answer, kept only if it is a company by the rules (never the owner's name)."""
-    company = (company or "").strip()[:80]
-    if not company or not names.is_company(company):
+def enforce(company: str, owner_emails: set[str] = frozenset(), agencies: Any = ()) -> str:
+    """The model's answer, kept only if it is a company by the rules: never the owner's name,
+    a round label, a tool, an ATS, free mail, or a known agency / platform."""
+    company = names.clean((company or "").strip()[:80]) or ""
+    if not company or not names.is_company(company) or names.is_agency_name(company, agencies):
         return ""
     domain_like = names.domain_of("x@" + company) if "." in company and " " not in company else ""
     if domain_like and (domain_like in names.FREEMAIL or names.is_ats(domain_like)):
@@ -332,9 +343,11 @@ class Resolver:
     client: Callable[[], Any] | None = None
     month_ok: Callable[[Any], Any] | None = None
     owner_emails: set[str] = field(default_factory=set)
+    agencies: set[str] = field(default_factory=set)  # learned agency domains (2+ companies)
     candidate: str = ""
     job_id: str = ""
     calls: int = 0
+    kept: int = 0   # Repairs refused by the stability rule (the earlier name stayed).
     usd: float = 0.0
     spend: list[dict[str, Any]] = field(default_factory=list)
 
@@ -343,7 +356,7 @@ class Resolver:
             manual = await override(connection, entity_id)
             if manual:
                 return Decision(manual, "", 1.0, "override", "set by you")
-        first, confident, candidates = rules(ev, self.owner_emails, leads)
+        first, confident, candidates = rules(ev, self.owner_emails, leads, self.agencies)
         if confident:
             return first
         fingerprint = ev.fingerprint()
@@ -359,7 +372,8 @@ class Resolver:
             try:
                 web, more = await asyncio.to_thread(research, ev, candidates, answer, client, self.candidate)
                 rows += more
-                if web["confidence"] >= answer["confidence"] or not enforce(answer.get("company"), self.owner_emails):
+                if web["confidence"] >= answer["confidence"] or not enforce(answer.get("company"), self.owner_emails,
+                                                                             self.agencies):
                     answer, source, citation = web, "web", web.get("source_url", "")
             except Exception as error:  # noqa: BLE001 - the first review still stands.
                 logger.warning("VALR company web lookup failed: %s", type(error).__name__)
@@ -370,7 +384,7 @@ class Resolver:
         return decision
 
     def _decision(self, answer: dict[str, Any], source: str, citation: str) -> Decision:
-        company = enforce(str(answer.get("company") or ""), self.owner_emails)
+        company = enforce(str(answer.get("company") or ""), self.owner_emails, self.agencies)
         confidence = float(answer.get("confidence") or 0)
         if confidence < SHOW:
             company = ""
@@ -378,7 +392,7 @@ class Resolver:
         reason = " ".join(str(answer.get("reasoning") or "").split()[:25])
         how = (f"found via web: {citation}" if source == "web" and citation else f"AI review: {reason}")
         return Decision(company, domain, confidence, source, how[:200], citation,
-                        enforce(str(answer.get("agency") or ""), self.owner_emails), str(answer.get("role_title") or "")[:80])
+                        names.clean(str(answer.get("agency") or "")), str(answer.get("role_title") or "")[:80])
 
     async def _month_ok(self, connection: Any) -> bool:
         if self.month_ok is None:
@@ -414,3 +428,37 @@ def default_resolver(owner_emails: set[str]) -> Resolver:
 
 def as_dict(d: Decision) -> dict[str, Any]:
     return asdict(d)
+
+
+# Stability: a repair changes a stored name only for a better one.
+
+EXISTING = 0.75  # How much a plausible existing name is trusted.
+
+
+def existing_confidence(name: str, agencies: Any = ()) -> float:
+    return EXISTING if name and names.is_company(name) and not names.is_agency_name(name, agencies) else 0.0
+
+
+def keep_or_change(old: str, new: Decision, agencies: Any = ()) -> bool:
+    """True when `new` may replace `old`: a higher confidence, not an agency or platform, and
+    an empty answer never replaces a plausible name. The same company is always fine."""
+    if new.company and old and names.same(new.company, old):
+        return True
+    if not new.company:
+        return existing_confidence(old, agencies) == 0.0
+    if names.is_agency_name(new.company, agencies) or (new.agency and names.same(new.agency, new.company)):
+        return False
+    return new.confidence > existing_confidence(old, agencies)
+
+
+def learn_agencies(touches: Any) -> set[str]:
+    """Sender domains that mailed about two or more different companies: agencies."""
+    seen: dict[str, set[str]] = {}
+    for touch in touches:
+        if getattr(touch, "kind", "") != "email" or getattr(touch, "direction", "") != "in":
+            continue
+        domain = names.registrable(getattr(touch, "domain", "") or "")
+        stated = names.clean(getattr(touch, "stated", "") or getattr(touch, "company", "") or "")
+        if domain and stated and not names.same(stated, names.from_domain(domain)):
+            seen.setdefault(domain, set()).add(names.key(stated).replace(" ", ""))
+    return {d for d, companies in seen.items() if len(companies) >= 2}

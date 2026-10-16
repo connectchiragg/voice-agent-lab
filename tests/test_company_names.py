@@ -288,3 +288,112 @@ def test_repair_re_derives_touch_companies_idempotently():
     assert client.calls == ["review"]  # The attendee domain was confident; the ATS mail was reviewed.
     assert touches[0].stated == "L2- Sam" and touches[0].company_how == "attendee domain zinnov.example"
     assert run(lead_worker.resolve_touches(conn, touches, make(FakeClient()), dry_run=True)) == []  # Idempotent.
+
+
+# The live dry-run regressions (2026-10-16), as table-driven cases with made-up people.
+
+@pytest.mark.parametrize("raw, tidy", [
+    ("Considering Cisco", "Cisco"),
+    ("interest in Zerion", "Zerion"),
+    ("Your interest in Zerion", "Zerion"),
+    ("Nextiva Reschedule Interview Request", "Nextiva"),
+    ("SoundHound AI - 15-Min", "SoundHound AI"),
+    ("Razorpay Software Private Limited", "Razorpay"),
+    ("AM Infoweb Ltd", "AM Infoweb"),
+    ("ipsoftlabs.com", "Ipsoft Labs"),
+    ("You", ""),
+    ("Considering", ""),
+    ("Re: Interview request", ""),
+])
+def test_names_are_tidied(raw, tidy):
+    assert names.clean(raw) == tidy
+
+
+@pytest.mark.parametrize("domain, name", [
+    ("aspireapp.com", "Aspire"), ("youtrip.com", "Youtrip"), ("ipsoftlabs.com", "Ipsoft Labs"),
+    ("acme-robotics.example", "Acme Robotics"),
+    # Agencies, staffing firms and assessment platforms never name the employer.
+    ("shl.com", ""), ("gloroots.com", ""), ("recrew.ai", ""), ("watsonsearchpartner.com", ""),
+    ("successpact.com", ""), ("hackerrank.com", ""), ("codility.com", ""), ("hirevue.com", ""),
+    ("testgorilla.com", ""), ("mettl.com", ""),
+])
+def test_domains_to_names(domain, name):
+    assert names.from_domain(domain) == name
+
+
+@pytest.mark.parametrize("kwargs, company", [
+    # An agency recruiter's mail about a role at the employer: the employer, the agency aside.
+    ({"sender_email": "nina@watsonsearchpartner.com", "sender_name": "Nina Kaur", "title": "Senior role at Deriv",
+      "stated": "Deriv"}, "Deriv"),
+    ({"sender_email": "ops@recrew.ai", "title": "Backend opening", "stated": "Mati Labs"}, "Mati Labs"),
+    ({"sender_email": "talent@gloroots.com", "title": "Interview update", "stated": "Mati Labs"}, "Mati Labs"),
+    ({"sender_email": "noreply@shl.com", "title": "Your assessment", "stated": "AM Infoweb Ltd"}, "AM Infoweb"),
+    ({"sender_email": "jo@successpact.com", "title": "Aegion AI - next steps", "stated": "Aegion AI"}, "Aegion AI"),
+    # A plausible current name beats a different domain (the model decides; the rules keep it).
+    ({"attendees": ["lee@oracle.example"], "title": "Catch up", "stated": "JPMorgan Chase & Co."}, "JPMorgan Chase & Co"),
+    ({"sender_email": "hr@youtrip.com", "title": "Hello from YouTrip", "stated": "YouTrip"}, "YouTrip"),
+    ({"title": "Considering Cisco"}, "Cisco"),
+    ({"title": "Nextiva Reschedule Interview Request"}, "Nextiva"),
+    ({"title": "SoundHound AI - 15-Min"}, "SoundHound AI"),
+    ({"attendees": ["kai@aspireapp.com"], "title": "Interview with Aspire"}, "Aspire"),
+    ({"stated": "ipsoftlabs.com"}, "Ipsoft Labs"),
+])
+def test_live_regressions(kwargs, company):
+    assert names.resolve(**kwargs).name == company
+
+
+def test_agency_evidence_goes_to_agency_and_conflicts_are_flagged():
+    found = names.resolve(sender_email="nina@watsonsearchpartner.com", title="Role at Deriv", stated="Deriv")
+    assert found.agency == "Watsonsearchpartner" and found.name == "Deriv"
+    found = names.resolve(attendees=["lee@oracle.example"], stated="JPMorgan Chase")
+    assert found.name == "JPMorgan Chase" and found.conflict.startswith("Oracle")
+    decision, confident, candidates = resolver.rules(resolver.Evidence(
+        kind="calendar", title="Catch up", people=[("Lee", "lee@oracle.example")], stated="JPMorgan Chase"))
+    assert not confident  # A conflict always goes to the model.
+
+
+def test_a_sender_mailing_about_two_companies_is_an_agency():
+    mails = [Touch(f"gmail:{i}", "email", at(i + 1), company=c, stated=c, domain="ipsoftlabs.com", direction="in",
+                   people=[Contact(f"r{i}@ipsoftlabs.com", "Recruiter")], title=f"Role at {c}")
+             for i, c in enumerate(["EazyML", "Orvera.ai"])]
+    assert resolver.learn_agencies(mails) == {"ipsoftlabs.com"}
+    pytest.importorskip("temporalio")
+    from app import lead_worker
+    client = FakeClient({"company": "Ipsoftlabs", "confidence": 0.9}, {"company": "Ipsoftlabs", "confidence": 0.9})
+    run(lead_worker.resolve_touches(FakeConn(), mails, make(client), dry_run=True))
+    assert [t.company for t in mails] == ["EazyML", "Orvera.ai"]  # The agency's name never wins.
+
+
+@pytest.mark.parametrize("old, new, confidence, agency, changes", [
+    ("Deriv", "Watsonsearchpartner", 0.9, "", False),         # An agency never replaces an employer.
+    ("Mati Labs", "Recrew", 0.95, "", False),
+    ("AM Infoweb", "Shl", 0.95, "", False),
+    ("JPMorgan Chase & Co.", "Oracle", 0.6, "", False),       # Not clearly better: keep.
+    ("JPMorgan Chase & Co.", "Oracle", 0.95, "", True),       # Clearly contradicted: change.
+    ("ipsoftlabs", "Razorpay", 0.4, "", False),               # The rules alone never override a plausible name.
+    ("Deriv", "", 0.0, "", False),                            # Nothing found: keep the old name.
+    ("L2- Sam", "Ipsoft Labs", 0.4, "", True),                # Junk is always replaced.
+    ("L2- Sam", "", 0.0, "", True),
+    ("Aspire", "Aspire", 0.9, "", True),
+    ("Kite", "Talentbridge", 0.9, "Talentbridge", False),     # The model's own agency answer.
+])
+def test_repair_stability_rule(old, new, confidence, agency, changes):
+    decision = resolver.Decision(new, "", confidence, "llm", agency=agency)
+    assert resolver.keep_or_change(old, decision) is changes
+
+
+def test_repair_keeps_the_original_name_against_an_agency_domain():
+    pytest.importorskip("temporalio")
+    from app import lead_worker
+    touch = Touch("gmail:z", "email", at(1), company="Watsonsearchpartner", stated="Deriv", direction="in",
+                  domain="watsonsearchpartner.com", people=[Contact("nina@watsonsearchpartner.com", "Nina Kaur")],
+                  title="Senior role at Deriv")
+    client = FakeClient({"company": "Watson Search Partners", "confidence": 0.9})
+    changes = run(lead_worker.resolve_touches(FakeConn(), [touch], make(client), dry_run=True))
+    assert touch.company == "Deriv" and changes == [("gmail:z", "Watsonsearchpartner", "Deriv")]
+
+
+@pytest.mark.parametrize("title", ["Impromptu Zoom Meeting", "Meeting between Alex Doe and Pat Lee",
+                                   "Zoom Meeting between Alex Doe and Pat Lee", "Weekly sync"])
+def test_meeting_titles_without_a_company(title):
+    assert names.resolve(title=title).name == "" and names.resolve(stated=title).name == ""

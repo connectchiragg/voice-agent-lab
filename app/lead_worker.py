@@ -585,6 +585,10 @@ def touch_evidence(touch: Touch, owners: set[str], snippet: str = "") -> company
         snippet=snippet, stated=touch.stated or touch.company, role=touch.role)
 
 
+def names_clean(name: str) -> str:
+    return company_names.clean(name) or name
+
+
 async def snippets(connection: Any) -> dict[str, str]:
     """Stored email snippets, decrypted in memory only (first 300 characters)."""
     key = os.getenv("VALR_TOKEN_KEY", "").strip()
@@ -606,6 +610,7 @@ async def resolve_touches(connection: Any, touches: list[Touch], resolver: compa
     place on `touches` too). `limit`: model resolutions this pass. -> [(touch id, before, after)]."""
     await company_resolver.setup(connection)
     owners = resolver.owner_emails
+    resolver.agencies |= company_resolver.learn_agencies(touches)
     texts = await snippets(connection)
     changes = []
     for touch in touches:
@@ -614,11 +619,16 @@ async def resolve_touches(connection: Any, touches: list[Touch], resolver: compa
         if limit is not None and resolver.calls >= limit:
             resolver.client = None  # Rules and cache only for the rest of this pass.
         beat()
+        if not touch.stated and touch.company:
+            touch.stated = touch.company  # The original name: strong evidence, kept for good.
         ev = touch_evidence(touch, owners, texts.get(touch.id, ""))
         decision = await resolver.resolve(connection, ev)
         before = touch.company
-        if not touch.stated and touch.company:
-            touch.stated = touch.company
+        baseline = touch.stated or touch.company  # Repairs compare against the original name.
+        if not company_resolver.keep_or_change(baseline, decision, resolver.agencies):
+            resolver.kept += 1
+            decision = company_resolver.Decision(names_clean(baseline), "", company_resolver.EXISTING, "existing",
+                                                 "kept the earlier name")
         if (decision.company, decision.how) != (touch.company, touch.company_how):
             changes.append((touch.id, before, decision.company))
             touch.company, touch.company_how = decision.company, decision.how
@@ -644,6 +654,10 @@ async def repair_recordings(connection: Any, resolver: company_resolver.Resolver
             kind="recording", title=event_title or title or "", domains=[domain] if domain else [],
             people=[(n, "") for n in store.names({"interviewers": people})], stated=company or event_company or "")
         decision = await resolver.resolve(connection, ev, entity_id=f"interview:{provider}:{external_id}")
+        old = company or event_company or ""
+        if decision.source != "override" and not company_resolver.keep_or_change(old, decision, resolver.agencies):
+            resolver.kept += 1
+            continue
         if decision.company != (company or ""):
             changes.append((f"{provider}:{external_id}", company or event_company or "", decision.company))
             if not dry_run:
@@ -655,7 +669,10 @@ async def repair_recordings(connection: Any, resolver: company_resolver.Resolver
 
 
 async def repair_companies(dry_run: bool = False) -> dict[str, Any]:
-    """`python -m app.lead_worker repair-companies [--dry-run]`: names only, before -> after."""
+    """`python -m app.lead_worker repair-companies [--dry-run]`: names only, before -> after.
+    The full pipeline (rules -> Haiku -> one web search), with the stability rule: a stored name
+    changes only for a more confident one that is not an agency or platform. A dry run changes
+    no names (model answers are still cached, so the real run costs nothing more)."""
     now = datetime.now(timezone.utc)
     resolver = company_resolver.default_resolver(owner_emails())
     async with await connect() as connection:
@@ -669,6 +686,7 @@ async def repair_companies(dry_run: bool = False) -> dict[str, Any]:
         if not dry_run:
             await leads_store.save_leads(connection, after, everything, now)
     return {"dry_run": dry_run, "model_calls": resolver.calls, "usd": round(resolver.usd, 4),
+            "kept_by_stability_rule": resolver.kept, "agency_domains_learned": len(resolver.agencies),
             "leads_before": len(before), "leads_after": len(after),
             "not_identified_before": sum(1 for l in before if l.company == company_names.NOT_IDENTIFIED),
             "not_identified_after": sum(1 for l in after if l.company == company_names.NOT_IDENTIFIED),
