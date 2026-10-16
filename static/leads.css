@@ -67,26 +67,42 @@
 .chips-sep { flex: none; width: 1px; align-self: stretch; background: var(--hairline-strong); margin: 0 4px; }
 
 /* Home, wide screens: the globe beside the hero copy, not under it. */
-@media (min-width: 900px) { .hero-globe:not(.compact) .globe { left: 32%; } }
+@media (min-width: 900px) {
+  /* Wide screens: the copy in a left column, the globe filling the rest of a taller panel. */
+  .hero-globe:not(.compact) { height: 660px; }
+  .hero-globe:not(.compact) .hero-copy { max-width: 340px; }
+  .hero-globe:not(.compact) .hero-title { font-size: clamp(2.4rem, 1.6rem + 2vw, 3.4rem); }
+  .hero-globe:not(.compact) .globe { left: 320px; }
+  .hero-globe.compact { height: 560px; }
+  .hero-globe.compact .hero-copy { max-width: 260px; padding-right: 0; }
+  .hero-globe.compact .globe { left: 240px; }
+}
 /* Narrow screens: the globe below the hero copy, so the copy never covers the hot leads. */
 @media (max-width: 899.98px) {
-  .hero-globe:not(.compact) { height: 640px; }
+  .hero-globe:not(.compact) { height: 720px; }
   .hero-globe:not(.compact) .globe { top: 250px; }
-  .hero-globe.compact { height: 470px; }
+  .hero-globe.compact { height: 540px; }
   .hero-globe.compact .globe { top: 100px; }
 }
 
 /* The globe's labels: every live lead gets one; a label that would overlap a nearer one is
    hidden until its lead is hovered or focused. Back-side labels fade out. */
 .globe-labels { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
-.globe-label { position: absolute; left: 0; top: 0; display: flex; align-items: center; gap: 5px; padding: 2px 4px; border: 0; margin: 0;
-  background: transparent; white-space: nowrap; font: 500 0.625rem/1 var(--mono); letter-spacing: 0.06em; text-transform: uppercase;
-  color: var(--bone); text-shadow: 0 1px 5px #05070c, 0 0 2px #05070c; cursor: pointer; pointer-events: auto; will-change: transform, opacity; }
+.globe-label { position: absolute; left: 0; top: 0; display: flex; align-items: center; gap: 5px; padding: 1px 2px; border: 0; margin: 0;
+  background: transparent; white-space: nowrap; font: 600 0.6875rem/1 var(--display); letter-spacing: 0.03em; text-transform: uppercase;
+  font-stretch: condensed; color: var(--bone); text-shadow: 0 1px 5px #05070c, 0 0 2px #05070c; cursor: pointer; pointer-events: auto; will-change: transform, opacity; }
 .globe-label.is-culled { opacity: 0 !important; pointer-events: none; }
 .globe-label.is-forced, .globe-label:focus-visible { opacity: 1 !important; pointer-events: auto; z-index: 2; }
 .globe-label:focus-visible { outline: 1px solid var(--ice); outline-offset: 1px; }
 .globe-label.is-hot { font-weight: 700; }
+/* Lower bands a little dimmer, never hidden. */
+.globe-label.is-cool { color: rgba(228, 233, 242, 0.84); }
+.globe-label.is-cold { color: rgba(228, 233, 242, 0.68); }
 .globe-label.is-closed { color: var(--ash); }
+.globe-leaders { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
+.globe-leaders line { stroke: rgba(228, 233, 242, 0.7); stroke-width: 1; }
+/* A list row the pointer is on (static/valr-app.js turns the globe to it). */
+.leads-table tr[data-lead-row]:hover td { background: var(--glow-2); }
 .globe-label.is-dim { opacity: 0.25 !important; }
 .globe-tip { position: absolute; left: 0; top: 0; z-index: 3; pointer-events: none; padding: 7px 10px; max-width: 280px;
   background: rgba(8, 12, 22, 0.94); border: 1px solid var(--hairline); border-left: 3px solid var(--tip, var(--signal));

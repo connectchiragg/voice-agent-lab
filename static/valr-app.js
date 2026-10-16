@@ -103,10 +103,18 @@ async function mountGlobe() {
       const view = await module.mount(globe, shown(), {
         onSelect(node) { if (node?.type === "lead") choose(node.id); },
         // Every live lead is drawn and labelled (static/leads.css keeps the hero copy off the globe).
-        maxNodes: 150, labels: 80, reducedMotion: reduced,
+        maxNodes: 150, labels: 150, reducedMotion: reduced,
       });
       if (view?.supported !== false) {
         toggle?.addEventListener("change", () => view.update(shown()));
+        // The list is the full index: pointing at a row (or focusing its link) turns the globe to that lead.
+        let pointed = null;
+        const point = id => { if (id !== pointed) { pointed = id; view.hover?.(id); } };
+        document.querySelectorAll("tr[data-lead-row]").forEach(row => {
+          row.addEventListener("mouseenter", () => point(row.dataset.leadRow));
+          row.addEventListener("focusin", () => point(row.dataset.leadRow));
+        });
+        document.querySelector(".leads-table")?.addEventListener("mouseleave", () => point(null));
         if (selected) { view.select?.(selected); view.focus?.(selected); }
         globe.dataset.globeKind = "3d";
         return;
