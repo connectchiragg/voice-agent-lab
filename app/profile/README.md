@@ -1,6 +1,6 @@
 # VALR candidate profile and interview self-evaluation
 
-Private data for Chirag's interview-prep briefing calls. Everything under `data/`
+Private data for the owner's interview-prep briefing calls. Everything under `data/`
 is gitignored and written with mode 0600. Compensation figures exist only in
 `profile.json`. Every other file masks them as `[redacted]`.
 

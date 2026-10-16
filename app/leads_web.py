@@ -7,7 +7,8 @@
   body must name that subscription; the decoded data must be for VALR_GMAIL_ACCOUNT. Then a
   Gmail sync starts (signal-with-start, id `valr-gmail-sync`). 204 on success; 403 on a bad
   token; 503 when Temporal is down, so Pub/Sub retries (exponential backoff, 1 day).
-- `GET /valr/leads`: the page (app/leads_page.py, static/leads.js + static/leads-globe.js).
+- `GET /valr/leads` is the app's Leads page (app/valr_ui/leads.py, with static/leads-globe.js);
+  it reads `collect` below and posts the corrections and "Check Gmail now" to the routes here.
 - `GET /valr/api/leads`: {leads, contacts, links, stages, generated_at, gmail}: every lead
   rebuilt from the stored touchpoints at request time (temperatures are "now").
 - `POST /valr/api/leads/sync`: a sync now (owner, CSRF, same-origin JSON like the cockpit).
@@ -29,12 +30,12 @@ from datetime import datetime, timezone
 from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Request, Response
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, ValidationError
 from temporalio.common import WorkflowIDConflictPolicy
 from temporalio.service import RPCError
 
-from app import callbacks, google_oidc, leads, leads_page, leads_store, research, valr_dashboard
+from app import callbacks, google_oidc, leads, leads_store, research, valr_dashboard
 from app.lead_workflow import SYNC_WORKFLOW_ID, TASK_QUEUE, GmailSyncInput, GmailSyncWorkflow
 
 logger = logging.getLogger("uvicorn.error")
@@ -144,18 +145,6 @@ async def view_or_503() -> dict[str, Any]:
     if research.pool is None:
         raise HTTPException(503, "Postgres is unavailable.")
     return await collect(research.pool)
-
-
-@router.get("/valr/leads", response_class=HTMLResponse)
-async def leads_page_route(request: Request) -> HTMLResponse:
-    email = await valr_dashboard.owner(request)
-    try:
-        view = await view_or_503()
-    except Exception as error:  # noqa: BLE001 - a page that says so
-        logger.warning("VALR leads unavailable: %s", type(error).__name__)
-        return HTMLResponse(leads_page.error_page(), status_code=503, headers=valr_dashboard.NO_CACHE)
-    return HTMLResponse(leads_page.page(view, email, valr_dashboard.csrf_token(email)),
-                        headers=valr_dashboard.NO_CACHE)
 
 
 @router.get("/valr/api/leads")

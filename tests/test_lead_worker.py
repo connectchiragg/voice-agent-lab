@@ -51,9 +51,9 @@ def test_calendar_interviews_intro_chats_and_known_contacts_become_touchpoints()
 
 
 def test_interview_detail_anchors_match_the_scorecards():
-    assert lead_worker.detail_url("fathom:1000") == "/valr#past-fathom-1000"
-    assert lead_worker.detail_url("fireflies:ab_9") == "/valr#past-fireflies-ab-9"
-    assert lead_worker.detail_url("") == "/valr#performance"
+    assert lead_worker.detail_url("fathom:1000") == "/valr/interviews/past/fathom-1000"
+    assert lead_worker.detail_url("fireflies:ab_9") == "/valr/interviews/past/fireflies-ab-9"
+    assert lead_worker.detail_url("") == "/valr/performance"
 
 
 def test_fathom_and_performance_touchpoints():
@@ -69,8 +69,8 @@ def test_fathom_and_performance_touchpoints():
                             "overall_score": 6.5, "outcome": "rejected"}, {"company": "", "date": "x"}]}
     [score] = lead_worker.performance_touches(perf)
     assert score.score == 6.5 and score.stage_hint == "closed-lost" and score.cue == "negative"
-    assert score.title == "System design scored 6.5/10" and score.detail_url == "/valr#past-fathom-77"
-    assert touch.detail_url == "/valr#past-fathom-77"
+    assert score.title == "System design scored 6.5/10" and score.detail_url == "/valr/interviews/past/fathom-77"
+    assert touch.detail_url == "/valr/interviews/past/fathom-77"
 
 
 # A fake Gmail.

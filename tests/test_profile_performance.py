@@ -85,9 +85,9 @@ def test_score_interview_uses_transcript_when_available():
     llm = FakeLLM()
     a = analysis()
     a.update(source="fathom", id="1", title="Acme SD", date="2026-09-01T10:00:00Z")
-    meeting = {"turns": [{"speaker": "Chirag", "text": "I would shard by tenant.", "start": 0}]}
-    with_t = rubric.score_interview(meeting, a, llm, "claude-sonnet-5-5", "Chirag")
-    without = rubric.score_interview(None, a, llm, "claude-sonnet-5-5", "Chirag")
+    meeting = {"turns": [{"speaker": "Sam", "text": "I would shard by tenant.", "start": 0}]}
+    with_t = rubric.score_interview(meeting, a, llm, "claude-sonnet-5-5", "Sam")
+    without = rubric.score_interview(None, a, llm, "claude-sonnet-5-5", "Sam")
     assert with_t["transcript_used"] and not without["transcript_used"]
     assert "<transcript>" in llm.calls[0]["user"] and "<transcript>" not in llm.calls[1]["user"]
     assert "1-10" in llm.calls[0]["system"] and "system_design" in llm.calls[0]["system"]
@@ -154,7 +154,7 @@ def test_rubric_call_is_unconstrained():
     llm = FakeLLM()
     a = analysis()
     a.update(source="fathom", id="1", title="t", date="2026-09-01T10:00:00Z")
-    rubric.score_interview(None, a, llm, "claude-sonnet-5-5", "Chirag")
+    rubric.score_interview(None, a, llm, "claude-sonnet-5-5", "Sam")
     assert llm.calls[0]["constrained"] is False
 
 
@@ -189,7 +189,7 @@ def test_rubric_reply_off_schema_raises():
     a = analysis()
     a.update(source="fathom", id="1", title="t", date="2026-09-01T10:00:00Z")
     with pytest.raises(LLMError, match="interview"):
-        rubric.score_interview(None, a, llm, "m", "Chirag")
+        rubric.score_interview(None, a, llm, "m", "Sam")
 
 
 def test_score_performance_resumes_from_partial(tmp_path):

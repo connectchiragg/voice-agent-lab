@@ -10,13 +10,31 @@ from app.valr_ui.shell import STATIC, asset, attention_list, icon
 
 
 def globe_src() -> str:
-    """The leads branch's globe when it is deployed, else the light fallback."""
+    """The leads branch's 3D globe (three.js); static/valr-globe-lite.js is the fallback."""
     return asset("leads-globe.js") if (STATIC / "leads-globe.js").exists() else asset("valr-globe-lite.js")
 
 
+def safe_json(data: Any) -> str:
+    """JSON for a non-executable script tag ("<" escaped)."""
+    return json.dumps(data).replace("<", "\\u003c")
+
+
 def globe_json(leads: dict[str, Any]) -> str:
-    """The globe's data in a non-executable script tag ("<" escaped)."""
-    return json.dumps({"leads": leads.get("leads") or [], "stages": leads.get("stages") or []}).replace("<", "\\u003c")
+    """The lite globe's data: the normalised leads (stage, company, next step)."""
+    return safe_json({"leads": leads.get("leads") or [], "stages": leads.get("stages") or []})
+
+
+def raw_json(leads: dict[str, Any]) -> str:
+    """The 3D globe's data: GET /valr/api/leads as is, without expired leads."""
+    raw = leads.get("raw") or {}
+    active = {r["id"] for r in leads.get("leads") or []}
+    kept = [lead for lead in raw.get("leads") or [] if lead.get("id") in active]
+    ids = {lead["id"] for lead in kept}
+    people = [{**c, "leads": [i for i in c.get("leads") or [] if i in ids]} for c in raw.get("contacts") or []]
+    people = [c for c in people if c["leads"]]
+    pids = {c["id"] for c in people}
+    links = [k for k in raw.get("links") or [] if k.get("source") in ids and (k.get("target") in ids or k.get("target") in pids)]
+    return safe_json({"leads": kept, "contacts": people, "links": links, "stages": raw.get("stages") or []})
 
 
 def hero(leads: dict[str, Any], compact: bool = False) -> str:
@@ -24,30 +42,35 @@ def hero(leads: dict[str, Any], compact: bool = False) -> str:
     live = [r for r in rows if r["stage"] != "closed"]
     interviewing = sum(1 for r in rows if r["stage"] == "interviewing")
     waiting = sum(1 for r in rows if r["waiting_on_you"])
+    hot = sum(1 for r in live if (r.get("temperature") or 0) >= 60)
     legend = "".join(
         f'<a class="legend-item" href="/valr/leads?stage={e(s["key"])}"><span class="sw st-{e(s["key"])}" aria-hidden="true"></span>'
         f'{e(s["label"])} <span class="num muted">{s["count"]}</span></a>' for s in leads.get("stages") or [] if s["count"])
     if leads.get("available"):
         title = f'{len(live)} live lead{"s" if len(live) != 1 else ""}'
-        sub = " · ".join(x for x in (f"{interviewing} interviewing" if interviewing else "",
+        sub = " · ".join(x for x in (f"{hot} hot" if hot else "", f"{interviewing} interviewing" if interviewing else "",
                                      f"{waiting} waiting on you" if waiting else "") if x) or "Nothing waiting on you"
     else:
         title, sub = "Your pipeline", "Leads appear here once the Gmail lead tracker is connected."
+    temp = ('<p class="globe-key mono small" aria-hidden="true"><span>cold</span><i class="ramp"></i><span>hot</span></p>'
+            if leads.get("raw") else "")
     return f"""
 <section class="hero-globe{' compact' if compact else ''}" aria-labelledby="hero-title">
-  <div class="globe" data-globe data-mode="{'leads' if compact else 'home'}" data-src="{globe_src()}" role="img"
-       aria-label="A globe of your job leads, coloured by stage. The list on the Leads page has the same information.">
+  <div class="globe" data-globe data-mode="{'leads' if compact else 'home'}" data-src="{globe_src()}"
+       data-fallback="{asset('valr-globe-lite.js')}" role="img"
+       aria-label="A globe of your job leads, coloured from cold blue to hot orange. The list on the Leads page has the same information.">
     <noscript><p class="muted small">The globe needs JavaScript; the Leads page lists everything.</p></noscript>
   </div>
   <div class="hero-copy">
     <p class="eyebrow"><span class="eb-rule"></span>Pipeline</p>
     <{'h2' if compact else 'h1'} id="hero-title" class="hero-title">{e(title)}</{'h2' if compact else 'h1'}>
     <p class="hero-sub">{e(sub)}</p>
-    {f'<div class="legend">{legend}</div>' if legend else ''}
+    {f'<div class="legend">{legend}</div>' if legend else ''}{temp}
     <a class="hero-link mono" href="/valr/leads">{'All leads →' if leads.get('available') else 'Leads settings →'}</a>
   </div>
   <div class="lead-peek" data-lead-peek hidden aria-live="polite"></div>
   <script type="application/json" id="leads-data">{globe_json(leads)}</script>
+  <script type="application/json" id="leads-raw">{raw_json(leads)}</script>
 </section>"""
 
 
@@ -106,7 +129,10 @@ def todo_cell(todos: list[dict[str, Any]]) -> str:
     rows = []
     for t in todos:
         if t.get("href"):
-            rows.append(f'<li><a href="{e(t["href"])}"><span class="todo-box" aria-hidden="true"></span>{e(t["title"])}</a></li>')
+            done = " done" if t.get("done") else ""
+            rows.append(f'<li class="todo{done}"><a href="{e(t["href"])}"><span class="todo-box{done}" aria-hidden="true">'
+                        f'{icon("check", 12) if done else ""}</span>{e(t["title"])}'
+                        f'{"<span class=\"sr-only\"> (done)</span>" if done else ""}</a></li>')
         else:
             fix = t.get("fix") or {}
             target = fix.get("href") or "#"

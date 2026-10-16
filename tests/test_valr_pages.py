@@ -10,12 +10,15 @@ from pathlib import Path
 
 import httpx
 import pytest
-from fastapi.testclient import TestClient
+
+pytest.importorskip("fastapi", reason="the pages run in the app's venv")
+
+from fastapi.testclient import TestClient  # noqa: E402
 
 from app import interview_store, research, telegram_api, valr_dashboard, valr_view
 from app.valr_ui import attention, contracts, routes, wording
 from tests.valr_sample import sample_view
-from tests.valr_sample_extras import sample_leads
+from tests.valr_sample_extras import sample_leads, sample_recording_row
 
 ROOT = Path(__file__).resolve().parent.parent
 OWNER = "owner@example.com"
@@ -49,11 +52,17 @@ def client(monkeypatch):
     async def load_leads():
         return box["leads"]()
 
+    async def load_recording(interview):  # fathom:1000 none stored, 1006 a link only, others a player.
+        if interview["id"] == "fathom:1000":
+            return None
+        return sample_recording_row(interview["id"], embed=interview["id"] != "fathom:1006")
+
     async def setup(connection):
         return None
 
     monkeypatch.setattr(valr_view, "collect", collect)
     monkeypatch.setattr(routes, "load_leads", load_leads)
+    monkeypatch.setattr(routes, "load_recording", load_recording)
     monkeypatch.setattr(interview_store, "setup", setup)
     monkeypatch.setattr(research, "pool", Pool())
     monkeypatch.setattr(valr_dashboard, "verifier", Verifier())
@@ -68,9 +77,14 @@ def ref_of(client) -> str:
     return "slot-" + page.split('href="/valr/interviews/slot-', 1)[1].split('"', 1)[0]
 
 
+def lead_id(company: str) -> str:
+    return next(r["id"] for r in contracts.leads(sample_leads())["leads"] if r["company"] == company)
+
+
 def pages(client) -> list[str]:
     return ["/valr", "/valr/interviews", f"/valr/interviews/{ref_of(client)}", "/valr/interviews/past",
-            "/valr/interviews/past/fathom-1006", "/valr/leads", "/valr/leads?stage=offer&q=x&lead=lead-5",
+            "/valr/interviews/past/fathom-1006", "/valr/interviews/past/fathom-1000", "/valr/leads",
+            f"/valr/leads?stage=offer&q=x&lead={lead_id('Orbit Labs')}", "/valr/leads?status=expired",
             "/valr/performance", "/valr/settings", "/valr/system"]
 
 
@@ -146,19 +160,49 @@ def test_actions_stay_post_owner_and_csrf(client, monkeypatch):
 
 def test_home_hits_you_with_right_now(client):
     page = html.unescape(client.get("/valr", headers=GOOD).text)
-    assert 'data-globe' in page and 'id="leads-data"' in page and "12 live leads" in page
-    for text in ("Next interview", "Juniper", "Next briefing call", "To do", "Read your Juniper briefing",
+    leads = contracts.leads(sample_leads())
+    live = [r for r in leads["leads"] if r["stage"] != "closed"]
+    assert 'data-globe' in page and 'id="leads-data"' in page and f"{len(live)} live leads" in page
+    assert "/static/leads-globe.js" in page and "/static/valr-globe-lite.js" in page  # 3D, lite fallback.
+    for text in ("Next interview", "Juniper", "Next Telegram heads-up", "To do", "Read your Juniper briefing",
                  "Reconnect Google tomorrow", "Call me now", "Coming up"):
         assert text in page, text
     data = json.loads(page.split('id="leads-data">', 1)[1].split("</script>", 1)[0])
-    assert len(data["leads"]) == 14 and {s["key"] for s in data["stages"]} >= {"offer", "interviewing"}
+    assert len(data["leads"]) == len(leads["leads"]) and {s["key"] for s in data["stages"]} >= {"offer", "interviewing"}
+    raw = json.loads(page.split('id="leads-raw">', 1)[1].split("</script>", 1)[0])
+    assert {lead["id"] for lead in raw["leads"]} == {r["id"] for r in leads["leads"]}  # Expired left out.
+    assert all("temperature" in lead and "timeline" in lead for lead in raw["leads"])
+    assert raw["contacts"] and all(set(c["leads"]) <= {r["id"] for r in leads["leads"]} for c in raw["contacts"])
+
+
+def test_home_shows_prep_ticks_from_the_server(client):
+    from app.interview_store import prep_item
+
+    def view():
+        v = sample_view(extras=True)
+        slot = attention.next_slot(v)[1]
+        slot["detail"]["prep"] = ["Size the system before drawing boxes", "Ask for their band before a number"]
+        slot["prep_done"] = [prep_item("Size the system before drawing boxes")]
+        return v
+    client.box["view"] = view
+    page = html.unescape(client.get("/valr", headers=GOOD).text)
+    assert "prep: 1 of 2 done" in page
+    detail = client.get(f"/valr/interviews/{ref_of(client)}", headers=GOOD).text
+    assert detail.count(" checked>") == 1 and 'data-prep-ref="' in detail and "ticks are saved" in detail
+    def all_done():
+        v = view()
+        attention.next_slot(v)[1]["prep_done"].append(prep_item("Ask for their band before a number"))
+        return v
+    client.box["view"] = all_done
+    page = html.unescape(client.get("/valr", headers=GOOD).text)
+    assert "prep: all 2 done" in page and 'class="todo done"' in page
 
 
 def test_interview_detail_is_written_for_reading(client, monkeypatch):
     def view():
         v = sample_view(extras=True)
         v["owner_name"] = "Alex"
-        slot = v["blocks"][0]["slots"][0]
+        slot = attention.next_slot(v)[1]
         slot["brief"]["notes"] = [{"fact": "Alex's last round with them stalled on sizing at quillworks dot com.",
                                    "sensitive": False, "private": False, "sources": []}]
         slot["detail"]["prep"] = ["Your measured turns of 500-4,500", "Size the system before drawing boxes"]
@@ -176,42 +220,145 @@ def test_interview_detail_is_written_for_reading(client, monkeypatch):
 
 def test_past_interview_recording_and_impression(client):
     page = html.unescape(client.get("/valr/interviews/past/fathom-1006", headers=GOOD).text)
-    assert "<iframe" not in page and "The Fathom player appears here" in page and "Open in Fathom" in page
+    assert "<iframe" not in page and "This recording opens in Fathom" in page and "Open in Fathom" in page
+    assert 'data-moments-id="fathom:1006"' in page  # Key moments load from /valr/api/recording.
     player = client.get("/valr/interviews/past/fathom-1005", headers=GOOD).text
-    assert '<iframe src="https://fathom.video/embed/sample-5"' in player and "sandbox=" in player
-    assert "How you came across" in page and "Sized the system unprompted" in page
+    assert '<iframe src="https://fathom.video/embed/sample-1005"' in player and "sandbox=" in player
+    assert "How the interviewer reacted" in player and "They dug in when you put numbers on the design." in player
+    assert "How did you keep the queue from growing" in player  # A cue with its quote.
+    assert player.index("Leaned in") < player.index("Impression score")  # Narrative first, numbers folded.
+    assert '<details class="card fold" id="scores">' in player
     assert "Question by question" in page and "Next time" in page
+    unknown = client.get("/valr/interviews/past/fathom-1000", headers=GOOD).text
+    assert "data-full" in unknown and "<iframe" not in unknown  # Not stored: ask the notetaker.
+    assert "only the talk balance is known" in unknown
+
+
+def test_old_anchor_links_resolve_to_the_new_pages(client):
+    from app import lead_worker
+    from app.profile import post_call
+    assert lead_worker.detail_url("fathom:1005") == "/valr/interviews/past/fathom-1005"
+    assert post_call.deep_link("valr.example.com", "fathom:1005") == "https://valr.example.com/valr/interviews/past/fathom-1005"
+    assert client.get(lead_worker.detail_url("fathom:1005"), headers=GOOD).status_code == 200
+    assert contracts.new_detail_url("/valr#past-fathom-1005") == "/valr/interviews/past/fathom-1005"
+    assert contracts.new_detail_url("/valr#performance") == "/valr/performance"
+    script = (ROOT / "static/valr-app.js").read_text(encoding="utf-8")
+    assert "#past-([A-Za-z0-9-]+)" in script and "/valr/interviews/past/${past[1]}" in script
 
 
 def test_performance_leads_with_the_coach(client):
-    page = client.get("/valr/performance", headers=GOOD).text
-    assert page.index("Your coach") < page.index("perf-chart")
-    assert "pushback is where rounds slip" in page and "Work on next" in page
-    assert "Information control" not in page and "Answer first<" not in page
+    page = html.unescape(client.get("/valr/performance", headers=GOOD).text)
+    order = [page.index(x) for x in ("Where you stand", "What's working", "What's costing you", "This week's focus",
+                                     "Salary conversations", "Post-call reports", "The numbers behind this", 'id="perf-chart"')]
+    assert order == sorted(order)
+    assert '<details class="numbers" id="numbers">' in page  # Folded when the coach has written.
+    assert "You give ground too fast when challenged" in page and "Pushback reps" in page
+    assert "What band have you set for it?" in page and "VALR never writes your numbers" in page
+    assert "1 post-call report pending" in page and "Interviewer impression by outcome" in page
     plain = client.box["view"]
-    client.box["view"] = lambda: sample_view()
-    assert "Focus this week" in client.get("/valr/performance", headers=GOOD).text  # Until the coach lands.
+
+    def no_coach():
+        v = sample_view()
+        v["performance"]["coach"] = None
+        return v
+    client.box["view"] = no_coach
+    page = client.get("/valr/performance", headers=GOOD).text
+    assert "Focus this week" in page and '<details class="numbers" id="numbers" open>' in page
     client.box["view"] = plain
 
 
 def test_leads_filters_live_in_the_url(client):
     offers = client.get("/valr/leads?stage=offer", headers=GOOD).text
-    assert offers.count("data-lead-row=") == 1 and "Orbit" in offers
+    assert offers.count("data-lead-row=") == 1 and "Orbit Labs" in offers
     found = client.get("/valr/leads?q=kite", headers=GOOD).text
     assert found.count("data-lead-row=") == 1
-    chosen = client.get("/valr/leads?lead=lead-5", headers=GOOD).text
-    assert 'id="lead"' in chosen and "talent@orbit.example" in chosen
+    expired = client.get("/valr/leads?status=expired", headers=GOOD).text
+    assert "Harbor" in expired and expired.count("data-lead-row=") == 1
+    chosen = html.unescape(client.get(f"/valr/leads?lead={lead_id('Orbit Labs')}", headers=GOOD).text)
+    assert 'id="lead"' in chosen and "lena@orbitlabs.example" in chosen and "Why this temperature" in chosen
+    assert "Check Gmail now" in chosen and "Gmail: live" in chosen
     client.box["leads"] = lambda: contracts.leads(None)
     assert "The lead tracker isn" in client.get("/valr/leads", headers=GOOD).text
     assert "Leads appear here once" in client.get("/valr", headers=GOOD).text
 
 
-def test_settings_reflect_reality_without_server_talk(client):
+def test_lead_corrections_are_on_the_lead_card(client):
+    juniper = lead_id("Juniper Robotics")
+    page = client.get(f"/valr/leads?lead={juniper}", headers=GOOD).text
+    assert f'data-lead-fix="{juniper}"' in page
+    for control in ('data-fix="stage"', 'data-fix="merge"', 'data-fix="dismiss"', "data-fix-stage", "data-fix-into"):
+        assert control in page, control
+    assert '<option value="closed-lost">' in page and f'<option value="{juniper}">' not in page  # Not into itself.
+    script = (ROOT / "static/valr-app.js").read_text(encoding="utf-8")
+    assert "/valr/api/leads/${encodeURIComponent(id)}/override" in script and "X-CSRF-Token" in script
+
+
+def test_settings_reflect_reality(client):
     page = html.unescape(client.get("/valr/settings", headers=GOOD).text)
     assert "Connected as @sample_owner" in page and 'data-action="tgtest"' in page
     assert "Fathom" in page and "Optional" in page  # Granola: optional, never a to-do.
-    assert not re.search(r"\b[A-Z]{3,}_[A-Z_]{3,}\b", page.split("<body", 1)[1])  # No env var names.
-    assert "owner@example.com" in page  # The owner's own accounts are shown to him.
+    assert 'id="setup"' in page and "Get set up" in page  # The checklist moved here.
+    assert 'data-connect="fathom"' in page and 'type="password"' in page  # The connect form, empty.
+    assert 'data-action="reach" data-mode="telegram" aria-pressed="true"' in page
+    assert 'data-action="reach" data-mode="call" aria-pressed="false"' in page and "The default (Telegram heads-up)" in page
+
+
+def test_reach_mode_is_an_owner_csrf_post_stored_server_side(client, monkeypatch):
+    stored = {}
+
+    async def set_flag(connection, name, enabled):
+        stored[name] = enabled
+    monkeypatch.setattr(interview_store, "set_flag", set_flag)
+    assert client.get("/valr/api/reach", headers=GOOD).status_code == 405
+    csrf = client.get("/valr", headers=GOOD).text.split('name="csrf-token" content="', 1)[1].split('"', 1)[0]
+    headers = {**GOOD, "Content-Type": "application/json", "X-CSRF-Token": csrf}
+    assert client.post("/valr/api/reach", content='{"mode": "call"}', headers={**GOOD, "Content-Type": "application/json"}).status_code == 403
+    assert client.post("/valr/api/reach", content='{"mode": "call"}',
+                       headers={**headers, "Cf-Access-Jwt-Assertion": "guest"}).status_code == 403
+    assert client.post("/valr/api/reach", content='{"mode": "sometimes"}', headers=headers).status_code == 400
+    assert stored == {}
+    ok = client.post("/valr/api/reach", content='{"mode": "call"}', headers=headers)
+    assert ok.status_code == 200 and stored == {interview_store.AUTO_DIAL: True}
+    client.post("/valr/api/reach", content='{"mode": "telegram"}', headers=headers)
+    assert stored == {interview_store.AUTO_DIAL: False}
+
+
+def test_the_stored_choice_overrides_the_env_default(monkeypatch):
+    class Cursor:
+        def __init__(self, row):
+            self.row = row
+
+        async def fetchone(self):
+            return self.row
+
+    class Connection:
+        def __init__(self, row):
+            self.row = row
+
+        async def execute(self, sql, params=()):
+            return Cursor(self.row)
+    monkeypatch.delenv("VALR_AUTO_DIAL", raising=False)
+    assert asyncio.run(interview_store.auto_dial(Connection(None))) is False  # Default: heads-up only.
+    assert asyncio.run(interview_store.auto_dial(Connection((True,)))) is True
+    monkeypatch.setenv("VALR_AUTO_DIAL", "1")
+    assert asyncio.run(interview_store.auto_dial(Connection(None))) is True
+    assert asyncio.run(interview_store.auto_dial(Connection((False,)))) is False
+
+
+def test_prep_ticks_are_an_owner_csrf_post(client, monkeypatch):
+    ticks = []
+
+    async def set_prep_check(connection, ref, item, done):
+        ticks.append((ref, item, done))
+    monkeypatch.setattr(interview_store, "set_prep_check", set_prep_check)
+    csrf = client.get("/valr", headers=GOOD).text.split('name="csrf-token" content="', 1)[1].split('"', 1)[0]
+    headers = {**GOOD, "Content-Type": "application/json", "X-CSRF-Token": csrf}
+    body = '{"ref": "slot-abc", "item": "Size the system", "done": true}'
+    assert client.post("/valr/api/prep", content=body, headers={**GOOD, "Content-Type": "application/json"}).status_code == 403
+    assert client.post("/valr/api/prep", content='{"ref": "../x", "item": "a", "done": true}', headers=headers).status_code == 400
+    assert client.post("/valr/api/prep", content=body, headers=headers).status_code == 200
+    assert ticks == [("slot-abc", interview_store.prep_item("Size the system"), True)]
+    assert interview_store.prep_item("Size  the system") == interview_store.prep_item("size the system")
 
 
 # The needs-attention model.
@@ -219,7 +366,8 @@ def test_settings_reflect_reality_without_server_talk(client):
 def base_view(**changes) -> dict:
     view = sample_view()
     view["connections"]["google"].update(expires_soon=False)
-    view["connections"]["notetakers"] = {"fathom": {"connected": True}}
+    view["connections"]["notetakers"] = {"fathom": {"state": "connected"}}
+    view["connections"]["telegram"] = {"configured": True, "linked": True}
     for key, value in changes.items():
         view[key] = value
     return view
@@ -245,7 +393,7 @@ def test_attention_google():
 
 def test_attention_heads_up_missed_call_limits_and_order():
     view = base_view()
-    upcoming = view["blocks"][0]
+    upcoming = attention.next_slot(view)[0]
     upcoming["state"] = "heads_up_failed"
     past = dict(view["blocks"][1], id="b-past", state="unanswered",
                 start=(datetime.now(timezone.utc) - timedelta(hours=3)).isoformat())
@@ -270,8 +418,8 @@ def test_attention_telegram_phone_and_notetakers():
     view = base_view(mode="telegram")
     view["connections"]["telegram"] = {"configured": True, "linked": False}
     view["setup"]["phone_on_file"] = False
-    view["connections"]["notetakers"] = {"fathom": {"connected": False}, "fireflies": {"error": "Token revoked"},
-                                         "granola": {"error": "nope"}}
+    view["connections"]["notetakers"] = {"fathom": {"state": "not_connected"}, "fireflies": {"state": "refused"},
+                                         "granola": {"state": "refused"}}
     found = keys(view)
     assert "telegram" in found and "phone" in found and "notetaker" in found and "notetaker-fireflies" in found
     assert not any("granola" in k for k in found)  # Optional: never an issue.
@@ -330,14 +478,32 @@ def test_view_labels_stages_and_recorders():
 
 
 def test_contracts_tolerate_partial_data():
-    assert contracts.coach(None) is None and contracts.coach({"narrative": "One.\n\nTwo."})["narrative"] == ["One.", "Two."]
-    assert contracts.impression(["Calm"])["cues"][0] == {"cue": "Calm", "tone": "neutral", "quote": ""}
     assert contracts.recording({"url": "https://fathom.video/x", "embed_url": "https://evil.example/x"})["embed_url"] == ""
     assert contracts.recording({"url": "http://insecure.example"}) is None
-    leads = contracts.leads({"leads": [{"id": "a b", "company": "Acme", "stage": "rejected",
-                                        "summary": "call +1 415 555 0134"}]})
+    assert contracts.recording({"share_url": "https://fathom.video/share/x", "provider": "fathom"})["provider"] == "Fathom"
+    leads = contracts.leads({"leads": [{"id": "a b", "company": "Acme", "stage": "closed-lost",
+                                        "timeline": [{"kind": "email", "summary": "call +1 415 555 0134"}]}]})
     assert leads["leads"][0]["id"] == "a-b" and leads["leads"][0]["stage"] == "closed"
-    assert "555 0134" not in json.dumps(leads)
+    assert leads["leads"][0]["stage_label"] == "Not moving forward"
+    assert "555 0134" not in json.dumps({k: v for k, v in leads.items() if k != "raw"})
+    assert contracts.leads(None)["available"] is False and contracts.leads({"leads": []})["available"] is True
+
+
+def test_waiting_on_you_means_their_email_is_the_latest_touch():
+    now = datetime(2026, 10, 16, tzinfo=timezone.utc)
+    lead = {"id": "x", "company": "Acme", "stage": "screening", "status": "active",
+            "timeline": [{"kind": "email", "direction": "in", "at": (now - timedelta(days=2)).isoformat()},
+                         {"kind": "email", "direction": "out", "at": (now - timedelta(days=5)).isoformat()}]}
+    assert contracts.leads({"leads": [lead]}, now)["leads"][0]["waiting_on_you"] is True
+    lead["timeline"][0]["direction"] = "out"
+    assert contracts.leads({"leads": [lead]}, now)["leads"][0]["waiting_on_you"] is False
+
+
+def test_notetaker_status_maps_to_one_state():
+    rows = contracts.notetakers({"notetakers": {"fathom": {"state": "server"}, "fireflies": {"state": "refused"},
+                                                "granola": {"state": "not_connected", "optional": True}}}, set())
+    assert [r["state"] for r in rows] == ["connected", "error", "not_connected"]
+    assert rows[1]["error"] and rows[0]["server"]
 
 
 # Telegram: one tap.
@@ -393,7 +559,7 @@ def test_a_deep_link_start_links_and_keeps_the_username(monkeypatch):
 
 FIXTURES = ["tests/valr_sample.py", "tests/valr_sample_extras.py", "tests/test_valr_pages.py",
             "scripts/preview_ui.py", *(str(p.relative_to(ROOT)) for p in (ROOT / "app/valr_ui").glob("*.py")),
-            "static/valr-app.js", "static/valr-app.css", "static/valr-globe-lite.js"]
+            "static/valr-app.js", "static/valr-app.css", "static/valr-globe-lite.js", "tests/leads_sample.py"]
 
 
 # Built from parts so this file doesn't contain what it forbids: a real phone number and a real name.
@@ -414,3 +580,16 @@ def test_rendered_pages_show_only_example_addresses(client):
         for domain in re.findall(r"[\w.+-]+@([\w-]+(?:\.[\w-]+)+)", text):
             assert domain.endswith((".example", "example.com", "localhost")), (path, domain)
         assert "555 0134" not in text
+
+
+def test_no_owner_name_in_the_code_only_in_settings(monkeypatch):
+    from app import calendar_ics, interviews
+    from app.profile import config
+    for key in ("VALR_OWNER_NAME", "VALR_CANDIDATE_NAME"):
+        monkeypatch.delenv(key, raising=False)
+    assert interviews.owner_name() == "there" and config.settings().candidate_name == "Candidate"
+    monkeypatch.setenv("VALR_CANDIDATE_NAME", "Sam Rivera")
+    assert interviews.owner_name() == "Sam" and config.settings().candidate_name == "Sam Rivera"
+    assert {"sam", "rivera"} <= calendar_ics.not_company_words()
+    monkeypatch.setenv("VALR_OWNER_NAME", "Alex")
+    assert interviews.owner_name() == "Alex"

@@ -50,7 +50,7 @@ def main() -> None:
 
     valr_dashboard.enable_dev_preview(args.host)  # Raises unless VALR_DEV_PREVIEW=1 and loopback.
     os.environ["VALR_ADMIN_EMAILS"] = valr_dashboard.PREVIEW_EMAIL
-    state = {"paused": False, "notetakers": {"fathom": "connected", "fireflies": "not_connected",
+    state = {"paused": False, "auto_dial": None, "prep": {}, "notetakers": {"fathom": "connected", "fireflies": "not_connected",
                                              "granola": "not_connected"}}
     scenario: contextvars.ContextVar[str] = contextvars.ContextVar("scenario", default="full")
     options: contextvars.ContextVar[dict] = contextvars.ContextVar("options", default={})
@@ -64,8 +64,8 @@ def main() -> None:
             return HTMLResponse(valr_page.error_page("The database didn't answer."), status_code=503)
         scenario.set(wanted if wanted in ("full", "empty", "error") else "full")
         path = request.url.path
-        if path.startswith("/valr/api/notetakers/") or path == "/valr/api/recording" \
-                or path == "/valr/api/telegram/code":
+        if path.startswith(("/valr/api/notetakers/", "/valr/api/leads/")) or path in (
+                "/valr/api/recording", "/valr/api/telegram/code", "/valr/api/reach", "/valr/api/prep"):
             return await preview_api(request, path)
         options.set({"telegram": request.query_params.get("mode") == "telegram",
                      "extras": request.query_params.get("extras") != "0"})
@@ -78,6 +78,21 @@ def main() -> None:
             return JSONResponse({"detail": "Preview only."}, status_code=403)
         if path == "/valr/api/recording":
             return JSONResponse(sample_recording(found=request.query_params.get("ref") != "none"))
+        if path == "/valr/api/reach":
+            import json
+            mode = json.loads(await request.body() or b"{}").get("mode")
+            state["auto_dial"] = mode == "call"
+            return JSONResponse({"ok": True, "mode": mode, "message": f"Preview: {mode} saved."})
+        if path == "/valr/api/prep":
+            import json
+            from app.interview_store import prep_item
+            body = json.loads(await request.body() or b"{}")
+            ticks = state["prep"].setdefault(str(body.get("ref")), set())
+            (ticks.add if body.get("done") else ticks.discard)(prep_item(str(body.get("item") or "")))
+            return JSONResponse({"ok": True, "message": "Ticked." if body.get("done") else "Unticked."})
+        if path.startswith("/valr/api/leads/"):
+            await request.body()
+            return JSONResponse({"ok": True, "message": "Preview: nothing is stored."})
         if path == "/valr/api/telegram/code":
             return JSONResponse({"ok": True, "command": "/start 123456", "expires_minutes": 15,
                                  "link": "https://t.me/example_valr_bot?start=123456",
@@ -106,19 +121,33 @@ def main() -> None:
             view["connections"]["notetakers"] = notetakers_view(state["notetakers"])
             if real is not None:
                 view["performance"] = real
-        if options.get().get("telegram") or scenario.get() == "full":
-            view["mode"] = "telegram"  # The default since 2026-10-16; the bot is set up, not linked.
+        for block in view["blocks"]:
+            for slot in block["slots"]:
+                slot["prep_done"] = sorted(state["prep"].get(slot["ref"], ()))
+        if state["auto_dial"] is not None:
+            view["mode"] = "call" if state["auto_dial"] else "telegram"
+            view["reach"] = {"auto_dial": state["auto_dial"], "source": "settings", "default_auto_dial": False}
+            return view
+        view["reach"] = {"auto_dial": False, "source": "default", "default_auto_dial": False}
+        view["mode"] = "telegram"  # The default: a Telegram heads-up, no automatic call.
+        if options.get().get("telegram"):  # ?mode=telegram: the bot is set up, not linked yet.
             view["connections"]["telegram"] = {"configured": True, "linked": False, "linked_at": None, "username": None}
-        else:
-            view.setdefault("mode", "telegram" if "telegram" in view["connections"] else "call")
         return view
 
     async def load_leads():
         if scenario.get() == "empty" or not options.get().get("extras", True):
             return contracts.leads(None)
-        return contracts.leads(sample_leads())
+        return contracts.leads(sample_leads(gmail=True))
+
+    async def load_recording(interview):
+        from tests.valr_sample_extras import sample_recording_row
+        ids = [iv["id"] for iv in sample_view()["performance"]["interviews"]]
+        if not options.get().get("extras", True) or interview.get("id") == ids[0]:
+            return None  # The oldest has no stored recording: the page asks the notetaker.
+        return sample_recording_row(interview["id"], embed=interview.get("id") != ids[-1])  # Newest: a link.
 
     routes.load_leads = load_leads
+    routes.load_recording = load_recording
 
     class Pool:
         def connection(self):

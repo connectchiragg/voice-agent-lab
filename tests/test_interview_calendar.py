@@ -111,7 +111,7 @@ def test_diff_kinds():
 
 
 @pytest.mark.parametrize("person, role", [
-    (Person("owner@gmail.com", "Chirag"), "owner"),
+    (Person("owner@gmail.com", "Sam"), "owner"),
     (Person("x@acme.com", "Me", is_self=True), "owner"),
     (Person("room1@resource.calendar.google.com", "Room"), "resource"),
     (Person("team@group.calendar.google.com", ""), "resource"),

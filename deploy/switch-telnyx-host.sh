@@ -25,7 +25,7 @@ grep -v '^TELNYX_STREAM_URL=' .env > "$t"; echo "TELNYX_STREAM_URL=wss://$HOST/w
 cat "$t" > .env; rm -f "$t"; chmod 600 .env
 sudo -n docker rm -f voice-agent-lab >/dev/null
 sudo -n docker run -d --name voice-agent-lab --restart unless-stopped --env-file .env \
-  --network voice-agent-lab -v /srv/valr-data:/data:ro -p 127.0.0.1:7860:7860 voice-agent-lab:latest >/dev/null
+  --network voice-agent-lab $(sh deploy/valr-data-live.sh app) -p 127.0.0.1:7860:7860 voice-agent-lab:latest >/dev/null
 sleep 15
 curl -s localhost:7860/healthz; echo
 echo "Unsigned webhook on https://$HOST/telnyx/webhook (expect 401):"

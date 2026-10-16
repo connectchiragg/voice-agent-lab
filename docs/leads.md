@@ -157,17 +157,20 @@ Logs carry counts and decisions only, for example `VALR lead email: keep by llm
 starts a sync now; it needs the CSRF token and a same-origin JSON request. All three need
 the owner's Access login (VALR_ADMIN_EMAILS).
 
-On the page:
-- **Filters**: active, expired or all; stage; minimum temperature.
-- **Globe**: click a lead for its panel. It shows:
-  - the stage, the temperature bars, the people and the next step;
-  - a timeline with summaries, Gmail and Fathom links, and the interview-detail link:
-    `/valr#past-<provider>-<id>`, the cockpit's scorecard anchor as valr-eval builds it,
-    or `/valr#performance` when no recording is known;
-  - the corrections.
-  Click a person for their leads.
-- **List**: every lead, below the globe. On phones (420 px or narrower) the list comes
-  first and the globe appears on a tap. Without WebGL or JavaScript, the list is the page.
+`GET /valr/leads` is the app's Leads page (app/valr_ui/leads.py), and Home uses the same
+globe as its hero. The page reads `app.leads_web.collect` (the same JSON as
+`/valr/api/leads`), normalised in app/valr_ui/contracts.py:
+- **Globe**: static/leads-globe.js (three.js) gets the raw JSON (active leads only);
+  static/valr-globe-lite.js is the fallback when the module or WebGL is unavailable.
+  Clicking a lead opens it in the list (on Home: a small preview card).
+- **Filters**: stage chips (closed-won, closed-lost and ghosted group as "Closed"; the
+  exact one is shown on the lead), a search box, and "Expired" for leads quiet 30+ days.
+- **List and lead card**: temperature, stage, next step, last activity; the card adds the
+  temperature breakdown, the people, the latest timeline entries with their Gmail,
+  recording and interview links (`/valr/interviews/past/<provider>-<id>`; links stored as
+  the old `/valr#past-<provider>-<id>` are rewritten), and the corrections (stage, merge,
+  dismiss: `POST /valr/api/leads/<id>/override`). "Check Gmail now" posts the sync.
+- "Waiting on you" means their email is the latest touch on a live lead, within 10 days.
 
 ### Embedding the globe: `static/leads-globe.js`
 
@@ -194,7 +197,7 @@ How it draws:
   people sit next to each other.
 - Node size follows activity (touches in 30 days). Colour runs from cold blue to hot
   orange, through CSS variables `--temp-cold`, `--temp-cool`, `--temp-warm` and
-  `--temp-hot` (defined in `static/leads.css`).
+  `--temp-hot` (defined in `static/valr-app.css`).
 - People float at 1.3× the radius, above their leads, joined by hairlines. Leads that
   share a person are joined by blue arcs.
 - Hot leads (60 or more) get a halo. Expired leads are faded.
@@ -290,12 +293,12 @@ per email that reaches it:
 | `tests/test_lead_worker.py` | calendar rules, scorecard anchors; backfill, history, recovery, his own replies, budget deferral, watch, encrypted snippet, no content in the log, corrections storage, the Telegram alert (once per expiry) | fake Gmail, fake model, Postgres via `VALR_TEST_POSTGRES` |
 | `tests/leads-globe.test.mjs` | the globe's layout | `node --test` |
 
-Preview with made-up data: `VALR_DEV_PREVIEW=1 python scripts/preview_leads.py`, then
-open http://127.0.0.1:8091/valr/leads.
+Preview with made-up data: `VALR_DEV_PREVIEW=1 python scripts/preview_ui.py`, then open
+http://127.0.0.1:8090/valr/leads (tests/leads_sample.py's touchpoints through the real
+`leads.build` and `leads.graph`).
 
 ## Not yet verified
 
 - A real push end to end: it needs the Access bypass and a deploy.
 - The backfill on the real mailbox.
 - Fathom matching on real recordings.
-- The `#past-…` anchors exist only once valr-eval is merged.

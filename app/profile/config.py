@@ -34,6 +34,9 @@ class Settings:
     candidate_name: str
     classifier_model: str
     evaluator_model: str
+    # Read-only seed for performance.json while the (writable) performance_path does not
+    # exist yet; on the VM /data/performance.json (docs/deploy.md, worker data).
+    performance_fallback: Path | None = None
 
 
 def settings() -> Settings:
@@ -47,9 +50,12 @@ def settings() -> Settings:
         performance_csv=_path("VALR_PERFORMANCE_CSV", "data/performance_scores.csv"),
         compensation_path=_path("VALR_COMPENSATION_PATH", "data/compensation.json"),
         cache_dir=_path("VALR_RECORDINGS_CACHE", "data/raw_recordings"),
-        candidate_name=os.getenv("VALR_CANDIDATE_NAME", "Chirag"),
+        candidate_name=(os.getenv("VALR_CANDIDATE_NAME", "").strip()
+                        or os.getenv("VALR_OWNER_NAME", "").strip() or "Candidate"),
         classifier_model=os.getenv("VALR_CLASSIFIER_MODEL", "claude-haiku-5-5"),
         evaluator_model=os.getenv("VALR_EVALUATOR_MODEL", "claude-sonnet-5-5"),
+        performance_fallback=(_path("VALR_PERFORMANCE_FALLBACK", "")
+                              if os.getenv("VALR_PERFORMANCE_FALLBACK") else None),
     )
 
 

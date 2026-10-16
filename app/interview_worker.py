@@ -12,7 +12,8 @@
 - `slot_finish`, `slots_ready`, `block_record`: bookkeeping.
 - `dials_paused`: the dashboard's pause switch for automatic briefing calls (and, since
   the Telegram design, for the heads-ups too).
-- `briefing_auto_dial`: VALR_AUTO_DIAL=1 (default off): dial at T-30 instead of a heads-up.
+- `briefing_auto_dial`: the Settings choice (stored in valr_flags), else VALR_AUTO_DIAL=1 (default off):
+  dial at T-30 instead of a heads-up.
 - `telegram_heads_up`: the T-30 Telegram message with [Call me now] [In 10 min] [Skip].
 
 Nothing here logs an email address, a phone number, an email's text or a pay figure.
@@ -460,7 +461,14 @@ class InterviewActivities:
 
     @activity.defn(name="briefing_auto_dial")
     async def briefing_auto_dial(self) -> bool:
-        return telegram_api.auto_dial()
+        """The owner's Settings choice (heads-up vs automatic call), else VALR_AUTO_DIAL."""
+        try:
+            async with await connect() as connection:
+                await interview_store.setup(connection)
+                return await interview_store.auto_dial(connection)
+        except Exception as error:  # noqa: BLE001 - the database is down: the server default.
+            activity.logger.warning("Auto-dial choice unavailable: %s", type(error).__name__)
+            return telegram_api.auto_dial()
 
     @activity.defn(name="telegram_heads_up")
     async def telegram_heads_up(self, request: HeadsUpInput) -> str:

@@ -1,27 +1,23 @@
-"""The VALR page at /valr: server-rendered HTML from app/valr_view.collect().
+"""Shared pieces of the VALR pages: escaping, the owner's clock ("11:15 AM IST"), chips,
+links, meters, status labels and the error page.
 
-Written for someone who did not build VALR: plain words (no slots, blocks, workflows
-or researcher codes), every time in the owner's zone as "11:15 AM IST", the next
-call and the three main actions first, set-up steps until everything is connected,
-one detail view per interview, performance, and the technical details folded away
-under "System".
-
-Readable without JavaScript (the interview details are anchored sections then);
-static/valr.js adds the drawer, countdowns, the chart, the actions and a quiet
-refresh. Every value is escaped here; chart data travels as JSON in a
-non-executable script tag with "<" escaped.
+The pages themselves live in app/valr_ui/ (Home, Interviews, Leads, Performance, Settings,
+System); the single-page cockpit that used to be rendered here was retired when they landed.
+Every value is escaped here.
 """
 import html
-import json
 from datetime import datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
+
 
 INTERVIEW_STATUS = {  # -> (label, tone)
     "scheduled": ("Research scheduled", "muted"), "researching": ("Researching now", "info"),
     "ready": ("Briefing ready", "ok"), "calling": ("Calling you now", "accent"),
     "done": ("Done", "muted"), "cancelled": ("Cancelled", "bad"),
 }
+
+
 CALL_STATUS = {
     "scheduled": ("Scheduled", "info"), "waiting": ("Scheduled", "info"),
     "waiting_for_call_end": ("After your current call", "info"),
@@ -32,16 +28,21 @@ CALL_STATUS = {
     "heads_up_sent": ("Heads-up sent", "ok"), "heads_up_failed": ("Heads-up not sent", "bad"),
     "dial_scheduled": ("Call scheduled", "info"),
 }
+
+
 HEADS_UP = {  # Telegram heads-up outcome -> (label, tone); "{at}" is the call time.
     "sent": ("Heads-up sent · no reply, no call", "info"), "called": ("Called at {at}", "ok"),
     "calling": ("Calling by {at}", "accent"), "later": ("Calling at {at}", "accent"),
     "skipped": ("Skipped", "muted"),
 }
+
+
 PERSON = {
     "researched": ("Researched", "ok"), "skipped_hr": ("Recruiter, not researched", "muted"),
     "skipped_classifier": ("Not an interviewer", "muted"), "pending": ("Not researched yet", "info"),
     "declined": ("Declined", "muted"),
 }
+
 
 def e(value: object) -> str:
     return html.escape("" if value is None else str(value))
@@ -128,282 +129,12 @@ def meter(used: float | None, limit: float | None, label: str, detail: str) -> s
             f'aria-valuenow="{share * 100:.0f}"><i class="tone-{tone}" style="width:{share * 100:.1f}%"></i></div></div>')
 
 
-# Header and hero.
-
-def header(view: dict[str, Any], clock: Clock, email: str) -> str:
-    return f"""
-<header class="topbar">
-  <a class="brand" href="#top"><span class="brand-dot" aria-hidden="true"></span>valr<span class="brand-sub">/ interview copilot</span></a>
-  <nav class="nav" aria-label="Sections">
-    <a href="#upcoming">Interviews</a><a href="#performance">Performance</a><a href="/valr/leads">Leads</a><a href="#system">System</a>
-  </nav>
-  <p class="tz mono" title="Signed in as {e(email)}"><span class="live-dot" aria-hidden="true"></span>
-    Times in {e(clock.abbr)} · updated <span data-updated>{clock.time(view['generated_at'], zone=False)}</span></p>
-</header>"""
-
-
-def telegram_mode(view: dict[str, Any]) -> bool:
-    return view.get("mode") == "telegram"
-
-
-def heads_up_card(view: dict[str, Any], clock: Clock) -> str:
-    nxt = view.get("next_call")
-    tg = view["connections"].get("telegram") or {}
-    if view["dials_paused"]["enabled"]:
-        return ('<div class="feature tone-warn-bar"><p class="mono label"><span class="dot warn"></span>Heads-ups paused</p>'
-                '<p class="feature-big">Paused</p><p class="muted">VALR keeps researching but won\'t message you before '
-                'interviews. "Call me now" still works.</p>'
-                '<button class="btn" type="button" data-action="dials" data-paused="false">Resume heads-ups</button></div>')
-    if tg.get("linked"):
-        warn = '<p class="small muted"><span class="dot live"></span> Telegram connected</p>'
-    elif tg.get("configured"):
-        warn = ('<p class="small tone-warn">Telegram isn\'t connected yet, so no heads-up can be sent. '
-                'Send the bot this code:</p><p><button class="btn small" type="button" data-action="tgcode">'
-                'Show /start code</button><code class="mono" data-tg-code hidden></code></p>')
-    else:
-        warn = ('<p class="small tone-warn">Telegram isn\'t set up yet, so no heads-up can be sent '
-                '(the owner runs deploy/install-telegram.sh with the bot token).</p>')
-    if not nxt:
-        return ('<div class="feature"><p class="mono label">Next heads-up</p><p class="feature-big">None yet</p>'
-                '<p class="muted">No interviews in the next 8 days. VALR messages you on Telegram 30 minutes '
-                f'before each one; tap 📞 to get the briefing call.</p>{warn}</div>')
-    block = next((b for b in view["blocks"] if b["id"] == nxt["block"]), None)
-    n = len(block["slots"]) if block else 1
-    who = ", ".join(dict.fromkeys(s["company"] or s["title"] for s in block["slots"])) if block else nxt["label"]
-    return f"""
-<div class="feature">
-  <p class="mono label"><span class="dot live"></span>Next heads-up on Telegram</p>
-  <p class="feature-big num">Heads-up at {clock.time(nxt['at'])}</p>
-  <p class="feature-rel">{e(clock.day(nxt['at']))} · {countdown(nxt['at'])}</p>
-  <p>Before your {'interview' if n == 1 else f'{n} back-to-back interviews'} with <b>{e(who)}</b>.</p>
-  <p class="muted small">Tap 📞 Call me now or ⏰ In 10 min for the briefing call. No reply, no call.</p>{warn}
-</div>"""
-
-
-def next_call_card(view: dict[str, Any], clock: Clock) -> str:
-    if telegram_mode(view):
-        return heads_up_card(view, clock)
-    nxt = view.get("next_call")
-    paused = view["dials_paused"]["enabled"]
-    if not view.get("dial_env"):
-        return ('<div class="feature"><p class="mono label">Briefing calls</p><p class="feature-big">Off</p>'
-                '<p class="muted">Calls are switched off on the server. VALR still researches each interview; '
-                'you can read the briefings below.</p></div>')
-    if paused:
-        return ('<div class="feature tone-warn-bar"><p class="mono label"><span class="dot warn"></span>Briefing calls paused</p>'
-                '<p class="feature-big">Paused</p><p class="muted">VALR keeps researching but won\'t call you before '
-                'interviews. Calls you ask for yourself still come through.</p>'
-                '<button class="btn" type="button" data-action="dials" data-paused="false">Resume calls</button></div>')
-    if not nxt:
-        return ('<div class="feature"><p class="mono label">Next briefing call</p><p class="feature-big">None yet</p>'
-                '<p class="muted">No interviews in the next 8 days. When an invite lands on your calendar, '
-                'VALR plans a call for 30 minutes before it.</p></div>')
-    block = next((b for b in view["blocks"] if b["id"] == nxt["block"]), None)
-    n = len(block["slots"]) if block else 1
-    who = ", ".join(dict.fromkeys(s["company"] or s["title"] for s in block["slots"])) if block else nxt["label"]
-    retry = "One call, no retries: if you miss it, call VALR or tap \"Call me now\"."
-    return f"""
-<div class="feature">
-  <p class="mono label"><span class="dot live"></span>Next briefing call</p>
-  <p class="feature-big num">{clock.time(nxt['at'])}</p>
-  <p class="feature-rel">{e(clock.day(nxt['at']))} · {countdown(nxt['at'])}</p>
-  <p>Before your {'interview' if n == 1 else f'{n} back-to-back interviews'} with <b>{e(who)}</b>.</p>
-  <p class="muted small">{retry}</p>
-</div>"""
-
-
-def hero(view: dict[str, Any], clock: Clock) -> str:
-    number = view["setup"]["valr_number"]
-    paused = view["dials_paused"]["enabled"]
-    noun = "heads-ups" if telegram_mode(view) else "calls"
-    pause = ("" if not view.get("dial_env") and not telegram_mode(view) else
-             f'<button class="btn" type="button" data-action="dials" data-paused="{"false" if paused else "true"}" '
-             f'aria-pressed="{"true" if paused else "false"}">{"Resume " + noun if paused else "Pause " + noun}</button>')
-    lede = ("VALR messages you on Telegram 30 minutes before each interview; tap to get a briefing call: "
-            "who you're meeting, what this round is like, the pay band, and what to practise."
-            if telegram_mode(view) else
-            "VALR calls you 30 minutes before each interview with a researched briefing: who you're meeting, "
-            "what this round is like, the pay band, and what to practise.")
-    return f"""
-<section class="hero" id="top" aria-labelledby="hero-title">
-  <div class="hero-copy">
-    {eyebrow("00", "Interview copilot")}
-    <h1 id="hero-title">Walk into every interview <span class="dim">already briefed<span class="accent">.</span></span></h1>
-    <p class="lede">{lede}</p>
-    <div class="actions">
-      <a class="btn primary" href="tel:{e(number)}"><span aria-hidden="true">☎</span> Call VALR now <span class="btn-sub num">{e(phone_label(number))}</span></a>
-      {pause}
-      <button class="btn" type="button" data-action="callnow">Call me now</button>
-      <a class="btn" href="/call">Talk in the browser</a>
-      <button class="btn" type="button" data-action="sync">Sync calendar</button>
-    </div>
-  </div>
-  {next_call_card(view, clock)}
-</section>"""
-
-
-# Set-up checklist: every step is a link or button that does the step, with its status.
-
-STEP_STATE = {"done": ("Done", "ok"), "todo": ("To do", "info"), "attention": ("Needs attention", "warn")}
-
-
-def setup(view: dict[str, Any]) -> str:
-    from app.notetakers import ui as notetaker_ui
-    google = view["connections"]["google"]
-    tg = view["connections"].get("telegram") or {}
-    takers = (view.get("connections") or {}).get("notetakers") or {}
-    s = view["setup"]
-    number = phone_label(s["valr_number"])
-    g_done = google["state"] == "connected" and not google["expires_soon"]
-    g_text = {"reconnect_needed": "Google access expired. Reconnect so VALR can see new invites.",
-              "connected": "Connected. Google asks you to reconnect about once a week while the app is in testing."}
-    g_state = "done" if g_done else "attention" if google["state"] != "not_connected" else "todo"
-    g_action = ('<a class="btn small' + ("" if g_done else " primary") + '" href="/oauth/google/start">'
-                + ("Reconnect" if google["state"] != "not_connected" else "Connect Google") + "</a>"
-                + ("" if google["configured"] else
-                   '<span class="muted small"> Needs GOOGLE_OAUTH_CLIENT_ID/SECRET on the server first.</span>'))
-    required = [t for t in takers.values() if not t.get("optional")]  # Granola is optional.
-    on = [t["label"] for t in takers.values() if notetaker_ui.is_on(t)]
-    refused = any(t["state"] == "refused" for t in required) and not any(notetaker_ui.is_on(t) for t in required)
-    n_state = "attention" if refused else "done" if any(notetaker_ui.is_on(t) for t in required) else "todo"
-    n_text = (f"Connected: {', '.join(on)}. VALR scores each recorded interview and plays it back here."
-              if on else "Fathom (or a Fireflies history import): VALR learns from your recorded interviews, "
-                         "scores each one and plays it back here.")
-    steps = [("Connect Google", g_state,
-              g_text.get(google["state"], "So VALR can see your interview invites and the recruiters' emails about them. Read-only."),
-              g_action),
-             ("Connect a notetaker", n_state, n_text, notetaker_ui.summary_buttons(takers)
-              or '<a class="btn small" href="#notetakers">Notetakers</a>')]
-    if telegram_mode(view):
-        if tg.get("linked"):
-            steps.append(("Connect Telegram", "done", "Connected: heads-ups arrive in your VALR chat.",
-                          '<button class="btn small ghost" type="button" data-action="tglink">Link again</button>'
-                          '<code class="mono" data-tg-code hidden></code>'))
-        elif tg.get("configured"):
-            steps.append(("Connect Telegram", "todo",
-                          "VALR sends the heads-up there 30 minutes before each interview; you tap to get the call.",
-                          '<button class="btn small primary" type="button" data-action="tglink">Open Telegram</button>'
-                          '<code class="mono" data-tg-code hidden></code>'))
-        else:
-            steps.append(("Connect Telegram", "attention", "The VALR bot isn't installed on the server yet.",
-                          '<details class="pop"><summary class="btn small">How to set it up</summary><p class="small">'
-                          'Run <code>deploy/install-telegram.sh</code> on the server with the bot token from '
-                          '@BotFather. Then come back here and press "Open Telegram".</p></details>'))
-    steps += [
-        ("Confirm your phone number", "done" if s["phone_on_file"] else "todo",
-         "VALR only ever calls the number on file, never anyone else.",
-         '<details class="pop"><summary class="btn small">' + ("How VALR checks it" if s["phone_on_file"] else "How to add it")
-         + '</summary><p class="small">VALR knows it is you by caller ID: a call from the number in the server '
-           'setting <code>VALR_OWNER_PHONE</code> gets your calendar, briefings and profile; every other caller '
-           'gets the general assistant. ' + ("A number is on file. " if s["phone_on_file"] else
-                                            "No number is on file yet: add it to the server settings and restart VALR. ")
-         + f'To check it, call <a href="tel:{e(s["valr_number"])}">{e(number)}</a> and ask '
-           '"what\'s on my calendar today?": VALR answers with your interviews only when it recognises you.</p></details>'),
-        ("Make a test call", "done" if s["test_call_done"] else "todo",
-         f"Call {number} from your phone and ask \"what's on my calendar today?\"",
-         f'<a class="btn small{"" if s["test_call_done"] else " primary"}" href="tel:{e(s["valr_number"])}">'
-         f'{"Call again" if s["test_call_done"] else "Call VALR"} <span class="num">{e(number)}</span></a>'),
-    ]
-    done = sum(1 for _, state, _, _ in steps if state == "done")
-    items = "".join(f"""
-<li class="step{' done' if state == 'done' else ''}">
-  <span class="step-mark mono" aria-hidden="true">{'✓' if state == 'done' else f'0{i}'}</span>
-  <div class="step-body"><p class="step-title">{e(title)} {chip(*STEP_STATE[state])}</p>
-  <p class="muted small">{e(text)}</p></div>
-  <div class="step-action">{action}</div>
-</li>""" for i, (title, state, text, action) in enumerate(steps, 1))
-    open_ = "" if done == len(steps) else " open"
-    return f"""
-<section class="section setup" id="setup" aria-labelledby="setup-title">
-  <details class="setup-box"{open_}>
-    <summary>{eyebrow("01", "Get set up")}<h2 id="setup-title">{'You are all set' if done == len(steps) else 'Finish setting up'}
-      <span class="progress mono">{done}/{len(steps)}</span></h2></summary>
-    <ol class="steps">{items}</ol>
-    <h3 class="sub-title">Notetakers</h3>
-    {notetaker_ui.cards(takers)}
-  </details>
-</section>"""
-
-
-# Upcoming interviews.
-
-def people_line(slot: dict[str, Any]) -> str:
-    names = [p["name"] for p in slot["interviewers"] if p["status"] not in ("skipped_hr", "declined")]
-    if not names:
-        return ""
-    shown = ", ".join(names[:3]) + (f" +{len(names) - 3}" if len(names) > 3 else "")
-    return f'<span class="iv-people small">With {e(shown)}</span>'
-
-
 def status_label(slot: dict[str, Any], clock: Clock) -> str:
     label, tone = INTERVIEW_STATUS.get(slot["status"], (slot["status"], "muted"))
     if slot["status"] == "scheduled" and slot.get("research_due"):
         label = f"Research at {clock.local(slot['research_due']).strftime('%I:%M %p').lstrip('0')}"
     return chip(label, tone)
 
-
-def interview_row(slot: dict[str, Any], clock: Clock) -> str:
-    return f"""
-<li class="iv" data-ref="{e(slot['ref'])}">
-  <a class="iv-link" href="#iv-{e(slot['ref'])}" data-open="{e(slot['ref'])}">
-    <span class="iv-time num">{clock.time(slot['start'])}</span>
-    <span class="iv-main">
-      <span class="iv-company">{e(slot['company'] or slot['title'])}</span>
-      <span class="iv-title muted small">{e(slot['title']) if slot['company'] else ''}</span>
-      {people_line(slot)}
-    </span>
-    <span class="iv-side">{status_label(slot, clock)}<span class="iv-open mono">Open briefing →</span></span>
-  </a>
-</li>"""
-
-
-def upcoming(view: dict[str, Any], clock: Clock) -> str:
-    google = view["connections"]["google"]["state"]
-    blocks = view.get("blocks") or []
-    if "timeline" in view.get("errors", []):
-        body = ('<div class="empty error" role="alert"><p class="empty-title">We couldn\'t load your interviews just now.</p>'
-                '<p class="muted">VALR keeps researching and calling in the background; this page only failed to read them.</p>'
-                '<button class="btn small" type="button" data-action="reload">Try again</button></div>')
-    elif not blocks and google != "connected":
-        body = ('<div class="empty"><p class="empty-title">Connect your Google Calendar to see your interviews here.</p>'
-                '<p class="muted">VALR reads invites only; it never changes your calendar.</p>'
-                '<a class="btn small" href="/oauth/google/start">Connect Google</a></div>')
-    elif not blocks:
-        body = ('<div class="empty"><p class="empty-title">No interviews in the next 8 days.</p>'
-                '<p class="muted">New invites show up here within a minute of landing on your calendar.</p></div>')
-    else:
-        days: dict[str, list[str]] = {}
-        for block in blocks:
-            day = f"{clock.day(block['start'])} · {clock.local(block['start']).strftime('%a %d %b')}"
-            label, tone = CALL_STATUS.get(block["state"], (block["state"], "muted"))
-            if block["paused"] and block["state"] in ("scheduled", "waiting"):
-                label, tone = ("Paused: no heads-up" if telegram_mode(view) else "Paused: no call"), "warn"
-            sent = block.get("heads_up")
-            if sent:
-                label, tone = HEADS_UP.get(sent["outcome"], (sent["outcome"], "muted"))
-                label = label.format(at=clock.local(sent["call_at"]).strftime("%I:%M %p").lstrip("0")
-                                     if sent.get("call_at") else "–")
-            n = len(block["slots"])
-            covers = f" · covers {n} back-to-back interviews" if n > 1 else ""
-            what = "Telegram heads-up" if telegram_mode(view) else "Briefing call"
-            days.setdefault(day, []).append(f"""
-<div class="group">
-  <p class="call-line"><span class="call-icon" aria-hidden="true">☎</span>
-    <span class="call-what">{what} at <b>{clock.time(block['call_at'])}</b>{covers}</span>
-    <span class="muted small">{countdown(block['call_at'], short=True)}</span>{chip(label, tone)}</p>
-  <ul class="ivs">{''.join(interview_row(s, clock) for s in block['slots'])}</ul>
-</div>""")
-        body = "".join(f'<div class="day"><h3 class="day-title mono">{e(day)}</h3>{"".join(items)}</div>'
-                       for day, items in days.items())
-    return f"""
-<section class="section" id="upcoming" aria-labelledby="upcoming-title">
-  {eyebrow("02", "Upcoming")}
-  <h2 id="upcoming-title" class="section-title">Your interviews <span class="dim">this week.</span></h2>
-  {body}
-</section>"""
-
-
-# One interview, in detail.
 
 def found_block(data: dict[str, Any] | None, empty: str) -> str:
     if not data or not (data.get("summary") or data.get("claims")):
@@ -413,125 +144,15 @@ def found_block(data: dict[str, Any] | None, empty: str) -> str:
             + (f'<ul class="facts">{claims}</ul>' if claims else ""))
 
 
-def pay_snapshot(pay: dict[str, Any], target: dict[str, Any] | None) -> str:
-    market = pay.get("range")
-    rows = ""
-    verdict = ""
-    numbers = (market and target and market.get("unit") == target.get("unit")
-               and all(isinstance(x, (int, float)) for x in (market.get("min"), market.get("max"),
-                                                             target.get("min"), target.get("max"))))
-    if numbers:
-        low = min(market["min"], target["min"])
-        high = max(market["max"], target["max"])
-        span = (high - low) or 1
-
-        def bar(name: str, r: dict[str, Any], cls: str) -> str:
-            left = (r["min"] - low) / span * 100
-            width = max((r["max"] - r["min"]) / span * 100, 2)
-            return (f'<div class="range-row"><span class="range-name">{e(name)}</span><span class="range-track">'
-                    f'<i class="{cls}" style="left:{left:.1f}%;width:{width:.1f}%"></i></span>'
-                    f'<span class="range-val num">{e(r["min"])}–{e(r["max"])} {e(r["unit"])}</span></div>')
-        rows = bar("Their band", market, "market") + bar("Your target", target, "target")
-        if target["min"] > market["max"]:
-            verdict = "Your target is above their band: ask early whether the role has room, and lead with scope."
-        elif target["max"] < market["min"]:
-            verdict = "Their band is above your target: let them name a number first."
-        elif target["max"] > market["max"]:
-            verdict = "Your target overlaps the top of their band: anchor on scope and impact, not the number."
-        else:
-            verdict = "Your target sits inside their band: defer the number and ask for their range first."
-    elif market:
-        rows = f'<p class="num">Their band: <b>{e(market.get("min"))}–{e(market.get("max"))} {e(market.get("unit"))}</b></p>'
-    claims = "".join(f"<li>{e(c['claim'])} {link(c['url']) if c['url'] else ''}</li>" for c in pay.get("claims") or [])
-    if not rows and not claims:
-        return '<p class="muted small">No pay information found for this company yet.</p>'
-    source = link(market["source_url"], "source") if market and market.get("source_url") else ""
-    return (f'<div class="ranges">{rows}</div>' + (f'<p class="verdict">{e(verdict)} {source}</p>' if verdict else "")
-            + (f'<ul class="facts">{claims}</ul>' if claims else "")
-            + '<p class="muted small">Only you can see this page.</p>')
-
-
-def detail(slot: dict[str, Any], view: dict[str, Any], clock: Clock) -> str:
-    d = slot["detail"]
-    brief = slot.get("brief")
-    if brief:
-        quality = {"partial": "Some research came back thin, so this one is shorter.",
-                   "apologized": "VALR couldn't find anything reliable for this one."}.get(brief.get("quality") or "", "")
-        brief_html = (f'<blockquote class="spoken">{e(brief["spoken"])}</blockquote>'
-                      + (f'<p class="muted small">{e(quality)}</p>' if quality else ""))
-        notes = "".join(
-            f"<li>{e(n['fact'])}"
-            + (" " + chip("sensitive", "warn", "VALR only says this if you ask") if n["sensitive"] else "")
-            + (" " + chip("from your inbox", "info") if n["private"] else "")
-            + "".join(f" {link(u)}" for u in n["sources"]) + "</li>" for n in brief["notes"])
-    else:
-        brief_html = (f'<p class="muted">The briefing is written after research, around '
-                      f'{clock.time(slot.get("research_due"))}. Check back then, or refresh the research now.</p>')
-        notes = ""
-    people = "".join(
-        f'<li class="person"><span class="avatar" aria-hidden="true">{e((p["name"][:1] or "?").upper())}</span>'
-        f'<span class="who">{e(p["name"])}</span>'
-        + (f'<a class="mono small email" href="mailto:{e(p["email"])}">{e(p["email"])}</a>' if p.get("email") else "")
-        + f'{chip(*PERSON.get(p["status"], (p["status"], "muted")))}</li>'
-        for p in slot["interviewers"]) or '<li class="muted small">No one else is on the invite.</li>'
-    questions = "".join(f"<li>{e(q)}</li>" for q in d["likely_questions"])
-    perf = view["performance"]
-    prep = d["prep"] or [f["action"] for f in perf.get("focus_this_week") or []]
-    prep_source = "For this round" if d["prep"] else "From your recent interviews"
-    checklist = "".join(f'<li><label><input type="checkbox" data-check="{e(slot["ref"])}:{i}"> <span>{e(x)}</span></label></li>'
-                        for i, x in enumerate(prep)) or '<li class="muted small">Nothing yet.</li>'
-    ref = e(slot["ref"])
-    return f"""
-<dialog class="drawer" id="iv-{ref}" aria-labelledby="t-{ref}">
-  <article class="drawer-inner">
-    <header class="drawer-head">
-      <div>
-        <p class="mono label">{e(clock.day(slot['start']))} · {clock.time(slot['start'], zone=False)} – {clock.time(slot['end'])}</p>
-        <h2 id="t-{ref}">{e(slot['company'] or slot['title'])}</h2>
-        <p class="muted">{e(slot['title']) if slot['company'] else ''}</p>
-        <p>{status_label(slot, clock)}</p>
-      </div>
-      <button class="close" type="button" data-close aria-label="Close">✕</button>
-    </header>
-    {recording_section(slot)}
-    <section class="d-sec"><h3>The briefing</h3><p class="muted small">What VALR will tell you on the call.</p>{brief_html}</section>
-    <section class="d-sec"><h3>Who you're meeting</h3><ul class="people">{people}</ul>{found_block(d['people'], '')}</section>
-    <section class="d-sec"><h3>What to expect in this round</h3>{found_block(d['round'], 'Nothing found about this round yet.')}</section>
-    <section class="d-sec"><h3>Likely questions</h3>{f'<ol class="questions">{questions}</ol>' if questions else '<p class="muted small">VALR lists likely questions once it has researched this round.</p>'}</section>
-    <section class="d-sec"><h3>Pay snapshot</h3>{pay_snapshot(d['pay'], view.get('pay_target'))}</section>
-    <section class="d-sec"><h3>Prep checklist</h3><p class="muted small">{e(prep_source)} · ticks stay on this device</p><ul class="checklist">{checklist}</ul></section>
-    <section class="d-sec"><h3>From your emails &amp; past rounds</h3>{found_block(d['from_you'], 'Nothing in your inbox or recordings about this company yet.')}</section>
-    <section class="d-sec"><h3>The company</h3>{found_block(d['company'], 'Nothing found about the company yet.')}</section>
-    {f'<section class="d-sec"><h3>Notes for follow-up questions</h3><ul class="facts">{notes}</ul></section>' if notes else ''}
-    <footer class="drawer-foot">
-      <button class="btn small" type="button" data-action="refresh" data-ref="{ref}">Refresh research</button>
-      <span class="muted small">Runs everything again now (a few minutes). Last updated {clock.when(slot['updated_at'])}.</span>
-    </footer>
-  </article>
-</dialog>"""
-
-
-def recording_section(slot: dict[str, Any]) -> str:
-    """Past interviews (status done) look for their recording when opened."""
-    if slot["status"] != "done":
-        return ""
-    from app.notetakers import ui as notetaker_ui
-    return notetaker_ui.recording_section(slot["ref"])
-
-
-# Performance.
-
 BADGE = {"improving": ("Improving", "ok", "↗"), "flat": ("Steady", "info", "→"),
          "declining": ("Slipping", "bad", "↘"), "insufficient_data": ("Too early to tell", "muted", "·")}
+
+
 VERDICT = {"improved": ("Improved", "ok"), "same": ("No change yet", "warn"), "worse": ("Getting worse", "bad"),
            "mixed": ("Mixed", "info")}
+
+
 OUTCOME = {"advanced": ("Advanced", "ok"), "rejected": ("Not advanced", "bad"), "unknown": ("Outcome unknown", "muted")}
-
-
-def watch(card: dict[str, Any], view: dict[str, Any]) -> str:
-    from app.notetakers import ui as notetaker_ui
-    takers = (view.get("connections") or {}).get("notetakers") or {}
-    return notetaker_ui.watch_button(card.get("id") or "", {k for k, v in takers.items() if notetaker_ui.is_on(v)})
 
 
 def badge_chip(badge: str) -> str:
@@ -550,246 +171,6 @@ def short_day(date: str) -> str:
         return date
 
 
-def quote_html(q: dict[str, Any] | None) -> str:
-    """A real quote with who said it, where and when."""
-    if not q:
-        return ""
-    who = "You" if q["speaker"] == "you" else "Interviewer"
-    where = " · ".join(x for x in (q["company"], short_day(q["date"]) if q["date"] else "", q["at"]) if x)
-    return (f'<blockquote class="cq cq-{e(q["speaker"])}"><p>“{e(q["quote"])}”</p>'
-            f'<footer class="mono small">{e(who)}{(" · " + e(where)) if where else ""}</footer></blockquote>')
-
-
-def coach_html(c: dict[str, Any]) -> str:
-    """The coach's read: plain language first, numbers later."""
-    working = "".join(f'<li><p class="c-head">{e(w["headline"])}</p><p class="muted">{e(w["detail"])}</p>'
-                      f'{quote_html(w["example"])}</li>' for w in c["working"])
-    costing = "".join(f"""
-<article class="cost">
-  <p class="mono label">Costing you · {i}</p>
-  <h4>{e(x["headline"])}</h4>
-  {f'<p class="muted">{e(x["plain_meaning"])}</p>' if x["plain_meaning"] else ''}
-  <p><b>Why it matters.</b> {e(x["why_it_matters"])}</p>
-  {quote_html(x["example"])}
-  {f'<p class="small muted">{e(x["what_happened"])}</p>' if x["what_happened"] else ''}
-  <p><b>Do instead.</b> {e(x["do_instead"])}</p>
-  {f'<p class="say"><span class="mono">Say this instead</span>{e(x["model_rephrase"])}</p>' if x["model_rephrase"] else ''}
-</article>""" for i, x in enumerate(c["costing"], 1))
-    drills = "".join(f'<li><span class="f-num mono">0{i}</span><div><p class="f-action">{e(f["drill"])}</p>'
-                     f'<p class="small">{e(f["how"])}</p><p class="muted small">Done when: {e(f["done_when"])}</p></div></li>'
-                     for i, f in enumerate(c["focus"], 1))
-    iv = c["interviewers"]
-    reacted = ""
-    if iv["leaned_in"] or iv["disengaged"]:
-        reacted = (f'<div class="react"><h3 class="sub-title">How interviewers reacted</h3>'
-                   + (f'<p><span class="chip tone-ok">Leaned in</span> {e(iv["leaned_in"])}</p>' if iv["leaned_in"] else "")
-                   + (f'<p><span class="chip tone-bad">Disengaged</span> {e(iv["disengaged"])}</p>' if iv["disengaged"] else "")
-                   + "".join(quote_html(q) for q in iv["examples"]) + "</div>")
-    neg = c["negotiation"]
-    scripts = "".join(f'<li><p class="c-head">{e(x["moment"])}</p><p class="say"><span class="mono">Say</span>{e(x["say"])}</p></li>'
-                      for x in neg["scripts"])
-    negotiation = (f'<details class="neg" open><summary><h3 class="sub-title">Salary conversations: what to say</h3></summary>'
-                   f'<p class="muted">{e(neg["read"])}</p><ul class="scripts">{scripts}</ul>'
-                   f'<p class="muted small">Scripts use placeholders on purpose: VALR never writes your numbers here.</p></details>'
-                   if neg["read"] or scripts else "")
-    stale = '<p class="muted small">This read is from before your latest data; it refreshes on the next import.</p>' if c["stale"] else ""
-    return f"""
-<div class="coach">
-  <p class="mono label">Where you stand</p>
-  <p class="stand">{e(c["where_you_stand"])}</p>{stale}
-  <div class="two">
-    <div><h3 class="sub-title">What's working</h3><ul class="working">{working}</ul></div>
-    <div>{reacted}</div>
-  </div>
-  <h3 class="sub-title">What's costing you</h3>
-  <div class="costs">{costing}</div>
-  <div class="focus"><h3 class="sub-title">This week's focus</h3><ol class="focus-list">{drills}</ol></div>
-  {negotiation}
-</div>"""
-
-
-def impression_html(imp: dict[str, Any] | None) -> str:
-    """The interviewer's side of one interview: cues with their evidence."""
-    if not imp:
-        return ""
-    if imp["coverage"] == "derived":
-        share = f"You spoke {imp['talk_share'] * 100:.0f}% of the words." if imp["talk_share"] is not None else ""
-        return (f'<details class="qs imp"><summary>How the interviewer reacted</summary>'
-                f'<p class="small muted">The transcript is no longer available, so only the talk balance is known. {e(share)}</p></details>')
-    parts = imp["components"]
-    names = (("engagement", "Engagement"), ("positive", "Positive signals"), ("negative", "Warning signs"),
-             ("next_steps", "Next steps"), ("balance", "Talk balance"))
-    bars = "".join(f'<li><span class="sb-name">{e(n)}</span><span class="sb-track"><i class="{"neg" if k == "negative" else ""}" '
-                   f'style="width:{(parts[k] or 0) * 10:.0f}%"></i></span><span class="sb-val num">{score(parts[k])}</span></li>'
-                   for k, n in names if parts.get(k) is not None)
-    cues = "".join(f'<li class="cue"><p class="q-head"><span class="chip tone-{c["tone"]}">{e(c["kind"])}</span>'
-                   f'<span class="mono small muted">{("at " + e(c["at"])) if c["at"] else ""}</span></p><p class="q-quote">“{e(c["quote"])}”</p>'
-                   + (f'<p class="small muted">After: {e(c["after"])}</p>' if c["after"] else "") + "</li>"
-                   for c in imp["cues"])
-    facts = " · ".join(x for x in (
-        f"You spoke {imp['talk_share'] * 100:.0f}% of the words" if imp["talk_share"] is not None else "",
-        imp["next_step"],
-        (f"ended at {imp['length_vs_slot'] * 100:.0f}% of the scheduled time" if imp["length_vs_slot"] is not None
-         and imp["length_vs_slot"] < 0.75 else "")) if x)
-    return f"""
-<details class="qs imp"><summary>How the interviewer reacted · {score(imp["score"])}/10</summary>
-  {f'<p class="small"><span class="chip tone-ok">Leaned in</span> {e(imp["leaned_in"])}</p>' if imp["leaned_in"] else ''}
-  {f'<p class="small"><span class="chip tone-bad">Disengaged</span> {e(imp["disengaged"])}</p>' if imp["disengaged"] else ''}
-  <p class="small muted">{e(facts)}</p>
-  <ul class="score-bars">{bars}</ul>
-  {f'<ul class="cues">{cues}</ul>' if cues else ''}
-</details>"""
-
-
-def anchor(interview_id: str) -> str:
-    return "past-" + "".join(ch if ch.isalnum() else "-" for ch in interview_id)
-
-
-REPORT_STATUS = {"sent": ("Sent on Telegram", "ok"), "pending_telegram": ("Report pending: link Telegram", "warn"),
-                 "queued": ("Queued", "info"), "processing": ("Scoring now", "info"), "failed": ("Failed", "bad")}
-
-
-def post_call_html(pc: dict[str, Any] | None, clock: Clock) -> str:
-    """Post-call reports: say when some wait for Telegram, and list the latest."""
-    if not pc or not pc.get("recent"):
-        return ""
-    note = (f'<p class="verdict small">{pc["pending"]} post-call report{"s" if pc["pending"] != 1 else ""} '
-            f'pending: link Telegram (Set up) and VALR sends {"them" if pc["pending"] != 1 else "it"}.</p>'
-            if pc.get("pending") else "")
-    rows = "".join(f'<li><span>{e(r["title"] or "Interview")}</span><span>{chip(*REPORT_STATUS.get(r["status"], (r["status"], "muted")))} '
-                   f'<span class="muted small">{clock.when(r["updated_at"]) if r.get("updated_at") else ""}</span></span></li>'
-                   for r in pc["recent"])
-    return (f'<div class="post-call"><h3 class="sub-title">Post-call reports</h3>{note}'
-            f'<ul class="kv-rows">{rows}</ul></div>')
-
-
-def performance(view: dict[str, Any], clock: Clock) -> str:
-    perf = view["performance"]
-    head = f"""{eyebrow("03", "Performance")}
-  <h2 id="perf-title" class="section-title">How your interviews <span class="dim">are going.</span></h2>"""
-    if not perf["available"]:
-        return f"""
-<section class="section" id="performance" aria-labelledby="perf-title">{head}
-  <div class="empty"><p class="empty-title">Your scores appear after your first recorded interview.</p>
-  <p class="muted">Connect a notetaker (Fathom, Fireflies or Granola) and record your interviews; VALR scores each one on the same rubric (out of 10)
-  and shows what is improving and what to practise.</p></div>
-</section>"""
-    overall = perf["series"]["overall"]
-    last = overall["points"][-1]["ma3"] if overall["points"] else None
-    most, risk = perf.get("most_improved"), perf.get("biggest_risk")
-    most_html = (f'<p class="tile-mid">{e(most["label"])}</p>'
-                 + (chip(f"↗ +{most['change']:.1f}", "ok") if most.get("change") is not None else "")
-                 + (f'<p class="muted small">{score(most["first"])} → {score(most["last"])} out of 10</p>'
-                    if most.get("first") is not None and most.get("last") is not None else "")) if most else \
-        '<p class="tile-mid">–</p><p class="muted small">Needs 3 interviews on the same skill.</p>'
-    risk_html = (f'<p class="tile-mid">{e(risk["label"])}</p>'
-                 f'<p class="muted small">Recent average {score(risk["latest"])}/10'
-                 + (f", {risk['per_30d']:+.1f} a month" if risk.get("per_30d") is not None else "") + "</p>") if risk else \
-        '<p class="tile-mid">Nothing slipping</p>'
-    tiles = f"""
-<div class="tiles">
-  <div class="tile"><p class="mono label">Overall · average of last 3</p>
-    <p class="tile-big num">{score(last)}<span class="of">/10</span></p>{badge_chip(overall['badge'])}</div>
-  <div class="tile"><p class="mono label">Most improved</p>{most_html}</div>
-  <div class="tile risk"><p class="mono label">Biggest risk</p>{risk_html}</div>
-</div>"""
-    focus = "".join(f'<li><span class="f-num mono">0{i}</span><div><p class="f-action">{e(f["action"])}</p>'
-                    f'<p class="muted small">{e(f["why"])}</p></div></li>'
-                    for i, f in enumerate(perf.get("focus_this_week") or [], 1))
-    coach = perf.get("coach")
-    focus_html = (f'<div class="focus"><h3 class="sub-title">Focus this week</h3><ol class="focus-list">{focus}</ol></div>'
-                  if focus and not coach else "")
-    dim_buttons = "".join(
-        f'<button type="button" class="pick" data-dim="{e(d["key"])}" aria-pressed="false">{e(d["label"])} '
-        f'<span class="pick-badge" aria-hidden="true">{BADGE.get(perf["series"].get(d["key"], {}).get("badge", ""), BADGE["insufficient_data"])[2]}</span></button>'
-        for d in perf["dimensions"] if perf["series"].get(d["key"], {}).get("n"))
-    weak = "".join(f'<li class="weak"><span class="weak-topic">{e(t["topic"])}</span>{chip(*VERDICT[t["verdict"]])}'
-                   f'<span class="muted small">{t["seen"]} interview{"s" if t["seen"] != 1 else ""}'
-                   f'{(" · " + e(t["last_note"])) if t["last_note"] else ""}</span></li>'
-                   for t in perf.get("recurring_weak_topics") or [])
-    rounds = "".join(f'<li><span>{e(r["round"])}</span><span class="num">{score(r["overall"])}<span class="muted">/10 · {e(r["n"])}</span></span></li>'
-                     for r in perf.get("by_round_type") or [])
-    labels = {d["key"]: d["label"] for d in perf["dimensions"]}
-    cards = []
-    for card in reversed(perf["interviews"]):
-        bars = "".join(f'<li><span class="sb-name">{e(labels.get(k, k))}</span><span class="sb-track">'
-                       f'<i style="width:{v * 10:.0f}%"></i></span><span class="sb-val num">{v:.1f}</span></li>'
-                       if v is not None else
-                       f'<li class="na"><span class="sb-name">{e(labels.get(k, k))}</span><span class="sb-track"></span>'
-                       f'<span class="sb-val num">n/a</span></li>'
-                       for k, v in card["dimensions"].items())
-        qs = "".join(
-            f'<li class="q"><p class="q-text">{e(q["question"])}</p>'
-            + (f'<p class="small q-good"><span class="mono">Went well</span> {e(q["went_well"])}</p>' if q["went_well"] else "")
-            + (f'<p class="small q-improve"><span class="mono">Improve</span> {e(q["improve"])}</p>' if q["improve"] else "")
-            + (f'<p class="small q-better"><span class="mono">Try</span> {e(q["hint"])}</p>' if q["hint"] else "")
-            + "</li>" for q in card["questions"])
-        nxt = "".join(f"<li>{e(x)}</li>" for x in card["do_next_time"])
-        stage = f" · {e(card['stage'])}" if card["stage"] else ""
-        cards.append(f"""
-<article class="card-score" id="{e(anchor(card['id']))}">
-  <p class="mono label">{e(clock.short_date(card['date']) if card['date'] else '')} · {e(card['round'])}</p>
-  <h4>{e(card['company'] or 'Interview')}<span class="muted small">{stage}</span></h4>
-  <p class="score-big num">{score(card['overall'])}<span class="of">/10</span></p>
-  <div class="card-badges">{chip(*OUTCOME[card['outcome']], card['outcome_evidence'])}{watch(card, view)}</div>
-  <ul class="score-bars">{bars}</ul>
-  {f'<details class="qs"><summary>Next time ({len(card["do_next_time"])})</summary><ul class="facts">{nxt}</ul></details>' if nxt else ''}
-  {f'<details class="qs"><summary>Question feedback ({len(card["questions"])})</summary><ul>{qs}</ul></details>' if qs else ''}
-  {impression_html(card.get("impression"))}
-</article>""")
-    data = json.dumps({"series": perf["series"],
-                       "dimensions": [{"key": d["key"], "label": d["label"],
-                                       "subs": [{"key": x["key"], "label": x["label"]} for x in d["subs"]
-                                                if perf["series"].get(x["key"], {}).get("n")]}
-                                      for d in perf["dimensions"]]}).replace("<", "\\u003c")
-    trend_text = f'<p class="trend-text">{e(perf["trend_text"])}</p>' if perf.get("trend_text") else ""
-    side = ""
-    if weak or rounds:
-        side = (f'<div class="two">'
-                + (f'<div><h3 class="sub-title">Topics that keep coming up</h3><ul class="weak-list">{weak}</ul></div>' if weak else "")
-                + (f'<div><h3 class="sub-title">By round type</h3><ul class="kv-rows">{rounds}</ul></div>' if rounds else "")
-                + "</div>")
-    imp = perf.get("impressions")
-    imp_html = ""
-    if imp:
-        by = imp["by_outcome"]
-        rows_ = "".join(f'<li><span>{e(OUTCOME[k][0])}</span><span class="num">{score(by[k]["mean"])}'
-                        f'<span class="muted">/10 · {e(by[k]["n"])}</span></span></li>' for k in ("advanced", "rejected", "unknown")
-                        if by[k]["n"])
-        imp_html = (f'<div><h3 class="sub-title">Interviewer impression by outcome</h3><ul class="kv-rows">{rows_}</ul>'
-                    + (f'<p class="muted small">Tracks your rubric score with r = {imp["r_with_score"]:.2f} '
-                       f'over {imp["n"]} interviews with transcripts.</p>' if imp["r_with_score"] is not None else "")
-                    + f'<p class="muted small">{e(imp["note"])}</p></div>')
-    numbers = f"""
-<details class="numbers"{'' if coach else ' open'}><summary><h3 class="sub-title">The numbers behind this</h3></summary>
-  {tiles}
-  {trend_text}
-  {f'<div class="two">{imp_html}</div>' if imp_html else ''}
-</details>"""
-    return f"""
-<section class="section" id="performance" aria-labelledby="perf-title">{head}
-  {coach_html(coach) if coach else ''}
-  {focus_html}
-  {post_call_html(view.get("post_call"), clock)}
-  {numbers}
-  <div class="chart-box">
-    <div class="chart-head"><h3 class="sub-title">Trend</h3><p class="muted small">Dots are single interviews, the line is the
-      average of the last 3, out of 10. Skills a round didn't test are left out.</p></div>
-    <div class="picker" role="group" aria-label="Choose what to chart"><button type="button" class="pick" data-dim="overall" aria-pressed="true">Overall</button>{dim_buttons}</div>
-    <div class="picker subs" role="group" aria-label="Choose a skill" hidden></div>
-    <div class="chart-wrap"><div id="perf-chart" class="chart" role="img" aria-label="Interview scores over time">
-      <noscript><p class="muted">The chart needs JavaScript; the scorecards below have the numbers.</p></noscript></div></div>
-    <p class="chart-status small" aria-live="polite"></p>
-  </div>
-  {side}
-  <h3 class="sub-title">Scorecards</h3>
-  <div class="cards-row">{''.join(cards)}</div>
-  <script type="application/json" id="perf-data">{data}</script>
-</section>"""
-
-
-# System: costs, budgets, connections and runs, folded away.
-
 def telegram_line(tg: dict[str, Any], clock: Clock) -> str:
     if not tg.get("configured"):
         return "not set up"
@@ -798,99 +179,12 @@ def telegram_line(tg: dict[str, Any], clock: Clock) -> str:
     return "connected" + (f" · since {clock.when(tg['linked_at'])}" if tg.get("linked_at") else "")
 
 
-def notetaker_lines(c: dict[str, Any]) -> str:
-    from app.notetakers import ui as notetaker_ui
-    takers = c.get("notetakers") or {}
-    if not takers:
-        return f"<li><span>Fathom</span><span>{'configured' if c['fathom']['configured'] else 'not configured'}</span></li>"
-    return "".join(f"<li><span>{e(t['label'])}</span><span>{e(notetaker_ui.STATE.get(t['state'], (t['state'], ''))[0])}"
-                   f"{(' · ' + e(t['account'])) if t.get('account') else ''}</span></li>" for t in takers.values())
-
-
-def system(view: dict[str, Any], clock: Clock) -> str:
-    s, ilim = view["spend"], view["spend"]["interview_limits"]
-    dials = "".join(meter(view["dials"][k]["used"], view["dials"][k]["limit"], title,
-                          f"{'?' if view['dials'][k]['used'] is None else view['dials'][k]['used']} / {view['dials'][k]['limit']}")
-                    for k, title in (("briefing", "Briefing calls today"), ("callback", "Research callbacks today")))
-    c = view["connections"]
-    g, cal = c["google"], c["calendar"]
-    channel = {"active": "live updates on", "renewing": "live updates renewing",
-               "none": "no live updates (checks every 6 hours)", "off": "live updates off"}.get(cal.get("channel", ""), "unknown")
-    age = f" · token {g['age_days']} days old" if g.get("age_days") is not None else ""
-    until = f" · until {clock.when(cal.get('expires'))}" if cal.get("expires") else ""
-    synced = f" · last sync {clock.when(cal.get('last_sync_at'))}" if cal.get("last_sync_at") else ""
-    error = (f'<li class="tone-bad"><span>Last calendar error</span><span>{e(cal["last_error"])}</span></li>'
-             if cal.get("last_error") else "")
-    conn = f"""
-<ul class="kv">
-  <li><span>Google account</span><span>{e(g['account']) or '–'} · {e(g['state'].replace('_', ' '))}{age}</span></li>
-  <li><span>Calendar</span><span>{e(channel)}{until}{synced}</span></li>{error}
-  {notetaker_lines(c)}
-  <li><span>Telegram</span><span>{telegram_line(c.get('telegram') or {}, clock)}</span></li>
-</ul>"""
-    runs = []
-    for job in view["jobs"]:
-        tone = {"done": "ok", "cached": "info", "partial": "warn", "running": "info", "booked": "info"}.get(job["status"], "bad")
-        status = {"cached": "reused earlier research", "booked": "queued"}.get(job["status"], job["status"])
-        duration = "–" if job["duration_s"] is None else f"{job['duration_s']:.0f} s"
-        runs.append(f'<li class="run"><span class="run-topic">{e(job["topic"])}</span>{chip(status, tone)}'
-                    f'<span class="muted small num">{clock.when(job["created_at"])} · {duration} · {money(job["spend_usd"])}</span></li>')
-    return f"""
-<section class="section" id="system" aria-labelledby="system-title">
-  <details class="system">
-    <summary>{eyebrow("04", "System")}<h2 id="system-title" class="section-title small-title">Costs, limits and connections
-      <span class="dim">for when something looks off.</span></h2></summary>
-    <div class="sys-grid">
-      <div class="sys-card"><h3>Research spend</h3>
-        {meter(s['month_usd'], ilim['month_usd'], 'This month', f"{money(s['month_usd'])} of {money(ilim['month_usd'])}")}
-        {meter(s['today_jobs'], ilim['jobs_per_day'], 'Research runs today', f"{s['today_jobs']} of {ilim['jobs_per_day']}")}
-        <p class="muted small">Today {money(s['today_usd'])}, {s['today_cached']} reused for free. Each interview's research is capped at {money(ilim['job_usd'])}.</p></div>
-      <div class="sys-card"><h3>Calls</h3>{dials}<p class="muted small">VALR stops dialling for the day at the limit.</p></div>
-      <div class="sys-card wide"><h3>Connections</h3>{conn}</div>
-      <div class="sys-card wide"><h3>Recent research</h3><ul class="runs">{''.join(runs) or '<li class="muted small">Nothing yet.</li>'}</ul></div>
-    </div>
-  </details>
-</section>"""
-
-
 FONTS = ('<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>'
          '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=Space+Grotesk:wght@400;500;600&display=swap">')
+
+
 ICON = ("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' "
         "fill='%2305070c'/%3E%3Ccircle cx='16' cy='16' r='5' fill='%233b82ff'/%3E%3C/svg%3E")
-
-
-def page(view: dict[str, Any], email: str, csrf: str) -> str:
-    clock = Clock(view.get("zone") or "UTC", datetime.fromisoformat(view["generated_at"]))
-    details = "".join(detail(slot, view, clock) for block in view.get("blocks") or [] for slot in block["slots"])
-    return f"""<!doctype html>
-<html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="robots" content="noindex"><meta name="csrf-token" content="{e(csrf)}">
-<meta name="theme-color" content="#05070c">
-<title>VALR · Interview copilot</title>
-<link rel="icon" href="{ICON}">{FONTS}
-<link rel="stylesheet" href="/static/theme.css"><link rel="stylesheet" href="/static/valr.css">
-<script type="module" src="/static/valr.js"></script>
-</head><body>
-<a class="sr-only skip" href="#upcoming">Skip to your interviews</a>
-{header(view, clock, email)}
-<main class="wrap">
-  {hero(view, clock)}
-  {setup(view)}
-  {upcoming(view, clock)}
-  {performance(view, clock)}
-  {system(view, clock)}
-  <footer class="foot mono">valr · interview copilot <span class="muted">· signed in as {e(email)} · attendee emails and phone numbers are never shown</span></footer>
-</main>
-{details}
-{recording_dialog()}
-<div class="toast" role="status" aria-live="polite" hidden></div>
-</body></html>"""
-
-
-def recording_dialog() -> str:
-    from app.notetakers import ui as notetaker_ui
-    return notetaker_ui.DIALOG
 
 
 def error_page(message: str) -> str:

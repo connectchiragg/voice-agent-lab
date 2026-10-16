@@ -61,6 +61,13 @@ CREATE TABLE IF NOT EXISTS valr_flags (
     enabled      boolean NOT NULL,
     updated_at   timestamptz NOT NULL DEFAULT now()
 );
+CREATE TABLE IF NOT EXISTS prep_checks (
+    slot_ref     text NOT NULL,      -- the interview (slot workflow id)
+    item         text NOT NULL,      -- sha256 of the prep line, so a reworded line starts unticked
+    done         boolean NOT NULL,
+    updated_at   timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (slot_ref, item)
+);
 """
 
 
@@ -178,6 +185,7 @@ async def pushed_context(connection: Any, event_key: str, company_name: str,
 
 
 DIALS_PAUSED = "dials_paused"
+AUTO_DIAL = "auto_dial"  # Set from Settings: true = automatic T-30 call, false = Telegram heads-up.
 
 
 async def flag(connection: Any, name: str) -> dict[str, Any]:
@@ -194,6 +202,44 @@ async def set_flag(connection: Any, name: str, enabled: bool) -> None:
         "INSERT INTO valr_flags (name, enabled, updated_at) VALUES (%s, %s, now()) "
         "ON CONFLICT (name) DO UPDATE SET enabled = excluded.enabled, updated_at = now()",
         (name, enabled))
+
+
+async def flag_choice(connection: Any, name: str) -> bool | None:
+    """The stored value, or None when the owner never chose (the server default applies)."""
+    cursor = await connection.execute("SELECT enabled FROM valr_flags WHERE name = %s", (name,))
+    row = await cursor.fetchone()
+    return bool(row[0]) if row else None
+
+
+async def auto_dial(connection: Any) -> bool:
+    """How VALR reaches the owner at T-30: the Settings choice, else VALR_AUTO_DIAL (default off)."""
+    from app import telegram_api
+    chosen = await flag_choice(connection, AUTO_DIAL)
+    return telegram_api.auto_dial() if chosen is None else chosen
+
+
+def prep_item(text: str) -> str:
+    import hashlib
+    return hashlib.sha256(" ".join(text.split()).lower().encode()).hexdigest()[:32]
+
+
+async def set_prep_check(connection: Any, slot_ref: str, item: str, done: bool) -> None:
+    await connection.execute(
+        "INSERT INTO prep_checks (slot_ref, item, done, updated_at) VALUES (%s, %s, %s, now()) "
+        "ON CONFLICT (slot_ref, item) DO UPDATE SET done = excluded.done, updated_at = now()",
+        (slot_ref, item, done))
+
+
+async def prep_checks(connection: Any, slot_refs: list[str]) -> dict[str, set[str]]:
+    """slot ref -> the item hashes ticked done."""
+    if not slot_refs:
+        return {}
+    cursor = await connection.execute(
+        "SELECT slot_ref, item FROM prep_checks WHERE done AND slot_ref = ANY(%s)", (slot_refs,))
+    out: dict[str, set[str]] = {}
+    for ref, item in await cursor.fetchall():
+        out.setdefault(ref, set()).add(item)
+    return out
 
 
 async def slot_jobs(connection: Any, keys: list[str], limit: int = 200) -> list[dict[str, Any]]:

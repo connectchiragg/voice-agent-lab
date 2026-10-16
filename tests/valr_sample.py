@@ -287,7 +287,7 @@ def sample_view(now: datetime | None = None, paused: bool = False, scenario: str
                 extras: bool = False) -> dict:
     """scenario: full (a busy week), empty (first run: nothing connected, no data) or error
     (the calendar store and Temporal are down). extras: add the other branches' data
-    (coach, impression cues, recordings, notetakers; tests/valr_sample_extras.py)."""
+    (notetaker status, a linked Telegram; tests/valr_sample_extras.py)."""
     now = (now or datetime.now(timezone.utc)).replace(second=0, microsecond=0)
     first = now + timedelta(hours=2, minutes=40)
     tomorrow = (now + timedelta(days=1)).replace(hour=9, minute=30)
@@ -303,7 +303,7 @@ def sample_view(now: datetime | None = None, paused: bool = False, scenario: str
                tomorrow, 60, [Person("lee@nimbus.example", "Lee Park", "accepted"),
                               Person("noreply@greenhouse.io", "Greenhouse")]),
         _event("ev-orbit", "Orbit Labs: Backend Engineer, technical round", "Orbit", now - timedelta(hours=5), 60, [
-            Person("me@example.com", "Chirag", is_self=True),
+            Person("me@example.com", "Sam", is_self=True),
             Person("ana.ruiz@orbit.example", "Ana Ruiz", "accepted")]),
     ]
     slots = {
@@ -411,6 +411,8 @@ def sample_view(now: datetime | None = None, paused: bool = False, scenario: str
              "updated_at": (now - timedelta(hours=3)).isoformat()},
             {"title": "Tessel · technical", "status": "sent", "updated_at": (now - timedelta(days=4)).isoformat()}]},
         "pay_target": {"min": 50, "max": 65, "unit": "LPA", "currency": "INR"},
+        "mode": "telegram",  # The default: a Telegram heads-up 30 minutes before, no automatic call.
+        "reach": {"auto_dial": False, "source": "default", "default_auto_dial": False},
         "setup": {"phone_on_file": True, "test_call_done": True, "valr_number": "+12288888007"},
     }
     if scenario == "empty":
@@ -431,8 +433,7 @@ def sample_view(now: datetime | None = None, paused: bool = False, scenario: str
         view["connections"]["google"]["state"] = "reconnect_needed"
         view["connections"]["calendar"]["last_error"] = "HTTP 401 from Google Calendar"
     if extras and scenario == "full":
-        from tests.valr_sample_extras import NOTETAKERS
-        view["connections"]["notetakers"] = NOTETAKERS
+        view["connections"]["notetakers"] = notetakers_view({"fathom": "connected"})
         view["connections"]["telegram"] = {"configured": True, "linked": True, "username": "sample_owner",
                                            "linked_at": valr_view.iso(now - timedelta(days=2))}
     view["next_call"] = valr_view.next_call(view["blocks"], now, paused)

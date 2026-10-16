@@ -78,21 +78,19 @@ async function post(path, body = {}) {
   return data;
 }
 const BUSY = {sync: "Syncing…", refresh: "Starting…", dials: "Saving…", callnow: "Calling…", tgcode: "Getting a code…",
-              tglink: "Getting a link…", tgtest: "Sending…", ntsync: "Checking…", ntdisconnect: "Disconnecting…"};
+              tglink: "Getting a link…", tgtest: "Sending…", ntsync: "Checking…", ntdisconnect: "Disconnecting…",
+              reach: "Saving…"};
 
 // Telegram: one tap. The code comes with a t.me deep link (Telegram sends "/start <code>"
 // when he presses Start); a QR of the same link for scanning with the phone. Then wait for
 // the link to land and reload.
-const QR_SRC = "https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js";
-const QR_SRI = "sha384-mZT2gIty7ZDdOGkxfP6joZcYdMW1Jvj9dRlfpTmaJAKKXTqzygtB22k7FLe+KZC1";
+// qrcode-generator 1.4.4, vendored in static/ (no third-party script at run time).
+const QR_SRC = "/static/qrcode.min.js";
 function loadQr() {
   if (window.qrcode) return Promise.resolve(window.qrcode);
   return new Promise((resolve, reject) => {
     const script = document.createElement("script");
     script.src = QR_SRC;
-    script.integrity = QR_SRI;
-    script.crossOrigin = "anonymous";
-    script.referrerPolicy = "no-referrer";
     script.onload = () => resolve(window.qrcode);
     script.onerror = reject;
     document.head.append(script);
@@ -162,14 +160,14 @@ document.addEventListener("click", async event => {
         code.textContent = `${result.command} (valid ${result.expires_minutes} min)`;
         code.hidden = false;
       }
-    } else if (action === "tglink") {
-      result = await post("/valr/api/telegram/code");
-      showTelegramLink(button, result);
     } else if (action === "ntsync") {
       result = await post(`/valr/api/notetakers/${encodeURIComponent(button.dataset.provider)}/sync`);
     } else if (action === "ntdisconnect") {
       result = await post(`/valr/api/notetakers/${encodeURIComponent(button.dataset.provider)}/disconnect`);
       setTimeout(() => location.reload(), 800);
+    } else if (action === "reach") {
+      result = await post("/valr/api/reach", {mode: button.dataset.mode});
+      setTimeout(() => location.reload(), 600);
     } else if (action === "dials") {
       result = await post("/valr/api/dials", {paused: button.dataset.paused === "true"});
       setTimeout(() => { rememberOpen(); location.reload(); }, 600);
@@ -184,27 +182,6 @@ document.addEventListener("click", async event => {
     button.textContent = label;
   }
 });
-
-// Telegram: the one-time /start code as a t.me link that opens the bot and sends it.
-function showTelegramLink(button, result) {
-  const code = button.parentElement.querySelector("[data-tg-code]");
-  if (code) {
-    code.textContent = `${result.command} (valid ${result.expires_minutes} min)`;
-    code.hidden = false;
-  }
-  if (!result.link) return;
-  let open = button.parentElement.querySelector("a.tg-open");
-  if (!open) {
-    open = document.createElement("a");
-    open.className = "btn small primary tg-open";
-    open.target = "_blank";
-    open.rel = "noopener noreferrer";
-    open.textContent = "Open the VALR bot ↗";
-    button.after(open);
-  }
-  open.href = result.link;
-  window.open(result.link, "_blank", "noopener");
-}
 
 // Notetakers: the connect forms post the key to the server and forget it at once.
 function connectForm(name) {
@@ -341,6 +318,22 @@ function loadRecording(dialog) {
   section.dataset.loaded = "1";
   fetchRecording(section.querySelector("[data-recording-body]"), `ref=${encodeURIComponent(section.dataset.recordingRef)}`);
 }
+// A past interview's page: the server shows the player; the key moments (or, when nothing is
+// stored yet, the whole recording) come from /valr/api/recording.
+document.querySelectorAll("[data-moments-id]").forEach(async box => {
+  const body = box.querySelector("[data-recording-body]");
+  if (box.hasAttribute("data-full")) {
+    fetchRecording(body, `id=${encodeURIComponent(box.dataset.momentsId)}`);
+    return;
+  }
+  try {
+    const response = await fetch(`/valr/api/recording?id=${encodeURIComponent(box.dataset.momentsId)}`,
+      {credentials: "same-origin", cache: "no-store"});
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || !data.found || !data.moments?.length) { box.hidden = true; return; }
+    renderRecording(body, {...data, embed_url: "", share_url: ""});
+  } catch { box.hidden = true; }
+});
 document.addEventListener("click", event => {
   const button = event.target.closest("[data-recording-id]");
   if (!button) return;
@@ -351,18 +344,16 @@ document.addEventListener("click", event => {
   fetchRecording(dialog.querySelector("[data-recording-body]"), `id=${encodeURIComponent(button.dataset.recordingId)}`);
 });
 
-// Prep checklists: ticks stay in this browser only.
-const CHECKS = "valr-checklist";
-function loadChecks() {
-  try { return JSON.parse(localStorage.getItem(CHECKS) ?? "{}"); } catch { return {}; }
-}
-const checks = loadChecks();
-document.querySelectorAll("[data-check]").forEach(box => {
-  const key = `${box.dataset.check.split(":")[0]}:${box.nextElementSibling?.textContent ?? ""}`;
-  box.checked = Boolean(checks[key]);
-  box.addEventListener("change", () => {
-    checks[key] = box.checked;
-    try { localStorage.setItem(CHECKS, JSON.stringify(checks)); } catch {}
+// Prep checklists: each tick is saved on the server (so Home can show it done).
+document.querySelectorAll("input[data-prep-ref]").forEach(box => {
+  box.addEventListener("change", async () => {
+    const item = box.nextElementSibling?.textContent?.trim() ?? "";
+    try {
+      await post("/valr/api/prep", {ref: box.dataset.prepRef, item, done: box.checked});
+    } catch (error) {
+      box.checked = !box.checked;
+      say(error.message, false);
+    }
   });
 });
 
@@ -535,6 +526,8 @@ document.addEventListener("click", event => {
   drawChart();
 });
 drawChart();
+// The chart lives under "The numbers behind this" (folded): draw it when it opens.
+document.querySelector("details.numbers")?.addEventListener("toggle", event => { if (event.target.open) drawChart(); });
 let resizeTimer = null;
 addEventListener("resize", () => {
   clearTimeout(resizeTimer);

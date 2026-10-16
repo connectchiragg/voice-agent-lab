@@ -77,7 +77,10 @@ def owner_zone() -> ZoneInfo:
 
 
 def owner_name() -> str:
-    return os.getenv("VALR_OWNER_NAME", "Chirag")
+    """The owner's first name (VALR_OWNER_NAME, else VALR_CANDIDATE_NAME's first word); "there"
+    when neither is set, so a greeting still reads "Hi there"."""
+    name = os.getenv("VALR_OWNER_NAME", "").strip() or os.getenv("VALR_CANDIDATE_NAME", "").strip()
+    return name.split()[0] if name else "there"
 
 
 # The owner's profile, read from the private data dir (mounted read-only on the VM).

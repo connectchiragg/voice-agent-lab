@@ -37,7 +37,7 @@ FATHOM_ITEM = {
                           {"name": "Me", "email": OWNER}],
     "transcript": [{"speaker": {"display_name": "Ana Ruiz"}, "text": "How would you shard a busy Postgres table?",
                     "timestamp": "00:01:35"},
-                   {"speaker": {"display_name": "Chirag"}, "text": "By tenant, then by time.", "timestamp": "00:01:50"}],
+                   {"speaker": {"display_name": "Sam"}, "text": "By tenant, then by time.", "timestamp": "00:01:50"}],
     "default_summary": {"markdown_formatted": "## Notes\n- [Sharding question](https://fathom.video/share/tokABC123?timestamp=95)"},
 }
 
@@ -246,10 +246,10 @@ def test_key_moments_from_summary_links_then_questions():
     assert from_summary == [{"label": "Sharding question", "seconds": 95,
                              "url": "https://fathom.video/share/tokABC123?timestamp=95"}]
     turns = [{"speaker": "Ana", "text": "How would you shard a busy Postgres table?", "start": 95},
-             {"speaker": "Chirag", "text": "Should I assume one region for this?", "start": 120},
+             {"speaker": "Sam", "text": "Should I assume one region for this?", "start": 120},
              {"speaker": "Ana", "text": "What happens when a node fails during writes?", "start": 125},
              {"speaker": "Ana", "text": "And the backfill strategy for a lost day?", "start": 400}]
-    moments = base.moments_from_turns(turns, {"Chirag"})
+    moments = base.moments_from_turns(turns, {"Sam"})
     assert [m["seconds"] for m in moments] == [95, 400]  # The owner's own question is skipped; 60 s apart.
     assert base.clock(95) == "1:35" and base.clock(3725) == "1:02:05"
 
@@ -510,18 +510,19 @@ def test_recording_endpoint_returns_embed_and_moments(client, monkeypatch):
 
 
 def test_setup_checklist_items_are_links_or_buttons_that_do_the_step(client):
-    page = client.get("/valr", headers=GOOD).text
-    setup = page.split('id="setup"', 1)[1].split('id="upcoming"', 1)[0]
+    page = client.get("/valr/settings", headers=GOOD).text  # The checklist lives on Settings now.
+    setup = page.split('id="setup"', 1)[1].split('id="g-conn"', 1)[0]
+    cards = page.split('id="notetakers"', 1)[1]
     assert 'href="/oauth/google/start"' in setup
+    for name in ("fathom", "fireflies"):
+        assert f'data-connect-open="{name}"' in setup
     for name in ("fathom", "fireflies", "granola"):
-        assert f'data-connect-open="{name}"' in setup and f'data-connect="{name}"' in setup
-        assert f'id="nt-{name}"' in setup
-    assert 'type="password"' in setup and 'value="' not in setup.split('type="password"', 1)[1][:200]
+        assert f'data-connect="{name}"' in cards and f'id="nt-{name}"' in cards
+    assert 'type="password"' in cards and 'value="' not in cards.split('type="password"', 1)[1][:200]
     assert 'href="tel:+12288888007"' in setup
-    assert "How VALR checks it" in setup and "VALR_OWNER_PHONE" in setup
-    assert 'data-import="granola"' in setup
-    for state in ("Done", "Needs attention"):
-        assert state in setup
+    assert "How VALR checks it" in setup and "owner phone number" in setup
+    assert 'data-import="granola"' in cards
+    assert "Done" in setup and "Finish setting up" in setup  # Telegram isn't linked in the sample.
 
 
 def test_telegram_step_and_deep_link(client, monkeypatch):
@@ -535,17 +536,27 @@ def test_telegram_step_and_deep_link(client, monkeypatch):
         return view
 
     monkeypatch.setattr(valr_view, "collect", collect)
-    assert 'data-action="tglink"' in client.get("/valr", headers=GOOD).text
+    assert 'data-action="tglink"' in client.get("/valr/settings", headers=GOOD).text
     assert telegram_api.start_link("example_valr_bot", "123456") == "https://t.me/example_valr_bot?start=123456"
     assert telegram_api.start_link("bad name!", "123456") == ""
     monkeypatch.setenv("TELEGRAM_BOT_USERNAME", "@example_valr_bot")
     assert run(telegram_api.username()) == "example_valr_bot"
 
 
-def test_past_interview_and_scorecards_offer_the_recording(client):
-    page = client.get("/valr", headers=GOOD).text
-    assert page.count("data-recording-ref=") == 1  # Only the interview that is over.
-    assert 'data-recording-id="fathom:1000"' in page and 'id="recording-dialog"' in page
+def test_past_interview_page_plays_or_finds_the_recording(client, monkeypatch):
+    from app.valr_ui import routes
+
+    async def stored(interview):
+        if interview["id"] == "fathom:1000":
+            return None
+        return {"provider": "fathom", "share_url": "https://fathom.video/share/x",
+                "embed_url": "https://fathom.video/embed/x", "title": "Interview"}
+
+    monkeypatch.setattr(routes, "load_recording", stored)
+    page = client.get("/valr/interviews/past/fathom-1001", headers=GOOD).text
+    assert '<iframe src="https://fathom.video/embed/x"' in page and 'data-moments-id="fathom:1001"' in page
+    missing = client.get("/valr/interviews/past/fathom-1000", headers=GOOD).text
+    assert 'data-moments-id="fathom:1000" data-full' in missing  # Asks /valr/api/recording?id=.
 
 
 # ---------- The real store (needs VALR_TEST_POSTGRES, a scratch database) ----------
@@ -647,8 +658,8 @@ def test_granola_is_optional_and_fathom_shows_the_sharing_hint(client, monkeypat
         return view
 
     monkeypatch.setattr(valr_view, "collect", collect)
-    page = client.get("/valr", headers=GOOD).text
-    setup = page.split('id="setup"', 1)[1].split('id="notetakers"', 1)[0]
+    page = client.get("/valr/settings", headers=GOOD).text
+    setup = page.split('id="setup"', 1)[1].split('id="g-conn"', 1)[0]
     assert "Connect a notetaker" in setup and 'data-connect-open="granola"' not in setup
     step = setup.split("Connect a notetaker", 1)[1].split("</li>", 1)[0]
     assert "Done" in step and "Needs attention" not in step
@@ -668,9 +679,11 @@ def test_granola_alone_never_leaves_a_setup_step_open(client, monkeypatch):
         return view
 
     monkeypatch.setattr(valr_view, "collect", collect)
-    page = client.get("/valr", headers=GOOD).text
-    setup = page.split('id="setup"', 1)[1].split('id="notetakers"', 1)[0]
+    page = client.get("/valr/settings", headers=GOOD).text
+    setup = page.split('id="setup"', 1)[1].split('id="g-conn"', 1)[0]
     assert "Granola" not in setup and "Optional" in page
+    from app.valr_ui import attention
+    assert not any("granola" in i["key"] for i in attention.items(sample_view(scenario="empty")))
 
 
 def test_r1_searches_granola_with_the_stored_key():

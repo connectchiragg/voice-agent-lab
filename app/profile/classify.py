@@ -2,7 +2,7 @@
 
 Two stages: free title/participant heuristics drop obvious internal meetings,
 then Claude Haiku confirms the rest from a short excerpt (it also tells
-"Chirag interviewing someone" apart from "Chirag being interviewed").
+"the owner interviewing someone" apart from "the owner being interviewed").
 """
 import re
 

@@ -7,8 +7,9 @@ Steps (`process`):
    the candidate;
 2. score it on the rubric and read the interviewer's cues (Sonnet, two calls);
 3. add it to performance.json and refresh the coach read (one more Sonnet call), when the
-   data file is writable (on the VM /data is mounted read-only today: then this step is
-   skipped and says so);
+   data file is writable (on the VM the worker writes /data-live/performance.json, its own
+   writable mount, starting from VALR_PERFORMANCE_FALLBACK=/data/performance.json; if the
+   file is not writable this step is skipped and says so);
 4. compose the report (Sonnet, quotes cited by id from this interview only) and render it
    as Telegram HTML (`render`).
 
@@ -163,8 +164,9 @@ NEXT = {"concrete": "Next step named", "vague": "Next step mentioned, vaguely",
 
 
 def deep_link(host: str, interview_id: str) -> str:
-    anchor = "past-" + "".join(ch if ch.isalnum() else "-" for ch in str(interview_id))
-    return f"https://{host}/valr#{urlquote(anchor)}"
+    """The past interview's page (app/valr_ui/attention.past_slug's slug)."""
+    slug = "".join(ch if ch.isascii() and ch.isalnum() else "-" for ch in str(interview_id))[:80]
+    return f"https://{host}/valr/interviews/past/{urlquote(slug)}"
 
 
 def render(report: dict, host: str, recording_url: str = "") -> str:
@@ -225,8 +227,11 @@ def process(meeting: dict, cfg: Settings, llm: JsonLLM, comp: dict | None = None
 def add_to_performance(cfg: Settings, scored: dict, llm: JsonLLM | None,
                        comp: dict | None) -> tuple[bool, str]:
     """Insert or replace this interview in performance.json and refresh the coach read."""
+    source = cfg.performance_path
+    if not source.exists() and cfg.performance_fallback is not None:
+        source = cfg.performance_fallback  # first write: start from the read-only copy
     try:
-        perf = json.loads(cfg.performance_path.read_text(encoding="utf-8"))
+        perf = json.loads(source.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         perf = {}
     interviews_ = [iv for iv in perf.get("interviews") or [] if iv.get("interview_id") != scored["interview_id"]]

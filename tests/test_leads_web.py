@@ -11,7 +11,7 @@ from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from cryptography.hazmat.primitives.hashes import SHA256
 from fastapi.testclient import TestClient
 
-from app import google_oidc, leads, leads_web, research, valr_dashboard
+from app import google_oidc, leads, leads_web, research, valr_dashboard, valr_view
 from tests.leads_sample import NOW, sample_touches
 
 AUDIENCE = "https://valr.example/hooks/gmail"
@@ -122,7 +122,12 @@ def page(monkeypatch):
         view["gmail"] = leads_web.gmail_view({}, {}, NOW)
         return view
 
-    monkeypatch.setattr(leads_web, "collect", collect)
+    async def state(pool, now=None):
+        from tests.valr_sample import sample_view
+        return sample_view()
+
+    monkeypatch.setattr(leads_web, "collect", collect)  # The Leads page reads it through LEADS_SOURCE.
+    monkeypatch.setattr(valr_view, "collect", state)
     monkeypatch.setattr(research, "pool", object())
     monkeypatch.setattr(valr_dashboard, "verifier", Verifier())
     monkeypatch.setenv("VALR_ADMIN_EMAILS", OWNER)
@@ -138,8 +143,9 @@ def test_page_and_json_need_the_owner(page):
     data = page.get("/valr/api/leads", headers=GOOD).json()
     assert {"leads", "contacts", "links", "stages", "gmail"} <= set(data)
     html = page.get("/valr/leads", headers=GOOD).text
-    assert "Juniper Robotics" in html and "/static/leads-globe.js" not in html  # Loaded by leads.js.
-    assert 'id="leads-data"' in html and "</script>" not in html.split('id="leads-data">', 1)[1].split("</script>")[0]
+    assert "Juniper Robotics" in html and "/static/leads-globe.js" in html  # The app's Leads page, real data.
+    for tag in ('id="leads-data">', 'id="leads-raw">'):
+        assert tag in html and "<" not in html.split(tag, 1)[1].split("</script>")[0]
 
 
 def test_sync_action_needs_csrf(page, monkeypatch):
@@ -157,10 +163,8 @@ def test_sync_action_needs_csrf(page, monkeypatch):
     assert response.status_code == 200 and started == ["manual"]
 
 
-def test_the_cockpit_links_to_leads():
-    from app import valr_page
-    assert 'href="/valr/leads"' in valr_page.header({"generated_at": NOW.isoformat()},
-                                                    valr_page.Clock("UTC", NOW), OWNER)
+def test_every_page_links_to_leads(page):
+    assert 'href="/valr/leads"' in page.get("/valr/performance", headers=GOOD).text
 
 
 class Pool:
