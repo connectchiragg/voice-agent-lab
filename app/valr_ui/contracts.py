@@ -48,6 +48,7 @@ CLOSED_BAND = ("closed", "Closed", "Won or not moving forward")
 NOTETAKER_STATE = {"connected": "connected", "server": "connected", "refused": "error",
                    "not_connected": "not_connected"}
 NOTETAKERS = [("fathom", "Fathom"), ("fireflies", "Fireflies"), ("granola", "Granola")]
+PLAYABLE = ("fathom", "phone")  # Recordings that play inside VALR.
 OPTIONAL = {"granola"}  # Owner decision 2026-10-16: never an issue or a set-up step.
 
 
@@ -215,11 +216,11 @@ def recording(raw: Any, interview: dict[str, Any] | None = None) -> dict[str, An
     """A link to the recording (https only), its provider's label and whether it plays here."""
     raw = raw if isinstance(raw, dict) else {}
     url = https(raw.get("url") or raw.get("share_url") or (interview or {}).get("recording_url"))
-    if not url:
-        return None
     provider = text(raw.get("provider") or (interview or {}).get("source"), 30).lower()
-    return {"provider": dict(NOTETAKERS).get(provider, provider.capitalize() or "Recording"),
-            "url": url, "title": text(raw.get("title"), 120), "player": provider == "fathom"}
+    if not url and provider != "phone":  # A phone call plays from VALR itself: no link needed.
+        return None
+    return {"provider": dict(NOTETAKERS + [("phone", "Phone call")]).get(provider, provider.capitalize() or "Recording"),
+            "url": url, "title": text(raw.get("title"), 120), "player": provider in PLAYABLE}
 
 
 def company_label(value: Any) -> str:

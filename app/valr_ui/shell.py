@@ -30,6 +30,7 @@ ICONS = {  # 24x24 strokes, drawn with currentColor.
     "check": '<path d="m5 12.5 4.5 4.5L19 7.5"/>',
     "mic": '<rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21"/>',
     "play": '<path d="M7 4.5v15l12-7.5z"/>',
+    "bell": '<path d="M6 16.5V11a6 6 0 0 1 12 0v5.5l1.5 2h-15z"/><path d="M10 20.5h4"/>',
 }
 
 
@@ -92,6 +93,25 @@ def badge(items: list[dict[str, Any]]) -> str:
 </details>"""
 
 
+def bell(items: list[dict[str, Any]]) -> str:
+    """The notification bell (replaces the "Needs attention" pill): broken connections pinned
+    on top as action items (they clear when fixed), then the notifications, which
+    static/valr-notify.js loads from /valr/api/notifications, groups by day and marks read on click.
+    The count is unread notifications plus action items; it polls every 60 s."""
+    counted = attn.counted(items)
+    actions = attention_list(counted, "att-list notif-actions") if counted else ""
+    return f"""
+<details class="notif-bell" data-popover data-notif data-action-count="{len(counted)}">
+  <summary aria-label="Notifications">{icon('bell', 18)}<span class="notif-count num" data-notif-count>{len(counted) or ''}</span></summary>
+  <div class="notif-pop" role="region" aria-label="Notifications">
+    <div class="notif-head"><p class="label">Notifications</p>
+      <button class="btn small ghost" type="button" data-notif-all>Mark all read</button></div>
+    {f'<p class="notif-group mono">Action needed</p>{actions}' if actions else ''}
+    <div class="notif-list" data-notif-list><p class="muted small">Loading…</p></div>
+  </div>
+</details>"""
+
+
 def banner(items: list[dict[str, Any]]) -> str:
     """On every page but Home: only what is broken (bad), one line each."""
     bad = [i for i in items if i["level"] == "bad"]
@@ -125,10 +145,11 @@ def layout(view: dict[str, Any], email: str, csrf: str, active: str, title: str,
 <link rel="icon" href="{ICON}">{THEME_BOOT}{FONTS}
 <link rel="stylesheet" href="{asset('theme.css')}"><link rel="stylesheet" href="{asset('valr.css')}">
 <link rel="stylesheet" href="{asset('valr-app.css')}"><link rel="stylesheet" href="{asset('valr-auth.css')}">
-<link rel="stylesheet" href="{asset('valr-perf.css')}">
+<link rel="stylesheet" href="{asset('valr-perf.css')}"><link rel="stylesheet" href="{asset('valr-notify.css')}">
 <script type="module" src="{asset('valr.js')}"></script>
 <script type="module" src="{asset('valr-app.js')}"></script>
 <script type="module" src="{asset('valr-player.js')}"></script>
+<script type="module" src="{asset('valr-notify.js')}"></script>
 </head><body class="app page-{e(active)}">
 <a class="sr-only skip" href="#main">Skip to content</a>
 <header class="appbar">
@@ -136,7 +157,7 @@ def layout(view: dict[str, Any], email: str, csrf: str, active: str, title: str,
     <a class="brand" href="/valr"><span class="brand-dot" aria-hidden="true"></span>valr</a>
     <nav class="nav" aria-label="Main">{nav}</nav>
     <div class="appbar-tools">
-      {badge(items)}
+      {bell(items)}
       <a class="btn small talk-btn" href="/call">{icon('mic', 16)}<span>Talk</span></a>
       <button class="icon-btn" type="button" data-theme-toggle aria-label="Switch light or dark">{icon('theme', 18)}</button>
       {account_menu(email)}

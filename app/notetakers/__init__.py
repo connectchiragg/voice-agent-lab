@@ -21,12 +21,12 @@ from typing import Any
 
 import httpx
 
-from app.notetakers import base, fathom, fireflies, granola, store
+from app.notetakers import base, fathom, fireflies, granola, phone, store
 from app.notetakers.base import KeyRefused, ProviderError, Recording
 
 logger = logging.getLogger("uvicorn.error")
 
-PROVIDERS = {"fathom": fathom, "fireflies": fireflies, "granola": granola}
+PROVIDERS = {"fathom": fathom, "fireflies": fireflies, "granola": granola, "phone": phone}
 ENV_KEYS = {"fathom": "FATHOM_API_KEY", "fireflies": "FIREFLIES_API_KEY", "granola": "GRANOLA_API_KEY"}
 INFO: dict[str, dict[str, Any]] = {
     "fathom": {
@@ -46,6 +46,10 @@ INFO: dict[str, dict[str, Any]] = {
                     "Enterprise plan; on other plans, upload the CSV export from Settings instead.",
         "gets": "Notes, summaries and transcripts. Granola records no audio or video.",
         "video": "none", "import": True},
+    "phone": {  # Uploaded from the iPhone (app/phone_recordings.py): nothing to connect, so hidden.
+        "label": "Phone call", "key_label": "", "key_help": "", "hidden": True,
+        "gets": "Call recordings shared from Truecaller with the iOS Shortcut.",
+        "video": "player", "import": False},
 }
 SYNC_DAYS = 7
 
@@ -55,7 +59,11 @@ def token_key() -> str:
 
 
 def env_key(provider: str) -> str:
-    return os.getenv(ENV_KEYS[provider], "").strip()
+    return os.getenv(ENV_KEYS.get(provider, ""), "").strip() if provider in ENV_KEYS else ""
+
+
+def connectable(provider: str) -> bool:
+    return provider in PROVIDERS and not INFO.get(provider, {}).get("hidden")
 
 
 async def api_key(connection: Any, provider: str) -> str | None:
@@ -96,6 +104,8 @@ async def status_view(connection: Any) -> dict[str, dict[str, Any]]:
     rows = await store.statuses(connection)
     out = {}
     for name, info in INFO.items():
+        if info.get("hidden"):
+            continue
         row = rows.get(name)
         state = row["state"] if row else ("server" if env_key(name) else "not_connected")
         out[name] = {"label": info["label"], "state": state, "account": (row or {}).get("account") or "",
@@ -211,7 +221,11 @@ async def recording_view(connection: Any, recording: Recording, http: httpx.Asyn
     module = PROVIDERS[recording.provider]
     moments: list[dict[str, Any]] = []
     note = ""
-    key = await api_key(connection, recording.provider)
+    key = await api_key(connection, recording.provider) if connectable(recording.provider) else None
+    if recording.provider == "phone" and recording.meeting is None:
+        recording.meeting = await phone.stored_meeting(connection, recording.external_id)
+        if recording.meeting is None:
+            note = "The transcript isn't ready yet, so there are no key moments."
     if key and recording.meeting is None:
         try:
             recording = await module.get_recording(key, recording.external_id, http, listed=recording)
