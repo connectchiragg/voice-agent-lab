@@ -16,7 +16,8 @@ crewai). The voice app never imports it, so the live call path has no Anthropic 
 
 Every limit in `Caps` is enforced in code (VALR_<FIELD> overrides); hits are logged
 as "VALR cap hit" and counted. Usage is metered per request from the API's own
-`usage` and priced in app/research_jobs.py.
+`usage` and priced in app/research_jobs.py. Every Claude request goes through
+app/llm_gateway.py: OpenRouter with our own Anthropic key (BYOK) or Anthropic direct.
 """
 import dataclasses
 import html
@@ -35,13 +36,13 @@ os.environ.setdefault("CREWAI_DISABLE_TRACKING", "true")
 os.environ.setdefault("OTEL_SDK_DISABLED", "true")
 os.environ.setdefault("CREWAI_TRACING_ENABLED", "false")
 
-import anthropic  # noqa: E402
 import httpx  # noqa: E402
 from crewai import Agent, Crew, Process, Task  # noqa: E402
 from crewai.llms.providers.anthropic.completion import AnthropicCompletion  # noqa: E402
 from crewai.tools import tool  # noqa: E402
 from pydantic import BaseModel, Field, PrivateAttr, field_validator, model_validator  # noqa: E402
 
+from app import llm_gateway  # noqa: E402
 from app.research_jobs import price  # noqa: E402
 
 logger = logging.getLogger("valr")
@@ -220,6 +221,13 @@ class ClaudeLLM(AnthropicCompletion):
         params.pop("tool_choice", None)
         return params
 
+    def _build_sync_client(self) -> Any:
+        """Through app/llm_gateway.py: OpenRouter (BYOK) or Anthropic direct, per LLM_GATEWAY."""
+        return llm_gateway.shared().client()
+
+    def _build_async_client(self) -> Any:
+        raise ValueError("VALR runs CrewAI synchronously; the LLM gateway has no async client")
+
     def _get_sync_client(self) -> Any:
         return self._with_effort(super()._get_sync_client())
 
@@ -250,15 +258,16 @@ class ClaudeLLM(AnthropicCompletion):
 
 # Tools.
 
-_anthropic: anthropic.Anthropic | None = None
+_anthropic: Any = None
 _http = httpx.Client(timeout=10, follow_redirects=True,
                      headers={"User-Agent": "voice-agent-lab VALR research (lab project)"})
 
 
-def anthropic_client() -> anthropic.Anthropic:
+def anthropic_client() -> Any:
+    """Messages client for the inner calls (search, claim check, classify): see app/llm_gateway.py."""
     global _anthropic
     if _anthropic is None:
-        _anthropic = anthropic.Anthropic(max_retries=2, timeout=60)
+        _anthropic = llm_gateway.shared().client(timeout=60)  # As before: 60 s per request.
     return _anthropic
 
 
