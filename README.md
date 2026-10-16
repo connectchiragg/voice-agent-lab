@@ -16,6 +16,19 @@ English only. Speech moved from local open-weight models (Silero VAD, Smart Turn
 Nemotron streaming STT, Kokoro TTS) to Deepgram on 2026-10-15; that stack and
 earlier experiments (Gemini, Cartesia, MiniCPM-o) live only in Git history.
 
+Built on it, each section below with its measurements and tests:
+
+- **Realtime voice loop**: browser (WebRTC or WebSocket) and phone (Telnyx) callers,
+  speculative LLM start and barge-in; about 1.3 s to first reply audio (p50).
+- **Tool calling and caller memory** during a call.
+- **Durable callbacks (Temporal)**: "call me back later" survives restarts.
+- **VALR research callbacks**: parallel research agents look a topic up after the call,
+  then the agent phones back with a short spoken summary.
+- **VALR interview assistant**: researches each upcoming interview on the owner's
+  calendar and calls 30 minutes before with a briefing, plus an owner-only dashboard.
+  Personal data stays in private storage on the server; the names in tests and
+  examples are fictional.
+
 ## Status
 
 Working end to end, deployed on an AWS VM in Mumbai behind a Cloudflare tunnel.
