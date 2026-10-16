@@ -170,6 +170,45 @@ def notetaker_rows(view: dict[str, Any], clock: Clock) -> str:
                'enough; Granola is optional.</p>' + body)
 
 
+PHONE_STEPS = [
+    "In the Shortcuts app, tap + and name the shortcut “Send to VALR”.",
+    "Tap ⓘ, turn on “Show in Share Sheet”, and set it to receive Audio and Files.",
+    "Add “Get Contents of URL”: the upload address below, Method POST, a header Authorization = "
+    "Bearer followed by your upload token, Request Body Form, a field file (type File) = Shortcut Input.",
+    "Add “Show Result” so you see “Got it”.",
+    "After a recorded call: open it in Truecaller, tap Share, choose “Send to VALR”.",
+]
+
+
+def phone_recordings_row() -> str:
+    """The iPhone's call recordings (Truecaller -> the Shortcut -> VALR). static/valr-notify.js
+    fills the status from /valr/api/phone/status and runs the two token buttons."""
+    steps = "".join(f"<li>{e(step)}</li>" for step in PHONE_STEPS)
+    body = ('<p class="muted small" data-phone-status>Checking…</p>'
+            '<p class="muted small">Share a call recording from Truecaller to the “Send to VALR” Shortcut: '
+            'VALR transcribes it, adds it to Past interviews and the coach reviews it. The audio is stored '
+            'encrypted and deleted a week after processing.</p>'
+            '<div class="notif-token" data-phone-token hidden><code class="mono" data-phone-token-value></code>'
+            '<button class="btn small" type="button" data-phone-copy>Copy</button>'
+            '<p class="muted small">Copy it now: it won’t be shown again.</p></div>'
+            '<details class="pop" id="phone-steps"><summary class="btn small ghost">Set up the iPhone Shortcut</summary>'
+            f'<ol class="small notif-steps">{steps}</ol><p class="small">Upload address: '
+            '<code class="mono" data-phone-url>/hooks/recording-upload</code>. Full steps: docs/phone-recordings.md.</p></details>')
+    actions = ('<button class="btn small" type="button" data-phone-action="show">Show upload token</button>'
+               '<button class="btn small ghost" type="button" data-phone-action="rotate">Rotate token</button>')
+    return row("phone-recordings", "Phone call recordings", "", body, actions)
+
+
+def alerts_row() -> str:
+    """Telegram alert switches (app/notifications.py); static/valr-notify.js loads and saves them."""
+    switches = "".join(
+        f'<label class="notif-switch"><input type="checkbox" data-notif-switch="{key}" disabled> {e(label)}</label>'
+        for key, label in (("immediate", "Immediate alerts (offers, interview invites, replies that need you)"),
+                           ("digest", "Daily digest at 09:00 (rejections, new leads, stage changes)"),
+                           ("quiet", "Quiet hours 23:00–08:00 (only interviews in the next 12 hours get through)")))
+    return row("alerts", "Telegram alerts", "", f'<div class="notif-switches">{switches}</div>')
+
+
 def reach_row(view: dict[str, Any]) -> str:
     """Telegram heads-up (the default) or an automatic call, stored on the server."""
     telegram = view.get("mode") == "telegram"
@@ -219,7 +258,7 @@ def page(view: dict[str, Any], clock: Clock, items: list[dict[str, Any]]) -> str
 {f'<section class="card issues"><h2 class="card-title">Needs attention</h2>{issues}</section>' if issues else ''}
 {setup(view)}
 <section class="set-group" aria-labelledby="g-conn"><h2 id="g-conn" class="h-sm">Connections</h2>
-  <ul class="set-list">{google_row(view, clock)}{calendar_row(view, clock)}{telegram_row(view, clock)}{notetaker_rows(view, clock)}</ul></section>
+  <ul class="set-list">{google_row(view, clock)}{calendar_row(view, clock)}{telegram_row(view, clock)}{notetaker_rows(view, clock)}{phone_recordings_row()}</ul></section>
 <section class="set-group" aria-labelledby="g-calls"><h2 id="g-calls" class="h-sm">Calls</h2>
-  <ul class="set-list">{prefs}{phone}{limits}</ul></section>
+  <ul class="set-list">{prefs}{alerts_row()}{phone}{limits}</ul></section>
 <p class="muted small"><a href="/valr/system">System details</a>: health, costs and recent research.</p>"""
