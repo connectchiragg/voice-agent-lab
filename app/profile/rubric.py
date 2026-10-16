@@ -9,7 +9,7 @@ import json
 from app.profile.evaluate import cap_words, format_transcript, speaking_metrics
 from app.profile.llm import JsonLLM, LLMError
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3  # performance.json; v3 adds impressions and the coach read
 
 RUBRIC: dict[str, dict[str, str]] = {
     "technical": {
@@ -42,6 +42,37 @@ RUBRIC: dict[str, dict[str, str]] = {
         "competing_offers": "uses competing processes as leverage without over-sharing figures",
     },
 }
+# Plain-language names for people who never saw the rubric (the coach summary, the page).
+PLAIN: dict[str, str] = {
+    "technical": "technical answers", "communication": "how you explain things",
+    "behavioural": "stories about your past work", "process": "running the interview well",
+    "negotiation": "salary conversations",
+    "technical.system_design": "designing systems end to end",
+    "technical.coding_problem_solving": "working through a coding problem",
+    "technical.cs_fundamentals": "computer-science basics",
+    "technical.domain_depth": "depth in voice AI and LLM systems",
+    "technical.tradeoff_reasoning": "explaining the trade-offs behind a choice",
+    "communication.conciseness_answer_first": "giving the answer first, then the detail",
+    "communication.structure": "answering in a clear order",
+    "communication.clarity": "being easy to follow",
+    "communication.listening_clarifying": "answering the question that was asked",
+    "communication.pace_fillers": "steady pace without filler words",
+    "behavioural.star_stories": "stories with a clear result",
+    "behavioural.ownership_impact": "showing what you personally changed, with numbers",
+    "behavioural.motivation_why_us": "saying why this company",
+    "behavioural.pushback_curveballs": "staying composed when challenged",
+    "process.time_management": "pacing the time",
+    "process.questions_at_end": "your questions at the end",
+    "negotiation.anchoring": "getting their salary range before naming a number",
+    "negotiation.information_control": "not revealing your current or expected salary before they share a range",
+    "negotiation.competing_offers": "using other interviews as leverage without giving numbers",
+}
+
+
+def plain(key: str) -> str:
+    return PLAIN.get(key, key.split(".")[-1].replace("_", " "))
+
+
 SUBDIMENSIONS = [(g, s) for g, subs in RUBRIC.items() for s in subs]
 ROUND_TYPES = ["screen", "technical", "system_design", "hiring_manager", "behavioural",
                "founder", "offer"]

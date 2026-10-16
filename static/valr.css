@@ -237,3 +237,30 @@ ul, ol { margin: 0; }
 .q-good .mono { color: var(--ok); }
 .q-improve .mono { color: var(--warn); }
 .card-score h4 .muted { margin-left: 8px; font-weight: 400; }
+
+/* Performance (schema 3): the coach's read first, numbers folded, interviewer cues. */
+.coach { display: grid; gap: 4px; }
+.stand { margin: 8px 0 0; max-width: 64ch; font-size: 1.25rem; line-height: 1.6; letter-spacing: -0.01em; }
+.working, .scripts, .cues { list-style: none; padding: 0; display: grid; gap: 18px; }
+.c-head { margin: 0; font-weight: 500; }
+.cq { margin: 10px 0 0; padding: 2px 0 2px 14px; border-left: 2px solid var(--ice); }
+.cq p { margin: 0; font-style: italic; }
+.cq footer { margin-top: 4px; color: var(--ash); letter-spacing: 0.04em; }
+.cq-interviewer { border-left-color: var(--hairline-strong); }
+.costs { display: grid; gap: 14px; }
+.cost { border: 1px solid var(--hairline); border-left: 2px solid var(--bad); background: var(--graphite); padding: 18px; display: grid; gap: 8px; align-content: start; min-width: 0; }
+.cost h4 { font-size: var(--fs-md); margin: 0; }
+.cost p { margin: 0; }
+.say { border-left: 2px solid var(--signal); padding-left: 12px; margin: 6px 0 0; }
+.say .mono { display: block; color: var(--signal); font-size: 0.6875rem; letter-spacing: 0.12em; text-transform: uppercase; margin-bottom: 2px; }
+.react p { margin: 0 0 10px; }
+.react .chip, .imp .chip { margin-right: 6px; }
+.neg > summary, .numbers > summary { list-style: none; cursor: pointer; }
+.neg > summary::-webkit-details-marker, .numbers > summary::-webkit-details-marker { display: none; }
+.neg > summary .sub-title::after, .numbers > summary .sub-title::after { content: " +"; color: var(--signal); }
+.neg[open] > summary .sub-title::after, .numbers[open] > summary .sub-title::after { content: " −"; }
+.numbers { margin-top: 12px; border-top: 1px solid var(--hairline); }
+.imp .score-bars { margin: 10px 0; }
+.sb-track i.neg { background: var(--bad); }
+.cue .q-head { margin: 0 0 4px; }
+@media (min-width: 720px) { .costs { grid-template-columns: 1fr 1fr; } }

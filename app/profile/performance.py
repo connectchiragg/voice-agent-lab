@@ -1,9 +1,10 @@
-"""Performance trends (schema v2): chart-ready series, badges, breakdowns, callouts.
+"""Performance trends (schema v3; v2 plus impressions and the coach read): chart-ready series, badges, breakdowns, callouts.
 
 Output file: VALR_PERFORMANCE_PATH (default data/performance.json). Schema:
 
 {
-  "schema_version": 2,
+  "schema_version": 3,                   # 3 adds interviews[].impression, "impressions",
+                                         # "coach" (all optional for readers; v2 keys unchanged)
   "generated_at": "<ISO 8601 UTC>",
   "scale": {"min": 1, "max": 10, "na": null},
   "rubric": {"<dimension>": {"<subdimension>": "<what it measures>"}},
@@ -17,7 +18,8 @@ Output file: VALR_PERFORMANCE_PATH (default data/performance.json). Schema:
       "scores": {"<dimension>": {"<subdimension>": {"score": int|null, "justification", "quote"}}},
       "do_next_time": [3 strings],
       "question_feedback": [{"question", "went_well", "improve", "model_answer_hint"}],
-      "transcript_used": bool}],
+      "transcript_used": bool,
+      "impression": IMPRESSION}],          # v3, app/profile/impressions.py
   "trends": {
       "overall": SERIES,
       "dimensions": {"<dimension>": SERIES},
@@ -29,7 +31,9 @@ Output file: VALR_PERFORMANCE_PATH (default data/performance.json). Schema:
   "recurring_weak_topics": [{"topic", "verdict": "improved|same|worse|mixed",
       "occurrences": [{"date", "interview_id", "status": "first_seen|improved|same|worse",
                        "note"}]}],
-  "trend_text": "<= 150 tokens, also the Trend section of the evaluation brief"
+  "impressions": {...},                  # v3: impression vs outcome, app/profile/impressions.py
+  "coach": COACH,                        # v3: the human summary, app/profile/coach.py
+  "trend_text": "<= 150 tokens, plain language, also the Trend section of the evaluation brief"
 }
 SERIES    = {"points": [{"x": "YYYY-MM-DD", "interview_id", "company", "round_type",
                          "y": float, "ma3": float}],   # N/A interviews are omitted
@@ -48,7 +52,8 @@ from datetime import datetime, timezone
 
 from app.profile.evaluate import cap_tokens
 from app.profile.llm import JsonLLM
-from app.profile.rubric import RUBRIC, SCHEMA_VERSION, mean
+from app.profile import coach, impressions
+from app.profile.rubric import RUBRIC, SCHEMA_VERSION, mean, plain
 
 BADGE_THRESHOLD = 1.0  # fitted points (on the 1-10 scale) across the window
 MIN_POINTS = 3
@@ -171,34 +176,42 @@ def recurring_weak_topics(analyses: list[dict], scored: list[dict], llm: JsonLLM
 
 
 def _label(key: str) -> str:
-    return key.split(".")[-1].replace("_", " ")
+    return plain(key)
+
+
+def _date(x: str) -> str:
+    try:
+        return datetime.fromisoformat(x).strftime("%d %b").lstrip("0")
+    except ValueError:
+        return x
+
+
+DIRECTION = {"improving": "getting better", "flat": "holding steady", "declining": "slipping",
+             "insufficient_data": "too early to tell"}
 
 
 def trend_text(trend: dict, calls: dict, topics: list[dict]) -> str:
+    """A plain-language trend line (no rubric names, few numbers); the coach headline
+    replaces it when there is one (see `with_coach`)."""
     dims = trend["dimensions"]
     parts = []
     overall = trend["overall"]
     if overall["n"]:
-        parts.append(f"Overall {overall['badge'].replace('_', ' ')} "
-                     f"({overall['points'][0]['y']:g}->{overall['points'][-1]['y']:g}, "
-                     f"{overall['points'][0]['x']} to {overall['points'][-1]['x']}).")
-    for badge in ("improving", "declining"):
-        names = [f"{d} ({v['fitted_change']:+g})" for d, v in dims.items() if v["badge"] == badge]
+        first, last = overall["points"][0], overall["points"][-1]
+        parts.append(f"Across {overall['n']} interviews ({_date(first['x'])} to {_date(last['x'])}) "
+                     f"your overall level is {DIRECTION[overall['badge']]}, around "
+                     f"{round(last['ma3'])}/10 lately.")
+    for badge, word in (("improving", "Getting better"), ("declining", "Slipping")):
+        names = [_label(d) for d, v in dims.items() if v["badge"] == badge]
         if names:
-            parts.append(f"{badge.capitalize()}: {', '.join(names)}.")
-    flat = [d for d, v in dims.items() if v["badge"] == "flat"]
-    if flat:
-        parts.append(f"Flat: {', '.join(flat)}.")
-    if calls.get("most_improved"):
-        m = calls["most_improved"]
-        parts.append(f"Most improved: {_label(m['key'])} ({m['first']['y']:g} on "
-                     f"{m['first']['x']} -> {m['last']['y']:g} on {m['last']['x']}).")
+            parts.append(f"{word}: {', '.join(names)}.")
     if calls.get("biggest_risk"):
         r = calls["biggest_risk"]
-        parts.append(f"Biggest risk: {_label(r['key'])} (3-interview avg {r['latest_ma3']:g}/10).")
+        parts.append(f"Weakest lately: {_label(r['key'])}.")
     if topics:
-        parts.append("Weak topics: " + "; ".join(
-            f"{t['topic']} x{len(t['occurrences'])} {t['verdict']}" for t in topics[:4]) + ".")
+        repeat = [t for t in topics if t["verdict"] in ("same", "worse")][:2]
+        if repeat:
+            parts.append("Keeps coming up: " + "; ".join(t["topic"] for t in repeat) + ".")
     return cap_tokens(" ".join(parts), TREND_TOKEN_LIMIT)
 
 
@@ -220,8 +233,24 @@ def build(scored: list[dict], topics: list[dict]) -> dict:
         "by_company_stage": _breakdown(ivs, "company_stage"),
         "callouts": calls,
         "recurring_weak_topics": topics,
+        "impressions": impressions.summarize(ivs),
         "trend_text": trend_text(trend, calls, topics),
     }
+
+
+def with_coach(perf: dict, llm: JsonLLM | None, model: str, candidate: str,
+               comp: dict | None = None, previous: dict | None = None) -> dict:
+    """Attach the coach read (cached by input hash; see app/profile/coach.py) and let its
+    headline lead the trend text used by the voice brief."""
+    read = coach.ensure(perf, llm, model, candidate, comp, previous=previous)
+    perf = dict(perf)
+    if read:
+        perf["coach"] = read
+        if read.get("headline"):
+            first = (read.get("this_weeks_focus") or [{}])[0].get("drill", "")
+            perf["trend_text"] = cap_tokens(
+                f"{read['headline']}" + (f" This week: {first}." if first else ""), TREND_TOKEN_LIMIT)
+    return perf
 
 
 CSV_FIELDS = ["date", "interview_id", "company", "company_stage", "round_type", "outcome",

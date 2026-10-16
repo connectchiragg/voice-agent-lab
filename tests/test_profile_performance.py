@@ -65,14 +65,15 @@ def test_build_breakdowns_callouts_and_trend_text():
         {"date": "2026-09-01", "interview_id": "a", "status": "first_seen", "note": "n"},
         {"date": "2026-10-01", "interview_id": "b", "status": "improved", "note": "n"}]}]
     perf = performance.build(list(reversed(ivs)), topics)
-    assert perf["schema_version"] == 2
+    assert perf["schema_version"] == 3
     assert [iv["date"][:10] for iv in perf["interviews"]][0] == "2026-09-01"
     assert perf["by_round_type"]["screen"]["n"] == 1
     assert perf["by_company_stage"]["series_a_b"]["overall"] == pytest.approx(19 / 3, abs=0.01)
     assert perf["trends"]["dimensions"]["technical"]["badge"] == "improving"
     assert perf["callouts"]["most_improved"]["key"].startswith("technical.")
     assert perf["callouts"]["biggest_risk"]["key"] == "communication.pace_fillers"
-    assert "Redis durability x2 improved" in perf["trend_text"]
+    assert "getting better" in perf["trend_text"] and "Redis" not in perf["trend_text"]  # improved
+    assert "pace_fillers" not in perf["trend_text"] and "filler words" in perf["trend_text"]
     assert estimate_tokens(perf["trend_text"]) <= performance.TREND_TOKEN_LIMIT
     rows = list(csv.DictReader(io.StringIO(performance.to_csv(perf))))
     per_iv = 1 + len(rubric.RUBRIC) + len(rubric.SUBDIMENSIONS)
@@ -107,7 +108,7 @@ def test_score_performance_writes_v2_and_keeps_v1_keys(tmp_path):
     llm.json = lambda **kw: reply if "overall_score" in kw["schema"]["properties"] \
         else llm.json_orig(**kw)
     out = importer.score_performance(cfg, record, {}, llm, COMP)
-    assert out["schema_version"] == 2 and out["performance_path"] == "performance.json"
+    assert out["schema_version"] == 3 and out["performance_path"] == "performance.json"
     assert out["trends"] == {"v1": True} and "Trend: " in out["brief_text"]
     perf_text = cfg.performance_path.read_text()
     assert stat.S_IMODE(cfg.performance_path.stat().st_mode) == 0o600
@@ -139,7 +140,7 @@ def test_score_script_prints_no_comp(tmp_path, monkeypatch, capsys):
     assert "scored 1 interviews (1 with transcripts)" in out
     rest = "\n".join(ln for ln in out.splitlines() if not ln.startswith("token spend"))
     assert not re.search(r"\b(31|35|120|66|77|52|59)\b", rest)
-    assert json.loads((tmp_path / "e.json").read_text())["schema_version"] == 2
+    assert json.loads((tmp_path / "e.json").read_text())["schema_version"] == 3
 
 
 def test_parse_json_object_tolerates_fences_and_rejects_garbage():
@@ -204,4 +205,4 @@ def test_score_performance_resumes_from_partial(tmp_path):
     llm2 = FakeLLM()
     importer.score_performance(cfg, {"interviews": [a1, a2]}, {}, llm2, COMP)
     assert sum(1 for c in llm2.calls if "Title: A" in c["user"]) == 0
-    assert not partial.exists() and out["schema_version"] == 2
+    assert not partial.exists() and out["schema_version"] == 3

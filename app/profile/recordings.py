@@ -2,6 +2,7 @@
 
 Normalised meeting:
   {source, id, title, date (ISO 8601 UTC), duration (seconds|None),
+   scheduled_duration (seconds|None; Fathom's calendar slot),
    participants: [names], turns: [{speaker, text, start (seconds|None)}], vendor_summary}
 
 Data minimisation: emails are never requested from Fireflies and are dropped from
@@ -178,9 +179,14 @@ def normalize_fathom(item: dict) -> dict:
     invitees = [i.get("name") or i.get("matched_speaker_display_name")
                 for i in item.get("calendar_invitees") or []]
     summary = (item.get("default_summary") or {}).get("markdown_formatted")
+    scheduled = None  # the calendar slot, to tell an interview that ended early
+    if item.get("scheduled_start_time") and item.get("scheduled_end_time"):
+        scheduled = (datetime.fromisoformat(item["scheduled_end_time"].replace("Z", "+00:00"))
+                     - datetime.fromisoformat(item["scheduled_start_time"].replace("Z", "+00:00"))
+                     ).total_seconds()
     return {"source": "fathom", "id": str(item.get("recording_id")),
             "title": item.get("meeting_title") or item.get("title") or "",
-            "date": start, "duration": duration,
+            "date": start, "duration": duration, "scheduled_duration": scheduled,
             "participants": _names(invitees + [t["speaker"] for t in turns]),
             "turns": turns, "vendor_summary": summary}
 

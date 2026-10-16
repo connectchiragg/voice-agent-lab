@@ -71,6 +71,10 @@ class FakeLLM:
             raise LLMError("declined")
         if "is_interview" in schema["properties"]:
             return dict(self.label)
+        if "where_you_stand" in schema["properties"]:
+            return coach_reply()
+        if "leaned_in" in schema["properties"]:
+            return {"cues": [], "leaned_in": "", "disengaged": "", "close": "none"}
         if "overall_score" in schema["properties"]:
             return rubric_reply(self.rubric_base.pop(0) if self.rubric_base else 6)
         if "topics" in schema["properties"]:
@@ -80,6 +84,24 @@ class FakeLLM:
         if "scores" in schema["properties"]:
             return self.analyses.pop(0) if self.analyses else analysis()
         return dict(BRIEF)
+
+
+def coach_reply() -> dict:
+    return {
+        "where_you_stand": "You are close to the bar. Lead with the answer.",
+        "whats_working": [{"headline": "Clear designs", "detail": "You name components.",
+                           "quote_id": "Q1"}],
+        "whats_costing_you": [{"headline": "Burying the answer", "plain_meaning": "Answer first.",
+                               "why_it_matters": "They stop listening.", "quote_id": "Q1",
+                               "what_happened": "Long preamble.", "do_instead": "Say the answer first.",
+                               "model_rephrase": "Short answer: shard by tenant."}] * 2,
+        "this_weeks_focus": [{"drill": f"Drill {i}", "how": "Timer", "done_when": "Under 60s"}
+                             for i in range(3)],
+        "negotiation": {"read": "You share numbers early.",
+                        "scripts": [{"moment": "Asked current pay", "say": "I'd rather hear the range first."}]},
+        "interviewers": {"leaned_in_when": "You gave numbers.", "disengaged_when": "You rambled.",
+                         "quote_ids": ["Q1", "Q999"]},
+        "headline": "Close to the bar; lead with the answer."}
 
 
 def rubric_reply(base: int, comp_came_up: bool = False) -> dict:

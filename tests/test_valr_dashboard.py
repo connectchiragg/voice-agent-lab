@@ -90,7 +90,8 @@ def test_plain_language_and_ist_times(client):
     import re
     page = client.get("/valr", headers=GOOD).text
     for heading in ("Who you're meeting", "What to expect in this round", "Likely questions",
-                    "Pay snapshot", "Prep checklist", "From your emails &amp; past rounds", "Focus this week"):
+                    "Pay snapshot", "Prep checklist", "From your emails &amp; past rounds", "This week's focus", "Where you stand",
+                    "How the interviewer reacted"):
         assert heading in page, heading
     visible = re.sub(r"<[^>]+>", " ", re.sub(r"<script.*?</script>|<[^>]*=\"[^\"]*\"", " ", page, flags=re.S))
     for jargon in ("R1", "R2", "R3", "slot", "workflow", "cache hit", " block"):
@@ -278,7 +279,9 @@ def test_performance_reads_schema_2_and_falls_back_only_when_missing(tmp_path, m
     # The old 1-5 files are used only when performance.json is missing.
     (tmp_path / "interview_scores.json").write_text(json.dumps({"rows": [
         {"date": f"2026-0{m}-01", "company": "A", "dimension": "structure", "score": 3} for m in (7, 8, 9)]}))
-    assert valr_view.profile_files()[0]["schema_version"] == 2
+    assert valr_view.profile_files()[0]["schema_version"] == 3  # schema 3 is read as is
+    path.write_text(json.dumps(dict(data, schema_version=2)))
+    assert valr_view.profile_files()[0]["schema_version"] == 2  # and schema 2 still is
     path.unlink()
     old, _ = valr_view.profile_files()
     assert valr_view.performance(old)["interviews"][0]["dimensions"] == {"communication": 6.0}
