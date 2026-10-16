@@ -108,7 +108,8 @@ def email_touch(email: Email, decision: Decision, owners: set[str]) -> Touch:
     found = company_names.resolve(attendees=[p.email for p in people] if outbound else [],
                                   sender_email="" if outbound else email.from_email, sender_name=email.from_name,
                                   title=email.subject, stated=decision.company, owner_emails=owners)
-    return Touch(id=f"gmail:{email.id}", kind="email", at=email.at, company=found.name,
+    return Touch(id=f"gmail:{email.id}", kind="email", at=email.at,
+                 company=company_names.firm(found, [p.name for p in people] + [email.from_name]),
                  stated=decision.company[:80], company_how=company_resolver.HOW.get(found.source, "").format(
                      domain=found.domain),
                  domain=domain, people=people, title=email.subject[:140],
@@ -500,10 +501,10 @@ def calendar_to_touches(events: list[Any], owners: set[str], known: set[str] = f
         screen_only = bool(SCREEN_ONLY.search(event.title)) and not INTERVIEW.search(SCREEN_ONLY.sub("", event.title))
         hint = "interviewing" if interview and not screen_only else "screening"
         kind = "Interview" if hint == "interviewing" else "Recruiter chat"
-        found = company_names.resolve(attendees=[p.email for p in people], title=event.title,
-                                      stated=event.company, owner_emails=owners)
+        found = company_names.resolve(attendees=[p.email for p in people], title=event.title, owner_emails=owners)
         out.append(Touch(id=f"cal:{event.key}", kind="calendar",
-                         at=datetime.fromisoformat(event.start_utc), company=found.name, stated=event.company[:80],
+                         at=datetime.fromisoformat(event.start_utc),
+                         company=company_names.firm(found, [p.name for p in people]),
                          company_how=company_resolver.HOW.get(found.source, "").format(domain=found.domain),
                          domain=found.domain or event.company_domain, people=people, title=event.title[:140],
                          summary=f"{kind} on the calendar" + (f" with {len(people)} people" if people else ""),
@@ -539,8 +540,8 @@ def fathom_to_touches(items: list[dict[str, Any]], owners: set[str]) -> list[Tou
         url = str(item.get("share_url") or item.get("url") or "")
         out.append(Touch(id=f"fathom:{recording}", kind="recording",
                          at=datetime.fromisoformat(str(when).replace("Z", "+00:00")),
-                         company=found.name, company_how=company_resolver.HOW.get(found.source, "").format(
-                             domain=found.domain),
+                         company=company_names.firm(found, [p.name for p in people] + mine),
+                         company_how=company_resolver.HOW.get(found.source, "").format(domain=found.domain),
                          domain=found.domain or next((d for d in domains if d), ""), people=people,
                          title=f"Recording: {title[:120]}", summary=" ".join(summary.split()[:30]),
                          url=url if url.startswith("https://") else "", detail_url=detail_url(f"fathom:{recording}")))
@@ -611,42 +612,94 @@ async def snippets(connection: Any) -> dict[str, str]:
     return out
 
 
+TRUSTED_HOW = ("attendee domain", "Gmail sender domain", "set by you", "found via web", "AI review")
+
+
 async def resolve_touches(connection: Any, touches: list[Touch], resolver: company_resolver.Resolver,
                           limit: int | None = None, dry_run: bool = False) -> list[tuple[str, str, str]]:
     """Each email/calendar/recording touch's company, re-derived; changed ones are stored (in
-    place on `touches` too). `limit`: model resolutions this pass. -> [(touch id, before, after)]."""
+    place on `touches` too). `limit`: model resolutions this pass. -> [(touch id, before, after)].
+
+    Two touches of one Gmail thread, or of one lead that had the same name before, never end up
+    with different companies: a split is a conflict, settled by the majority (ties: the earlier
+    name). When the model is unavailable, the stability rule keeps the existing name."""
     await company_resolver.setup(connection)
     owners = resolver.owner_emails
     resolver.agencies |= company_resolver.learn_agencies(touches)
-    known = [n for t in touches for n in (t.stated, t.company) if n and company_names.is_company(n)]
+    resolver.everyone |= {p.name for t in touches for p in t.people if len(p.name.split()) >= 2}
+    for t in touches:
+        if not t.stated and t.company and not t.company_how:
+            t.stated = t.company  # The source's own name: strong evidence, kept for good.
+    trusted = [t.stated for t in touches if t.stated] + [t.company for t in touches if t.company
+                                                         and t.company_how.startswith(TRUSTED_HOW)]
+    known = [n for n in trusted if company_names.is_company(n) and not company_names.is_person(n, (), resolver.everyone)]
+    resolver.known |= set(known)
     texts = await snippets(connection)
-    changes = []
+    decided: list[tuple[Touch, company_resolver.Decision, str]] = []
     for touch in touches:
         if touch.kind not in ("email", "calendar", "recording"):
             continue
         if limit is not None and resolver.calls >= limit:
             resolver.client = None  # Rules and cache only for the rest of this pass.
         beat()
-        if not touch.stated and touch.company and not touch.company_how:
-            touch.stated = touch.company  # The source's own name: strong evidence, kept for good.
         ev = touch_evidence(touch, owners, texts.get(touch.id, ""))
         decision = await resolver.resolve(connection, ev)
-        before = touch.company
         baseline = touch.stated or touch.company  # Repairs compare against the original name.
         if not company_resolver.keep_or_change(baseline, decision, resolver.agencies):
             resolver.kept += 1
-            decision = company_resolver.Decision(names_clean(baseline), "", company_resolver.EXISTING, "existing",
-                                                 "kept the earlier name")
+            kept = names_clean(baseline) if company_names.is_company(names_clean(baseline)) else ""
+            decision = company_resolver.Decision(kept, "", company_resolver.EXISTING, "existing",
+                                                 "kept the earlier name" if kept else "")
         if decision.company:  # One spelling per company: "Chasi" -> "Chasi AI", "Fourkites" -> "FourKites".
             decision.company = company_names.canonical(decision.company, known)
+        decided.append((touch, decision, baseline))
+    settle_splits(decided, resolver)
+    changes = []
+    for touch, decision, _ in decided:
         if (decision.company, decision.how) != (touch.company, touch.company_how):
-            changes.append((touch.id, before, decision.company))
+            changes.append((touch.id, touch.company, decision.company))
             touch.company, touch.company_how = decision.company, decision.how
             if decision.domain:
                 touch.domain = decision.domain
             if not dry_run:
                 await leads_store.upsert_touch(connection, touch)
     return changes
+
+
+def settle_splits(decided: list[tuple[Touch, Any, str]], resolver: company_resolver.Resolver) -> None:
+    """Touches of one thread (or one lead with one earlier name) that came out as different
+    companies: the majority name wins; on a tie, the earlier name."""
+    groups: dict[str, list[int]] = {}
+    for i, (touch, _, baseline) in enumerate(decided):
+        if touch.thread:
+            groups.setdefault("thread:" + touch.thread, []).append(i)
+        if touch.lead_id and baseline and company_names.is_company(baseline):
+            groups.setdefault(f"lead:{touch.lead_id}:{company_names.key(baseline)}", []).append(i)
+    for members in groups.values():
+        named = [decided[i][1].company for i in members if decided[i][1].company]
+        clusters: list[list[str]] = []
+        for name in named:
+            for cluster in clusters:
+                if company_names.same(cluster[0], name):
+                    cluster.append(name)
+                    break
+            else:
+                clusters.append([name])
+        if len(clusters) < 2:
+            continue
+        resolver.skips["split_conflict"] = resolver.skips.get("split_conflict", 0) + 1
+        clusters.sort(key=len, reverse=True)
+        if len(clusters[0]) == len(clusters[1]):
+            earlier = names_clean(decided[members[0]][2])
+            winner = next((c for c in clusters if earlier and company_names.same(c[0], earlier)), clusters[0])
+        else:
+            winner = clusters[0]
+        name = max(set(winner), key=winner.count)
+        for i in members:
+            touch, decision, baseline = decided[i]
+            if decision.company and not company_names.same(decision.company, name):
+                decided[i] = (touch, company_resolver.Decision(name, "", decision.confidence, "majority",
+                                                               "the same thread or lead names it"), baseline)
 
 
 async def repair_recordings(connection: Any, resolver: company_resolver.Resolver,
@@ -680,7 +733,7 @@ async def repair_recordings(connection: Any, resolver: company_resolver.Resolver
     return changes
 
 
-async def repair_companies(dry_run: bool = False, verbose: bool = False) -> dict[str, Any]:
+async def repair_companies(dry_run: bool = False, verbose: bool = False, max_model_calls: int = 500) -> dict[str, Any]:
     """`python -m app.lead_worker repair-companies [--dry-run] [--verbose]`: names only, before -> after;
     `model_path` counts why each unclear case did or did not reach the model (reason codes only).
     The full pipeline (rules -> Haiku -> one web search), with the stability rule: a stored name
@@ -689,6 +742,8 @@ async def repair_companies(dry_run: bool = False, verbose: bool = False) -> dict
     now = datetime.now(timezone.utc)
     resolver = company_resolver.default_resolver(owner_emails())
     resolver.verbose = verbose
+    resolver.daily_cap = False  # A one-time job (~$0.04 for ~270 entities): the month cap and max_model_calls.
+    resolver.max_calls = max_model_calls
     async with await connect() as connection:
         await leads_store.setup(connection)
         everything = await leads_store.touches(connection)
@@ -752,8 +807,9 @@ async def cli(command: str) -> None:
     from temporalio.client import Client
     from app.lead_workflow import SYNC_WORKFLOW_ID, TASK_QUEUE, GmailSyncWorkflow, GmailWatchWorkflow
     if command.startswith("repair-companies"):
-        print(json.dumps(await repair_companies(dry_run="--dry-run" in command, verbose="--verbose" in command),
-                         indent=2))
+        cap = re.search(r"--max-model-calls[= ](\d+)", command)
+        print(json.dumps(await repair_companies(dry_run="--dry-run" in command, verbose="--verbose" in command,
+                                                max_model_calls=int(cap.group(1)) if cap else 500), indent=2))
         return
     if command == "stats":
         async with await connect() as connection:
@@ -787,5 +843,6 @@ if __name__ == "__main__":
     from dotenv import load_dotenv
     load_dotenv(Path(__file__).resolve().parent.parent / ".env")
     if sys.argv[1:2] not in (["sync"], ["watch"], ["stats"], ["repair-companies"]):
-        sys.exit("usage: python -m app.lead_worker sync|watch|stats|repair-companies [--dry-run] [--verbose]")
-    asyncio.run(cli(" ".join(sys.argv[1:4])))
+        sys.exit("usage: python -m app.lead_worker sync|watch|stats|"
+                 "repair-companies [--dry-run] [--verbose] [--max-model-calls N]")
+    asyncio.run(cli(" ".join(sys.argv[1:6])))
