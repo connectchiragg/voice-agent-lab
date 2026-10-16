@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from app import callbacks, research, research_jobs, tools, valr_dashboard
 from app.callbacks import CallbackCall, TurnContext
 from app.research_workflow import TASK_QUEUE, ResearchRequest, workflow_id
+from tests.valr_sample import sample_view
 
 CALLER = "tel:+15550002222"
 
@@ -167,19 +168,20 @@ def test_the_dashboard_needs_a_verified_access_login(monkeypatch):
         async def email(self, token):
             return "owner@example.com" if token == "good" else None
 
-    view = {"today_usd": 0.1, "month_usd": 1.5, "today_jobs": 1, "month_jobs": 9,
-            "limits": research_jobs.Limits(), "promise_minutes": 3, "jobs": [{
-                "job_id": "j", "caller": "abc123def456", "topic": "Coorg <b>", "status": "done",
-                "promised_minutes": 3, "created_at": __import__("datetime").datetime(2026, 10, 16),
-                "duration_s": 61.0, "spend_usd": 0.09, "spoken": "Coorg is lovely.",
-                "notes": [{"fact": "Fact", "source_ids": ["S1"], "sensitive": False}],
-                "sources": [{"id": "S1", "url": "https://karnatakatourism.org/x"}],
-                "cap_hits": {"page_chars": 3}, "detail": ""}]}
+    from app import valr_view
+    view = sample_view()
+    view["jobs"] = [valr_view.job_view({
+        "job_id": "j", "caller": "abc123def456", "topic": "Coorg <b>", "status": "done",
+        "promised_minutes": 3, "created_at": __import__("datetime").datetime(2026, 10, 16),
+        "duration_s": 61.0, "spend_usd": 0.09, "spoken": "Coorg is lovely.",
+        "notes": [{"fact": "Fact", "source_ids": ["S1"], "sensitive": False}],
+        "sources": [{"id": "S1", "url": "https://karnatakatourism.org/x"}],
+        "cap_hits": {"page_chars": 3}, "detail": ""})]
 
-    async def overview(connection, limits, recent=25):
+    async def collect(pool, now=None):
         return view
 
-    monkeypatch.setattr(research_jobs, "overview", overview)
+    monkeypatch.setattr(valr_view, "collect", collect)
     monkeypatch.setattr(research, "pool", FakePool())
     client = TestClient(app)  # No lifespan: no speech, LLM or database needed.
     monkeypatch.setattr(valr_dashboard, "verifier", Verifier())
@@ -187,7 +189,7 @@ def test_the_dashboard_needs_a_verified_access_login(monkeypatch):
     assert client.get("/valr", headers={"Cf-Access-Jwt-Assertion": "bad"}).status_code == 403
     page = client.get("/valr", headers={"Cf-Access-Jwt-Assertion": "good"})
     assert page.status_code == 200 and "Coorg &lt;b&gt;" in page.text
-    assert "https://karnatakatourism.org/x" in page.text and "abc123def456" in page.text
+    assert "61 s" in page.text and "$0.09" in page.text  # Under System: recent research.
     moved = client.get("/", headers={"host": "valr.haciensus.com"}, follow_redirects=False)
     assert moved.status_code == 307 and moved.headers["location"] == "/valr"
     assert client.get("/").status_code == 200  # Other hosts: the voice page.

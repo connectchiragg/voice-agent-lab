@@ -2,9 +2,14 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Voice Agent Lab</title>
-    <link rel="icon" href="data:," />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#05070c" />
+    <title>VALR · Voice Agent Lab</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%2305070c'/%3E%3Ccircle cx='16' cy='16' r='5' fill='%233b82ff'/%3E%3C/svg%3E" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=Space+Grotesk:wght@400;500;600&display=swap" />
+    <link rel="stylesheet" href="/static/theme.css" />
     <link rel="stylesheet" href="/static/style.css" />
     <script type="module">
       // WebRTC by default; ?transport=ws keeps the WebSocket client for one release.
@@ -12,16 +17,85 @@
       import(transport === "ws" ? "/static/voice.js" : "/static/voice-webrtc.js");
     </script>
   </head>
-  <body>
-    <main>
-      <h1>Voice Agent Lab</h1>
-      <p>Speak naturally; the assistant replies when you finish your turn.</p>
-      <p id="status" role="status">Ready to start a call.</p>
-      <section id="messages" role="log" aria-label="Chat messages"></section>
-      <div class="speech-controls">
-        <button id="call" type="button">Start call</button>
-        <span id="metrics"></span>
+  <body data-state="idle">
+    <header class="topbar">
+      <span class="brand"><span class="brand-dot" aria-hidden="true"></span>valr<span class="brand-sub">/ voice</span></span>
+      <div id="connection" class="conn" data-quality="none" title="How your audio reaches VALR">
+        <span class="dot" aria-hidden="true"></span>
+        <span class="conn-text">Not connected</span>
       </div>
+    </header>
+
+    <main class="stage">
+      <section class="intro">
+        <p class="eyebrow"><span class="eb-num">00</span><span class="eb-rule"></span>Talk to VALR</p>
+        <h1>Just talk. <span class="dim">It listens, then answers<span class="accent">.</span></span></h1>
+      </section>
+      <section class="orb-wrap" aria-label="Call">
+        <canvas id="visualizer" class="visualizer" aria-hidden="true"></canvas>
+        <button id="call" type="button" class="talk" aria-describedby="state-label status">
+          <span class="talk-icon" aria-hidden="true">
+            <svg class="i-mic" viewBox="0 0 24 24" width="34" height="34"><path d="M12 15a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3Zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.93V21h2v-2.07A7 7 0 0 0 19 12h-2Z" fill="currentColor"/></svg>
+            <svg class="i-end" viewBox="0 0 24 24" width="34" height="34"><path d="M12 9c-1.6 0-3.15.25-4.6.72v3.1c0 .39-.23.74-.56.9-.98.49-1.87 1.12-2.66 1.85a1 1 0 0 1-1.41-.02L.29 13.08a1 1 0 0 1 0-1.41C3.34 8.78 7.46 7 12 7s8.66 1.78 11.71 4.67a1 1 0 0 1 0 1.41l-2.48 2.47a1 1 0 0 1-1.41.02 11.3 11.3 0 0 0-2.67-1.85 1 1 0 0 1-.56-.9v-3.1A15 15 0 0 0 12 9Z" fill="currentColor"/></svg>
+          </span>
+          <span class="talk-text">Start call</span>
+        </button>
+      </section>
+
+      <div class="state-row">
+        <p id="state-label" class="state-label" aria-live="polite">Ready</p>
+        <p id="hint" class="hint">Tap the button and allow the microphone. Speak naturally; VALR answers when you pause.</p>
+      </div>
+
+      <div class="levels" aria-hidden="true">
+        <span class="lvl you"><i></i>You</span>
+        <span class="lvl valr"><i></i>VALR</span>
+      </div>
+
+      <p id="status" class="status" role="status">Ready to start a call.</p>
+
+      <section class="transcript panel" aria-label="Live captions">
+        <div class="transcript-head">
+          <h2>Live captions</h2>
+          <span class="label">Grey = still hearing you</span>
+        </div>
+        <div id="messages" role="log" aria-label="Chat messages" aria-live="polite">
+          <p class="empty-log muted">Your conversation appears here, word by word, in time with VALR's voice.</p>
+        </div>
+      </section>
+
+      <details id="metrics-panel" class="metrics panel">
+        <summary>
+          <span class="metrics-title">Latency</span>
+          <span id="metrics" class="metrics-summary num">No turns yet</span>
+        </summary>
+        <div class="metrics-body">
+          <dl class="metric-grid num">
+            <div><dt title="From the end of your speech to VALR's first audio leaving the server">Response</dt><dd data-m="response_ms">–</dd></div>
+            <div><dt title="How long Deepgram Flux waited to be sure you had finished">End of turn</dt><dd data-m="endpoint_ms">–</dd></div>
+            <div><dt title="First token from the language model, counted from the end of turn (negative: started early on a guess)">LLM first token</dt><dd data-m="llm_first_token_ms">–</dd></div>
+            <div><dt title="Deepgram Aura's first audio for the first sentence">TTS first audio</dt><dd data-m="tts_first_audio_ms">–</dd></div>
+            <div><dt title="Whether the reply was started before the turn was final">Speculative</dt><dd data-m="speculative">–</dd></div>
+            <div><dt title="The language model answering">Model</dt><dd data-m="llm_model" class="model">–</dd></div>
+          </dl>
+          <div class="spark-wrap">
+            <svg id="spark" class="spark" viewBox="0 0 200 40" preserveAspectRatio="none" role="img" aria-label="Response time of recent turns"></svg>
+            <span class="muted small" id="spark-label">Recent turns</span>
+          </div>
+          <p class="muted small">Response = end of turn + LLM first token + TTS first audio + a little overhead. Under ~800 ms feels conversational.</p>
+        </div>
+      </details>
+
+      <details class="howto panel">
+        <summary>How this works</summary>
+        <ol class="pipeline">
+          <li><b>You speak.</b> Your mic streams to the server over WebRTC (or a WebSocket with <code>?transport=ws</code>).</li>
+          <li><b>Deepgram Flux</b> turns speech into text and decides when your turn has ended.</li>
+          <li><b>The language model</b> (open-weight, on Groq) writes the reply, sentence by sentence.</li>
+          <li><b>Deepgram Aura-2</b> speaks each sentence as soon as it is written; captions follow the audio.</li>
+          <li><b>Barge-in:</b> talk over VALR and it stops within a few hundred milliseconds, remembering only what you heard.</li>
+        </ol>
+      </details>
     </main>
   </body>
 </html>
