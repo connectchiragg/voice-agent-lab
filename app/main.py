@@ -18,6 +18,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 from app import (access, agent, callbacks, groq_api, interviews, leads_web, memory, recordings,
                  research, telegram_bot, telnyx, valr_dashboard, valr_hooks, webrtc)
 from app.notetakers import routes as notetaker_routes
+from app.valr_ui import routes as valr_routes
 from app.deepgram import AuraSpeaker, DeepgramSettings, FluxListener
 from app.pipeline import DEFAULT_BACKCHANNEL, Backchannel, Call, Engines, ReplyEvent, ReplyModel
 from app.transport import SpeechUnavailable, apply_player_event, open_call
@@ -129,6 +130,7 @@ app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
 app.include_router(webrtc.router)
 app.include_router(telnyx.router)
 app.include_router(valr_dashboard.router)
+app.include_router(valr_routes.router)  # /valr/interviews, /valr/leads, ... (GET pages)
 app.include_router(valr_hooks.router)
 app.include_router(telegram_bot.router)
 app.include_router(notetaker_routes.router)

@@ -123,3 +123,8 @@ details.panel[open] > summary::after { content: "−"; }
   .metric-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .talk { width: 160px; height: 160px; }
 }
+
+/* Back to the VALR app (shown on valr.* only). */
+.back-link { margin-left: auto; margin-right: 12px; font: 500 var(--fs-xs)/1 var(--mono); letter-spacing: var(--track-mono); text-transform: uppercase; color: var(--ash); text-decoration: none; }
+.back-link:hover { color: var(--bone); }
+.back-link[hidden] { display: none; }
