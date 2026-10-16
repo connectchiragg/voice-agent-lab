@@ -16,7 +16,7 @@ from app.callback_workflow import TASK_QUEUE as CALLBACK_QUEUE
 from app.callback_workflow import CallResult, DialSlotRequest, PlaceCallInput, workflow_runner
 from app.interview_types import Person, SlotDiff, SlotEvent
 from app.interview_workflow import (TASK_QUEUE, BlockCallWorkflow, BlockInput, BlockRecord,
-                                    InterviewPartInput, InterviewPartResult, InterviewSlotWorkflow,
+                                    HeadsUpInput, InterviewPartInput, InterviewPartResult, InterviewSlotWorkflow,
                                     PlanInput, PlanResult, SlotFinish, SlotInput, SlotPlan,
                                     SlotSynthInput, SlotSynthResult, SlotUpdate)
 
@@ -25,8 +25,13 @@ OWNER = "tel:+15550100001"
 
 class Fakes:
     def __init__(self, env: WorkflowEnvironment, answer_on: int | None = None, cache_hit=False,
-                 ready=True, paused=False):
+                 ready=True, paused=False, auto_dial=True, heads_up="sent"):
         self.env = env
+        # VALR_AUTO_DIAL as briefing_auto_dial reads it. True here keeps the dial tests below
+        # on the dial path; the owner's default (False: a Telegram heads-up) is tested further down.
+        self.auto_dial = auto_dial
+        self.heads_up = heads_up  # What telegram_heads_up returns.
+        self.heads_ups: list[tuple[datetime, HeadsUpInput]] = []
         self.paused = paused  # The dashboard's pause switch, as dials_paused reads it.
         self.answer_on = answer_on
         self.cache_hit = cache_hit
@@ -74,8 +79,17 @@ class Fakes:
         async def dials_paused() -> bool:
             return self.paused
 
+        @activity.defn(name="briefing_auto_dial")
+        async def briefing_auto_dial() -> bool:
+            return self.auto_dial
+
+        @activity.defn(name="telegram_heads_up")
+        async def telegram_heads_up(request: HeadsUpInput) -> str:
+            self.heads_ups.append((await self.env.get_current_time(), request))
+            return self.heads_up
+
         return [slot_plan, interview_part, slot_synthesize, slot_finish, slots_ready, block_record,
-                dials_paused]
+                dials_paused, briefing_auto_dial, telegram_heads_up]
 
     def calls(self, client):
         @activity.defn(name="reserve_dial_slot")
@@ -390,3 +404,105 @@ def test_call_now_signals_at_once_and_picks_the_next_interview():
     assert ids[0].startswith("slot-") and ids[1] == workflow_id  # Research first, then the call.
     request = client.started[1][1]
     assert request.on_demand and request.ready_keys == ["soon"] and workflow_id in client.signals
+
+
+# The owner's design (2026-10-16): a Telegram heads-up at T-30, calls only on request.
+
+def test_by_default_t30_sends_a_heads_up_and_never_dials():
+    async def test(env, fakes):
+        start = await env.get_current_time() + timedelta(hours=1)
+        status = await (await start_block(env, start)).result()
+        assert status.state == "heads_up_sent" and fakes.dials == [] and fakes.budgets == []
+        assert len(fakes.heads_ups) == 1
+        sent_at, request = fakes.heads_ups[0]
+        assert round((start - sent_at).total_seconds() / 60) == 30
+        assert request.block_id == "briefing-x" and request.slot_keys == ["ev1"]
+        assert fakes.records[-1].state == "heads_up_sent"
+    run(test, auto_dial=False)
+
+
+def test_a_failed_heads_up_still_never_dials():
+    async def test(env, fakes):
+        start = await env.get_current_time() + timedelta(hours=1)
+        status = await (await start_block(env, start)).result()
+        assert status.state == "heads_up_failed" and "not linked" in status.detail
+        assert fakes.dials == []
+    run(test, auto_dial=False, heads_up="Telegram is not linked yet")
+
+
+def test_paused_sends_no_heads_up():
+    async def test(env, fakes):
+        start = await env.get_current_time() + timedelta(hours=1)
+        status = await (await start_block(env, start)).result()
+        assert status.state == "paused" and fakes.heads_ups == [] and fakes.dials == []
+    run(test, auto_dial=False, paused=True)
+
+
+def test_a_late_block_gets_its_heads_up_once_research_is_ready():
+    async def test(env, fakes):
+        start = await env.get_current_time() + timedelta(minutes=20)
+        handle = await start_block(env, start)
+        await env.sleep(timedelta(minutes=3))
+        assert fakes.heads_ups == []
+        fakes.is_ready = True
+        status = await handle.result()
+        assert status.state == "heads_up_sent" and fakes.dials == []
+    run(test, auto_dial=False, ready=False)
+
+
+def test_in_ten_minutes_dials_at_the_requested_time():
+    async def test(env, fakes):
+        now = await env.get_current_time()
+        request = BlockInput("briefing-now-later", now.isoformat(), ["ev1"], OWNER,
+                             OWNER.removeprefix("tel:"), "your 4:00 PM interview with Acme",
+                             on_demand=True, call_by_utc=(now + timedelta(minutes=11)).isoformat(),
+                             ready_keys=["ev1"], dial_at_utc=(now + timedelta(minutes=10)).isoformat())
+        handle = await env.client.start_workflow(BlockCallWorkflow.run, request, id="briefing-now-later",
+                                                 task_queue=TASK_QUEUE)
+        await handle.signal(BlockCallWorkflow.call_ended_signal)
+        status = await drive(env, handle, fakes)
+        assert status.state == "briefed" and len(fakes.dials) == 1 and fakes.heads_ups == []
+        assert timedelta(minutes=10) <= fakes.dials[0][0] - now <= timedelta(minutes=10, seconds=30)
+    run(test, auto_dial=False, answer_on=1)
+
+
+def test_cancelling_a_scheduled_call_before_it_is_due_never_dials():
+    async def test(env, fakes):
+        now = await env.get_current_time()
+        request = BlockInput("briefing-now-skip", now.isoformat(), ["ev1"], OWNER,
+                             OWNER.removeprefix("tel:"), "x", on_demand=True,
+                             call_by_utc=(now + timedelta(minutes=11)).isoformat(),
+                             dial_at_utc=(now + timedelta(minutes=10)).isoformat())
+        handle = await env.client.start_workflow(BlockCallWorkflow.run, request, id="briefing-now-skip",
+                                                 task_queue=TASK_QUEUE)
+        await handle.signal(BlockCallWorkflow.call_ended_signal)
+        await env.sleep(timedelta(minutes=4))
+        await handle.signal(BlockCallWorkflow.cancel)
+        assert (await handle.result()).state == "cancelled" and fakes.dials == []
+    run(test, auto_dial=False)
+
+
+def test_call_block_now_with_a_delay_sets_dial_at():
+    from app import call_now
+
+    class Client:
+        def __init__(self):
+            self.started = []
+
+        async def start_workflow(self, run, request, **kwargs):
+            self.started.append(request)
+
+            class Handle:
+                async def signal(self, *args, **kw):
+                    return None
+            return Handle()
+
+    now = datetime.now(timezone.utc)
+    soon = event(now + timedelta(hours=1))
+    client = Client()
+    asyncio.run(call_now.call_block_now(client, [soon], [], OWNER, "+15550100001", "label",
+                                        dial_at=now + timedelta(minutes=10)))
+    request = client.started[0]
+    dial_at = datetime.fromisoformat(request.dial_at_utc)
+    assert request.on_demand and timedelta(minutes=9) < dial_at - now <= timedelta(minutes=10)
+    assert datetime.fromisoformat(request.call_by_utc) - dial_at == timedelta(minutes=1)

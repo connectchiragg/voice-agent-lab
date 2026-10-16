@@ -631,8 +631,24 @@ VALR_INTERVIEW_MONTH_USD; $0.40 per job, VALR_INTERVIEW_JOB_USD); briefing calls
 own 12 dials a day (VALR_BRIEFING_DIALS_PER_DAY), so callbacks cannot starve them.
 VALR_BRIEFING_DIAL=0 keeps everything but never dials; VALR_BRIEFINGS=0 turns the sweep off.
 
-**The briefing call** goes out once, 30 minutes before the block's first interview, and
-rings for 60 seconds (Telnyx `timeout_secs`); unanswered is final (the dashboard shows it).
+**The Telegram heads-up** (owner's design, 2026-10-16) replaces the automatic dial: 30
+minutes before each block, VALR messages the owner's Telegram chat with the interviews'
+calendar titles and times (IST) and a one- or two-line teaser of the brief, with three
+buttons: **📞 Call me now** (an on-demand briefing call, at once; research first if a brief
+is not current, within five minutes), **⏰ In 10 min** (the same, dialled ten minutes later,
+offered only while that is still five minutes before the interview), **Skip**. No reply,
+no call. The message is edited to show the outcome ("Called at 3:31 PM", "Skipped").
+The bot also answers `/next` and `/today` (time, title, status) and `/pause` / `/resume`
+(the dashboard's pause switch). `app/telegram_api.py` (Bot API, owner link, message),
+`app/telegram_bot.py` (the webhook `POST /hooks/telegram`: the `X-Telegram-Bot-Api-Secret-Token`
+must match TELEGRAM_WEBHOOK_SECRET; only the owner's private chat is served, linked once
+with a dashboard `/start <code>` (6 digits, 15 minutes, 5 tries, stored as an HMAC); anyone
+else gets one polite line). Blocks already waiting when this shipped switch at their T-30
+(`workflow.patched("valr-telegram-heads-up")` is checked there). VALR_AUTO_DIAL=1 brings
+back the automatic call below. Set-up: `deploy/install-telegram.sh`.
+
+**The briefing call** (VALR_AUTO_DIAL=1, or on request) goes out once, 30 minutes before
+the block's first interview, and rings for 60 seconds (Telnyx `timeout_secs`); unanswered is final (the dashboard shows it).
 An interview added later is called as soon as its research is ready, if at least five
 minutes are left. Zoom Phone (the owner's number) must not forward to voicemail before 60
 seconds: a voicemail that picks up counts as answered. If a brief is already ready when he

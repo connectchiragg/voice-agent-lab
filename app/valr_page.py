@@ -29,6 +29,13 @@ CALL_STATUS = {
     "briefed": ("You were briefed", "ok"), "unanswered": ("Missed: no answer after 3 tries", "warn"),
     "missed": ("Too late to call", "warn"), "refused": ("Skipped: daily call limit", "bad"),
     "cancelled": ("Cancelled", "muted"), "paused": ("Skipped while paused", "warn"),
+    "heads_up_sent": ("Heads-up sent", "ok"), "heads_up_failed": ("Heads-up not sent", "bad"),
+    "dial_scheduled": ("Call scheduled", "info"),
+}
+HEADS_UP = {  # Telegram heads-up outcome -> (label, tone); "{at}" is the call time.
+    "sent": ("Heads-up sent · no reply, no call", "info"), "called": ("Called at {at}", "ok"),
+    "calling": ("Calling by {at}", "accent"), "later": ("Calling at {at}", "accent"),
+    "skipped": ("Skipped", "muted"),
 }
 PERSON = {
     "researched": ("Researched", "ok"), "skipped_hr": ("Recruiter, not researched", "muted"),
@@ -135,7 +142,40 @@ def header(view: dict[str, Any], clock: Clock, email: str) -> str:
 </header>"""
 
 
+def telegram_mode(view: dict[str, Any]) -> bool:
+    return view.get("mode") == "telegram"
+
+
+def heads_up_card(view: dict[str, Any], clock: Clock) -> str:
+    nxt = view.get("next_call")
+    tg = view["connections"].get("telegram") or {}
+    if view["dials_paused"]["enabled"]:
+        return ('<div class="feature tone-warn-bar"><p class="mono label"><span class="dot warn"></span>Heads-ups paused</p>'
+                '<p class="feature-big">Paused</p><p class="muted">VALR keeps researching but won\'t message you before '
+                'interviews. "Call me now" still works.</p>'
+                '<button class="btn" type="button" data-action="dials" data-paused="false">Resume heads-ups</button></div>')
+    warn = "" if tg.get("linked") else ('<p class="small tone-warn">Telegram is not connected: heads-ups '
+                                         'can\'t be sent. See "Get set up".</p>')
+    if not nxt:
+        return ('<div class="feature"><p class="mono label">Next Telegram heads-up</p><p class="feature-big">None yet</p>'
+                '<p class="muted">No interviews in the next 8 days. VALR messages you on Telegram 30 minutes '
+                f'before each one; tap 📞 to get the briefing call.</p>{warn}</div>')
+    block = next((b for b in view["blocks"] if b["id"] == nxt["block"]), None)
+    n = len(block["slots"]) if block else 1
+    who = ", ".join(dict.fromkeys(s["company"] or s["title"] for s in block["slots"])) if block else nxt["label"]
+    return f"""
+<div class="feature">
+  <p class="mono label"><span class="dot live"></span>Next Telegram heads-up</p>
+  <p class="feature-big num">{clock.time(nxt['at'])}</p>
+  <p class="feature-rel">{e(clock.day(nxt['at']))} · {countdown(nxt['at'])}</p>
+  <p>Before your {'interview' if n == 1 else f'{n} back-to-back interviews'} with <b>{e(who)}</b>.</p>
+  <p class="muted small">Tap 📞 Call me now or ⏰ In 10 min for the briefing call. No reply, no call.</p>{warn}
+</div>"""
+
+
 def next_call_card(view: dict[str, Any], clock: Clock) -> str:
+    if telegram_mode(view):
+        return heads_up_card(view, clock)
     nxt = view.get("next_call")
     paused = view["dials_paused"]["enabled"]
     if not view.get("dial_env"):
@@ -173,16 +213,21 @@ def next_call_card(view: dict[str, Any], clock: Clock) -> str:
 def hero(view: dict[str, Any], clock: Clock) -> str:
     number = view["setup"]["valr_number"]
     paused = view["dials_paused"]["enabled"]
-    pause = ("" if not view.get("dial_env") else
+    noun = "heads-ups" if telegram_mode(view) else "calls"
+    pause = ("" if not view.get("dial_env") and not telegram_mode(view) else
              f'<button class="btn" type="button" data-action="dials" data-paused="{"false" if paused else "true"}" '
-             f'aria-pressed="{"true" if paused else "false"}">{"Resume calls" if paused else "Pause calls"}</button>')
+             f'aria-pressed="{"true" if paused else "false"}">{"Resume " + noun if paused else "Pause " + noun}</button>')
+    lede = ("VALR messages you on Telegram 30 minutes before each interview with a researched briefing ready: "
+            "who you're meeting, what this round is like, the pay band, and what to practise. Tap 📞 and it calls you."
+            if telegram_mode(view) else
+            "VALR calls you 30 minutes before each interview with a researched briefing: who you're meeting, "
+            "what this round is like, the pay band, and what to practise.")
     return f"""
 <section class="hero" id="top" aria-labelledby="hero-title">
   <div class="hero-copy">
     {eyebrow("00", "Interview copilot")}
     <h1 id="hero-title">Walk into every interview <span class="dim">already briefed<span class="accent">.</span></span></h1>
-    <p class="lede">VALR calls you 30 minutes before each interview with a researched briefing: who you're
-    meeting, what this round is like, the pay band, and what to practise.</p>
+    <p class="lede">{lede}</p>
     <div class="actions">
       <a class="btn primary" href="tel:{e(number)}"><span aria-hidden="true">☎</span> Call VALR now <span class="btn-sub num">{e(phone_label(number))}</span></a>
       {pause}
@@ -199,6 +244,7 @@ def hero(view: dict[str, Any], clock: Clock) -> str:
 
 def setup(view: dict[str, Any]) -> str:
     google = view["connections"]["google"]
+    tg = view["connections"].get("telegram") or {}
     s = view["setup"]
     number = phone_label(s["valr_number"])
     g_done = google["state"] == "connected" and not google["expires_soon"]
@@ -214,6 +260,14 @@ def setup(view: dict[str, Any]) -> str:
          "So VALR can learn from your past interview recordings and score how you're doing.",
          '<span class="muted small">Add your Fathom API key to the server settings (FATHOM_API_KEY).</span>'
          if not view["connections"]["fathom"]["configured"] else ""),
+        *([("Connect Telegram", tg.get("linked", False),
+            "VALR sends the heads-up there 30 minutes before each interview; you tap to get the call.",
+            ('<button class="btn small" type="button" data-action="tgcode">Show /start code</button>'
+             '<code class="mono" data-tg-code hidden></code>') if tg.get("configured")
+            else '<span class="muted small">Run deploy/install-telegram.sh with the bot token first.</span>')]
+          if telegram_mode(view) and not tg.get("linked") else
+          [("Connect Telegram", True, "Connected: heads-ups arrive in your VALR chat.", "")]
+          if telegram_mode(view) else []),
         ("Confirm your phone number", s["phone_on_file"],
          "VALR only ever calls the number on file, never anyone else.",
          '<span class="muted small">Set it in the server settings (VALR_OWNER_PHONE).</span>'
@@ -293,13 +347,19 @@ def upcoming(view: dict[str, Any], clock: Clock) -> str:
             day = f"{clock.day(block['start'])} · {clock.local(block['start']).strftime('%a %d %b')}"
             label, tone = CALL_STATUS.get(block["state"], (block["state"], "muted"))
             if block["paused"] and block["state"] in ("scheduled", "waiting"):
-                label, tone = "Paused: no call", "warn"
+                label, tone = ("Paused: no heads-up" if telegram_mode(view) else "Paused: no call"), "warn"
+            sent = block.get("heads_up")
+            if sent:
+                label, tone = HEADS_UP.get(sent["outcome"], (sent["outcome"], "muted"))
+                label = label.format(at=clock.local(sent["call_at"]).strftime("%I:%M %p").lstrip("0")
+                                     if sent.get("call_at") else "–")
             n = len(block["slots"])
             covers = f" · covers {n} back-to-back interviews" if n > 1 else ""
+            what = "Telegram heads-up" if telegram_mode(view) else "Briefing call"
             days.setdefault(day, []).append(f"""
 <div class="group">
   <p class="call-line"><span class="call-icon" aria-hidden="true">☎</span>
-    <span class="call-what">Briefing call at <b>{clock.time(block['call_at'])}</b>{covers}</span>
+    <span class="call-what">{what} at <b>{clock.time(block['call_at'])}</b>{covers}</span>
     <span class="muted small">{countdown(block['call_at'], short=True)}</span>{chip(label, tone)}</p>
   <ul class="ivs">{''.join(interview_row(s, clock) for s in block['slots'])}</ul>
 </div>""")
@@ -543,6 +603,14 @@ def performance(view: dict[str, Any], clock: Clock) -> str:
 
 # System: costs, budgets, connections and runs, folded away.
 
+def telegram_line(tg: dict[str, Any], clock: Clock) -> str:
+    if not tg.get("configured"):
+        return "not set up"
+    if not tg.get("linked"):
+        return "bot ready · not connected (send the /start code)"
+    return "connected" + (f" · since {clock.when(tg['linked_at'])}" if tg.get("linked_at") else "")
+
+
 def system(view: dict[str, Any], clock: Clock) -> str:
     s, ilim = view["spend"], view["spend"]["interview_limits"]
     dials = "".join(meter(view["dials"][k]["used"], view["dials"][k]["limit"], title,
@@ -562,6 +630,7 @@ def system(view: dict[str, Any], clock: Clock) -> str:
   <li><span>Google account</span><span>{e(g['account']) or '–'} · {e(g['state'].replace('_', ' '))}{age}</span></li>
   <li><span>Calendar</span><span>{e(channel)}{until}{synced}</span></li>{error}
   <li><span>Fathom</span><span>{'configured' if c['fathom']['configured'] else 'not configured'}</span></li>
+  <li><span>Telegram</span><span>{telegram_line(c.get('telegram') or {}, clock)}</span></li>
 </ul>"""
     runs = []
     for job in view["jobs"]:

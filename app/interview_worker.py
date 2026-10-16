@@ -10,7 +10,10 @@
   interviewers go through the HR guard and the classifier first.
 - `slot_synthesize`: merge the new parts into the slot's stored context, write the brief.
 - `slot_finish`, `slots_ready`, `block_record`: bookkeeping.
-- `dials_paused`: the dashboard's pause switch for automatic briefing calls.
+- `dials_paused`: the dashboard's pause switch for automatic briefing calls (and, since
+  the Telegram design, for the heads-ups too).
+- `briefing_auto_dial`: VALR_AUTO_DIAL=1 (default off): dial at T-30 instead of a heads-up.
+- `telegram_heads_up`: the T-30 Telegram message with [Call me now] [In 10 min] [Skip].
 
 Nothing here logs an email address, a phone number, an email's text or a pay figure.
 """
@@ -32,11 +35,12 @@ from temporalio.client import Client
 from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
 from temporalio.service import RPCError
 
-from app import calendar_sync, google_oauth, interview_store, interview_types, research_jobs
+from app import (calendar_sync, google_oauth, interview_store, interview_types, research_jobs,
+                 telegram_api)
 from app.interview_types import (Person, SlotEvent, attendee_role, company_key, group_blocks,
                                  people, slot_workflow_id)
 from app.interview_workflow import (TASK_QUEUE, BlockCallWorkflow, BlockInput, BlockRecord,
-                                    InterviewPartInput, InterviewPartResult, InterviewSlotWorkflow,
+                                    HeadsUpInput, InterviewPartInput, InterviewPartResult, InterviewSlotWorkflow,
                                     PlanInput, PlanResult, SlotFinish, SlotInput, SlotPlan,
                                     SlotSynthInput, SlotSynthResult, SlotUpdate, SyncInput,
                                     SyncSummary, RESEARCH_LEAD)
@@ -451,9 +455,47 @@ class InterviewActivities:
             await interview_store.setup(connection)
             return (await interview_store.flag(connection, interview_store.DIALS_PAUSED))["enabled"]
 
+    @activity.defn(name="briefing_auto_dial")
+    async def briefing_auto_dial(self) -> bool:
+        return telegram_api.auto_dial()
+
+    @activity.defn(name="telegram_heads_up")
+    async def telegram_heads_up(self, request: HeadsUpInput) -> str:
+        """Send the block's heads-up; 'sent', or why not (no secrets, no personal data)."""
+        bot = telegram_api.bot()
+        if bot is None:
+            return "Telegram is not configured (TELEGRAM_BOT_TOKEN)"
+        async with await connect() as connection:
+            await telegram_api.setup(connection)
+            await interview_store.setup(connection)
+            await calendar_sync.setup(connection)
+            chat = await telegram_api.owner_chat(connection)
+            if chat is None:
+                return "Telegram is not linked yet (send the dashboard's /start code)"
+            snapshots = await calendar_sync.snapshots(connection, list(request.slot_keys))
+            events = [snapshots[key] for key in request.slot_keys
+                      if key in snapshots and interview_types.briefable(snapshots[key])]
+            slots = await interview_store.load_slots(connection, [e.key for e in events])
+        if not events:
+            return "no interviews left in this block"
+        spoken = {slot["key"]: slot.get("spoken") or "" for slot in slots
+                  if slot.get("status") in ("done", "partial")}
+        text = telegram_api.heads_up_text(events, spoken, datetime.now(timezone.utc))
+        try:
+            message_id = await bot.send(chat, text, telegram_api.keyboard(request.block_id))
+        except telegram_api.TelegramError as error:
+            logger.warning("VALR Telegram heads-up failed: %s", error)
+            return f"failed: {error}"[:200]
+        async with await connect() as connection:
+            await telegram_api.setup(connection)
+            await telegram_api.record_heads_up(connection, request.block_id, message_id)
+        logger.info("VALR Telegram heads-up sent for %s", request.block_id)
+        return "sent"
+
     def all(self) -> list[Any]:
         return [self.calendar_sync, self.slot_plan, self.interview_part, self.slot_synthesize,
-                self.slot_finish, self.slots_ready, self.block_record, self.dials_paused]
+                self.slot_finish, self.slots_ready, self.block_record, self.dials_paused,
+                self.briefing_auto_dial, self.telegram_heads_up]
 
 
 def part_record(result: InterviewPartResult) -> dict[str, Any]:
