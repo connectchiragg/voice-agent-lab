@@ -21,7 +21,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from app import calendar_sync, google_oauth, interview_store, interviews, research_jobs
+from app import (calendar_sync, google_oauth, interview_store, interviews, research_jobs,
+                 telegram_api)
 from app.interview_types import (TOOL_DOMAINS, SlotEvent, attendee_role, group_blocks, people,
                                  slot_workflow_id)
 from app.interview_workflow import MIN_LEFT_TO_CALL, RESEARCH_LEAD, SINGLE_CALL_LEAD
@@ -31,7 +32,8 @@ LOOK_BACK = timedelta(hours=12)
 LOOK_AHEAD = timedelta(days=8)
 RESEARCHING = {"booked", "running"}
 READY = {"done", "partial", "apologized"}
-FINAL_BLOCK = {"briefed", "unanswered", "missed", "refused", "cancelled", "paused"}
+FINAL_BLOCK = {"briefed", "unanswered", "missed", "refused", "cancelled", "paused", "heads_up_sent",
+               "heads_up_failed"}
 EMAIL = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
 PHONE = re.compile(r"\+\d[\d\s().-]{7,}\d|\(\d{3}\)\s?\d{3}[-.\s]\d{4}|\b\d{3}[-.\s]\d{3}[-.\s]\d{4}\b"
                    r"|\b\d{5}\s?\d{5}\b")
@@ -550,7 +552,31 @@ async def timeline(connection: Any, now: datetime, paused: bool) -> list[dict[st
     companies = {}
     for ckey in {s.get("company_key") for s in slots.values()} - {None, ""}:
         companies[ckey] = await interview_store.company(connection, ckey)
-    return build_blocks(events, recorded, slots, jobs, companies, owner_emails(), now, paused)
+    blocks = build_blocks(events, recorded, slots, jobs, companies, owner_emails(), now, paused)
+    try:
+        await telegram_api.setup(connection)
+        sent = await telegram_api.heads_ups(connection, [block["id"] for block in blocks])
+    except Exception as error:  # noqa: BLE001
+        logger.warning("VALR Telegram heads-ups unavailable: %s", type(error).__name__)
+        sent = {}
+    for block in blocks:
+        row = sent.get(block["id"])
+        block["heads_up"] = None if row is None else {
+            "outcome": row["outcome"], "sent_at": iso(row["sent_at"]),
+            "outcome_at": iso(row["outcome_at"]), "call_at": iso(row["call_at"])}
+    return blocks
+
+
+async def telegram_view(connection: Any) -> dict[str, Any]:
+    view = {"configured": telegram_api.configured(), "linked": False, "linked_at": None}
+    try:
+        await telegram_api.setup(connection)
+        status = await telegram_api.link_status(connection)
+        view.update(linked=status["linked"], linked_at=iso(status["linked_at"]))
+    except Exception as error:  # noqa: BLE001
+        logger.warning("VALR Telegram link unavailable: %s", type(error).__name__)
+        view["error"] = True
+    return view
 
 
 async def collect(pool: Any, now: datetime | None = None) -> dict[str, Any]:
@@ -597,7 +623,12 @@ async def collect(pool: Any, now: datetime | None = None) -> dict[str, Any]:
         except Exception as error:  # noqa: BLE001
             logger.warning("Calendar state unavailable: %s", type(error).__name__)
             calendar = {"channel": "unknown"}
-    view["next_call"] = next_call(view["blocks"], now, paused["enabled"] or not view["dial_env"])
+        telegram = await telegram_view(connection)
+    # telegram: a heads-up at T-30 and calls only on request; call: the automatic T-30 dial.
+    view["mode"] = "call" if telegram_api.auto_dial() else "telegram"
+    # The next T-30 step (a heads-up, or the dial; VALR_BRIEFING_DIAL=0 stops only the dial).
+    view["next_call"] = next_call(view["blocks"], now, paused["enabled"] or (
+        view["mode"] == "call" and not view["dial_env"]))
     view["connections"] = {
         "google": {"state": google.get("state", "unknown"), "account": google.get("account") or "",
                    "age_days": google.get("age_days"), "expires_soon": bool(google.get("expires_soon")),
@@ -605,6 +636,7 @@ async def collect(pool: Any, now: datetime | None = None) -> dict[str, Any]:
                    "configured": google_oauth.OAuthSettings.from_env() is not None},
         "fathom": {"configured": bool(os.getenv("FATHOM_API_KEY", "").strip())},
         "calendar": calendar,
+        "telegram": telegram,
     }
     view["dials"] = await dial_counts(now)
     perf, target = profile_files()

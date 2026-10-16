@@ -6,8 +6,9 @@ notes, the performance trend, spend and dial limits, connections, recent researc
 runs), and `GET /valr/api/state`, the same view as JSON (app/valr_view.py).
 
 Actions (`POST /valr/api/...`, the owner only, see `action_owner`): `sync` starts a
-calendar sync; `dials` {paused} sets the pause switch the briefing-call workflows check
-before each automatic dial; `slots/<ref>/refresh` re-runs one interview's research
+calendar sync; `dials` {paused} sets the pause switch the briefing workflows check
+before each heads-up or automatic dial; `telegram/code` issues a one-time `/start`
+code (15 minutes) that links the owner's Telegram chat; `slots/<ref>/refresh` re-runs one interview's research
 with the caches bypassed. Each needs a same-origin JSON request carrying the page's
 CSRF token (HMAC of the viewer's email and the issue time, 12 hours).
 
@@ -34,7 +35,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from app import (access, calendar_sync, callbacks, google_oauth, interview_store, interviews,
-                 research, valr_page, valr_view)
+                 research, telegram_api, valr_page, valr_view)
 from app.interview_types import group_blocks, slot_workflow_id
 
 logger = logging.getLogger("uvicorn.error")
@@ -274,6 +275,24 @@ async def set_dials(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True, "paused": body.paused,
                          "message": "Automatic calls paused." if body.paused
                          else "Automatic calls resumed."}, headers=NO_CACHE)
+
+
+@router.post("/valr/api/telegram/code")
+async def telegram_code(request: Request) -> JSONResponse:
+    """A one-time code: the owner sends `/start <code>` to the bot to link his chat."""
+    await action_owner(request)
+    if not telegram_api.configured():
+        raise HTTPException(503, "Telegram is not set up yet (deploy/install-telegram.sh).")
+    if research.pool is None:
+        raise HTTPException(503, "Postgres is unavailable.")
+    async with research.pool.connection() as connection:
+        await telegram_api.setup(connection)
+        code = await telegram_api.new_code(connection)
+    logger.info("VALR Telegram link code issued from the dashboard")
+    minutes = int(telegram_api.CODE_TTL.total_seconds() // 60)
+    return JSONResponse({"ok": True, "command": f"/start {code}", "expires_minutes": minutes,
+                         "message": f"Send /start {code} to the VALR bot within {minutes} minutes."},
+                        headers=NO_CACHE)
 
 
 @router.post("/valr/api/call-now")

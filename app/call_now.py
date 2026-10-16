@@ -1,5 +1,6 @@
 """Call the owner now with a briefing for one interview ("Call me now", and the admin CLI
-`python -m app.research_worker call-now [next|<slot>]`).
+`python -m app.research_worker call-now [next|<slot>]`), or for a block's interviews
+(Telegram's [Call me now] and [In 10 min] buttons, `call_block_now`).
 
 An on-demand BlockCallWorkflow for that one interview, signalled at once (there is no call
 to wait for). If the interview's brief is not current, its slot workflow is asked to
@@ -43,14 +44,30 @@ async def call_now(client: Any, event: SlotEvent, owner_key: str, phone_e164: st
                    brief_ready: bool, job_usd: float = 0.40, dials_per_day: int = 12,
                    **rpc: Any) -> str:
     """Start the call; returns its workflow id."""
-    if not brief_ready:
+    return await call_block_now(client, [event], [] if brief_ready else [event], owner_key,
+                                phone_e164, label_for(event), job_usd, dials_per_day, **rpc)
+
+
+async def call_block_now(client: Any, events: list[SlotEvent], todo: list[SlotEvent],
+                         owner_key: str, phone_e164: str, label: str, job_usd: float = 0.40,
+                         dials_per_day: int = 12, dial_at: datetime | None = None,
+                         **rpc: Any) -> str:
+    """Call about these interviews now, or at `dial_at` (Telegram's "In 10 min").
+
+    `todo`: the ones whose brief is not current; they research first (within the
+    five-minute promise when calling now). Returns the call workflow's id."""
+    for event in todo:
         await start_slot_research(client, event, owner_key, "", False, RESEARCH_S, job_usd, **rpc)
     now = datetime.now(timezone.utc)
-    workflow_id = ("briefing-now-" + hashlib.sha256(event.key.encode()).hexdigest()[:12]
+    keys = [event.key for event in events]
+    workflow_id = ("briefing-now-" + hashlib.sha256("|".join(keys).encode()).hexdigest()[:12]
                    + f"-{now:%H%M%S}")
-    request = BlockInput(workflow_id, now.isoformat(), [event.key], owner_key, phone_e164,
-                         label_for(event), on_demand=True, dials_per_day=dials_per_day,
-                         call_by_utc=(now + PROMISE).isoformat(), ready_keys=[event.key])
+    due = max(dial_at or now, now)
+    request = BlockInput(workflow_id, now.isoformat(), keys, owner_key, phone_e164, label,
+                         on_demand=True, dials_per_day=dials_per_day,
+                         call_by_utc=(due + PROMISE).isoformat() if dial_at is None
+                         else (due + timedelta(minutes=1)).isoformat(),
+                         ready_keys=keys, dial_at_utc=due.isoformat() if dial_at else "")
     handle = await client.start_workflow(BlockCallWorkflow.run, request, id=workflow_id,
                                          task_queue=TASK_QUEUE, **rpc)
     await handle.signal(BlockCallWorkflow.call_ended_signal, **rpc)  # No call to wait for.

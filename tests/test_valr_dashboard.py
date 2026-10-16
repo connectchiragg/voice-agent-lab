@@ -282,3 +282,46 @@ def test_performance_reads_schema_2_and_falls_back_only_when_missing(tmp_path, m
     assert valr_view.performance(old)["interviews"][0]["dimensions"] == {"communication": 6.0}
     (tmp_path / "interview_scores.json").unlink()
     assert valr_view.performance(valr_view.profile_files()[0])["available"] is False
+
+
+def test_telegram_mode_tile_statuses_and_start_code(client, monkeypatch):
+    from app import telegram_api
+
+    async def collect(pool, now=None):
+        view = sample_view()
+        view["mode"] = "telegram"
+        view["connections"]["telegram"] = {"configured": True, "linked": False, "linked_at": None}
+        view["blocks"][0]["heads_up"] = {"outcome": "later", "sent_at": view["generated_at"],
+                                         "outcome_at": view["generated_at"],
+                                         "call_at": "2026-10-16T10:40:00+00:00"}
+        return view
+
+    codes = []
+
+    async def none(connection):
+        return None
+
+    async def new_code(connection, now=None):
+        codes.append("246810")
+        return "246810"
+
+    monkeypatch.setattr(valr_view, "collect", collect)
+    monkeypatch.setattr(telegram_api, "setup", none)
+    monkeypatch.setattr(telegram_api, "new_code", new_code)
+    page = client.get("/valr", headers=GOOD).text
+    assert "Next Telegram heads-up" in page and "Telegram heads-up at" in page
+    assert "Calling at 4:10 PM" in page and "Pause heads-ups" in page
+    assert "Connect Telegram" in page and 'data-action="tgcode"' in page
+    assert "Telegram is not connected" in page and "not connected (send the /start code)" in page
+    csrf = token(client)
+    headers = {**GOOD, "Content-Type": "application/json", "X-CSRF-Token": csrf}
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    assert client.post("/valr/api/telegram/code", content="{}", headers=headers).status_code == 503
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "1:x")
+    monkeypatch.setenv("TELEGRAM_WEBHOOK_SECRET", "y" * 40)
+    assert client.post("/valr/api/telegram/code", content="{}", headers=GOOD).status_code in (403, 415)
+    guest = {**headers, "Cf-Access-Jwt-Assertion": "guest"}
+    assert client.post("/valr/api/telegram/code", content="{}", headers=guest).status_code == 403
+    assert codes == []
+    ok = client.post("/valr/api/telegram/code", content="{}", headers=headers)
+    assert ok.status_code == 200 and ok.json()["command"] == "/start 246810"

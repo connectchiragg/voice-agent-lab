@@ -26,8 +26,15 @@ Three workflows, all run by the research worker:
   Its own daily dial budget ("briefing").
   Before each scheduled dial it asks `dials_paused` (the dashboard's pause switch);
   a paused call is skipped.
+  Since 2026-10-16 (owner's design, patch `valr-telegram-heads-up`) the T-30 step sends
+  a Telegram heads-up instead of dialling (activity `telegram_heads_up`): the owner taps
+  [Call me now] or [In 10 min] to get the call (an on-demand run of this workflow), or
+  nothing and there is no call. VALR_AUTO_DIAL=1 (activity `briefing_auto_dial`, read
+  at T-30) brings the automatic dial back. Blocks already waiting when this shipped take
+  the new path at their T-30, because the patch is checked there.
   The on-demand variant ("research tomorrow's interviews" on a call) waits for that
-  call to end and for the slots' research, then calls back at once.
+  call to end and for the slots' research, then calls back at once; with `dial_at_utc`
+  (Telegram's [In 10 min]) it first waits until then.
 
 Workflow code reads time only through workflow.now() and does all I/O in activities.
 Imports only the standard library, temporalio and the pure modules.
@@ -61,6 +68,7 @@ PART_SECONDS = 240
 SYNTH_SECONDS = 150
 FULL = ("private", "round", "interviewers", "company")
 DIAL_PAUSE_PATCH = "valr-dial-pause"
+HEADS_UP_PATCH = "valr-telegram-heads-up"
 
 
 @dataclass
@@ -368,6 +376,15 @@ class BlockInput:
     dials_per_day: int = BRIEFING_DIALS_PER_DAY
     call_by_utc: str = ""  # On demand: the promised time; dial by then, ready or not.
     ready_keys: list[str] = field(default_factory=list)  # Wait for these (empty: all).
+    dial_at_utc: str = ""  # On demand: not before this (Telegram's "In 10 min").
+
+
+@dataclass
+class HeadsUpInput:
+    block_id: str
+    start_utc: str
+    slot_keys: list[str]
+    label: str
 
 
 @dataclass
@@ -390,7 +407,8 @@ class CallAttempt:
 @dataclass
 class BlockStatus:
     state: str  # waiting, waiting_for_call_end, waiting_for_research, calling, briefed,
-    #             unanswered, cancelled, missed, refused.
+    #             unanswered, cancelled, missed, refused, paused, heads_up_sent,
+    #             heads_up_failed, dial_scheduled (on demand, until dial_at_utc).
     block_id: str
     start_utc: str
     attempts: list[CallAttempt] = field(default_factory=list)
@@ -419,6 +437,10 @@ class BlockCallWorkflow:
                                               timeout=CALL_END_WAIT)
             except TimeoutError:
                 pass
+            if block.dial_at_utc:
+                self.status.state = "dial_scheduled"
+                if not await self.sleep_until(parse(block.dial_at_utc)):
+                    return await self.finish(block, "cancelled")
             self.status.state = "waiting_for_research"
             deadline = (parse(block.call_by_utc) - DIAL_LEAD) if block.call_by_utc \
                 else workflow.now() + READY_WAIT
@@ -455,13 +477,23 @@ class BlockCallWorkflow:
                 return await self.finish(block, "cancelled")
             if not block.on_demand and workflow.now() >= start:
                 return await self.finish(block, "missed", "the block started before an answer")
-            if not block.dial:
+            # Checked here (at T-30), so blocks already waiting when it shipped switch too;
+            # older histories replay without the marker and keep dialling.
+            heads_up = not block.on_demand and workflow.patched(HEADS_UP_PATCH)
+            if not block.dial and not heads_up:
                 return await self.finish(block, "briefed", "dry run: not dialled")
             # Patched: blocks already running when this shipped replay without the check.
             if not block.on_demand and workflow.patched(DIAL_PAUSE_PATCH) and await self.paused():
                 paused += 1
                 self.status.detail = "automatic calls are paused"
                 continue
+            if heads_up and not await self.auto_dial():
+                result = await self.send_heads_up(block)
+                if result == "sent":
+                    return await self.finish(block, "heads_up_sent", "no call unless asked")
+                return await self.finish(block, "heads_up_failed", result)
+            if not block.dial:
+                return await self.finish(block, "briefed", "dry run: not dialled")
             attempt = CallAttempt(number, workflow.now().isoformat())
             self.status.attempts.append(attempt)
             if not await self.reserve(block, attempt):
@@ -487,6 +519,24 @@ class BlockCallWorkflow:
                 retry_policy=RetryPolicy(maximum_attempts=3))
         except ActivityError:
             return False  # Unknown: dial as before; the daily budget still applies.
+
+    async def auto_dial(self) -> bool:
+        try:
+            return await workflow.execute_activity(
+                "briefing_auto_dial", result_type=bool, start_to_close_timeout=timedelta(seconds=20),
+                retry_policy=RetryPolicy(maximum_attempts=3))
+        except ActivityError:
+            return False  # Unknown: no automatic call (the owner's default).
+
+    async def send_heads_up(self, block: BlockInput) -> str:
+        try:
+            return await workflow.execute_activity(
+                "telegram_heads_up", HeadsUpInput(block.block_id, block.start_utc,
+                                                  list(self.slot_keys), block.label),
+                result_type=str, start_to_close_timeout=timedelta(seconds=45),
+                retry_policy=RetryPolicy(maximum_attempts=2))
+        except ActivityError as error:
+            return f"heads-up failed: {type(error.cause or error).__name__}"
 
     async def sleep(self, duration: timedelta) -> None:
         try:

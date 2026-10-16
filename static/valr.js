@@ -76,7 +76,7 @@ async function post(path, body = {}) {
   if (!response.ok) throw new Error(typeof data.detail === "string" ? data.detail : `Something went wrong (HTTP ${response.status}).`);
   return data;
 }
-const BUSY = {sync: "Syncing…", refresh: "Starting…", dials: "Saving…", callnow: "Calling…"};
+const BUSY = {sync: "Syncing…", refresh: "Starting…", dials: "Saving…", callnow: "Calling…", tgcode: "Getting a code…"};
 document.addEventListener("click", async event => {
   const button = event.target.closest("button[data-action]");
   if (!button) return;
@@ -97,6 +97,13 @@ document.addEventListener("click", async event => {
       result = await post("/valr/api/call-now");
     } else if (action === "refresh") {
       result = await post(`/valr/api/slots/${encodeURIComponent(button.dataset.ref)}/refresh`);
+    } else if (action === "tgcode") {
+      result = await post("/valr/api/telegram/code");
+      const code = button.parentElement.querySelector("[data-tg-code]");
+      if (code) {
+        code.textContent = `${result.command} (valid ${result.expires_minutes} min)`;
+        code.hidden = false;
+      }
     } else if (action === "dials") {
       result = await post("/valr/api/dials", {paused: button.dataset.paused === "true"});
       setTimeout(() => { rememberOpen(); location.reload(); }, 600);

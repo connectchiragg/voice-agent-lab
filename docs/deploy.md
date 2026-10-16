@@ -392,6 +392,12 @@ anonymised caller hashes, never numbers.
 - Cloudflare Access: `valr.haciensus.com/hooks/gcal` is bypassed (Google posts there);
   everything else on the host, including `/oauth/google/*` and `/valr/context`, stays
   behind Access.
+- Telegram heads-up: `valr.haciensus.com/hooks/telegram` (exact path, POST) is bypassed
+  too (Telegram cannot log in); the app refuses any request without the matching
+  `X-Telegram-Bot-Api-Secret-Token` and serves only the owner's linked chat. Run
+  `deploy/install-telegram.sh` on the Mac (prompts for the @BotFather token, generates
+  TELEGRAM_WEBHOOK_SECRET, writes both to `.env`, restarts the app and the worker, calls
+  setWebhook), then link the chat with the dashboard's `/start <code>`.
 - The app container now runs with the data mount:
   `sudo docker run -d --name voice-agent-lab --restart unless-stopped --env-file .env --network voice-agent-lab -v /srv/valr-data:/data:ro -p 127.0.0.1:7860:7860 voice-agent-lab:latest`
 - Check: `sudo docker exec voice-research python -m app.research_worker blocks` (dry run)
