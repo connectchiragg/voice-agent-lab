@@ -29,6 +29,7 @@ parse_flags "$@"
 trap ssh_close EXIT
 
 say "Deploying $BRANCH at $COMMIT to $VM (stamp $STAMP), images from $GHCR"
+step_disk_preflight
 step_rollback_tags
 step_ship_source
 

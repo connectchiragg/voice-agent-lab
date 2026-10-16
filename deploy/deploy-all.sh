@@ -13,7 +13,8 @@
 # deploy/deploy-pull.sh, which pulls images built by GitHub Actions instead.
 #
 # Steps, stopping at the first failure:
-#  0. Checks that the VM has docker buildx (else stops, changing nothing).
+#  0. Checks that the VM has docker buildx, and its free disk: under PRUNE_BELOW_GB (6) it
+#     prunes old rollback tags and build cache first, under ABORT_BELOW_GB (4) it stops.
 #  1. Tags the images the running containers use as :rollback-<stamp> (by image id, so a
 #     retagged :latest, such as an unreleased build, does not matter).
 #  2. Ships `git archive $BRANCH` to ~/voice-agent-lab.next with the .env and .env.research of
@@ -29,7 +30,9 @@
 #     restarts voice-callbacks only if its code (app/callback_worker.py,
 #     app/callback_workflow.py) or the app's packages changed.
 #  7. Checks: app healthy, /healthz ok, the worker's "VALR LLM gateway" and "research worker
-#     on" log lines, no "BYOK ALERT". Prints the rollback commands.
+#     on" log lines, no "BYOK ALERT". Then retention (only after success): keeps the
+#     rollback tags of the 2 newest deploys, the 2 newest .prev-*/.bad-* trees, build cache
+#     under 3 GB, and removes dangling images. Prints the rollback commands.
 # Never touches cloudflared, Temporal or Postgres. Secrets are never printed.
 set -euo pipefail
 VM=${VM:-ubuntu@<vm-ip>}
@@ -55,6 +58,7 @@ echo "  ssh -i ~/.ssh/voice-agent-lab_ed25519 ubuntu@<vm-ip> 'sh -s' < deploy/vm
 echo "Nothing changed." >&2
 exit 1
 REMOTE
+step_disk_preflight
 step_rollback_tags
 step_ship_source
 
