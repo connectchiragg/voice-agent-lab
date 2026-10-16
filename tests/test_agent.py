@@ -58,7 +58,8 @@ def test_history_reaches_the_next_turn_and_survives_a_rebuild(graph, monkeypatch
     run_turn(cid, "first")
     monkeypatch.setattr(agent, "graph", agent.build_graph(graph))  # State only from checkpoints.
     run_turn(cid, "second")
-    assert [m["content"] for m in seen[1]["messages"][1:]] == ["first", "reply one", "second"]
+    assert [m["content"] for m in seen[1]["messages"][1:] if m["role"] != "system"] == [
+        "first", "reply one", "second"]
     assert len(history(cid)) == 4
 
 
@@ -75,8 +76,9 @@ def test_tool_call_runs_tool_and_answers_without_filler_when_fast(graph, monkeyp
     assert "time" in json.loads(turns[2]["parts"][0]["text"])
     # The second model call sees the call and its result, in API format.
     second = seen[1]["messages"]
-    assert second[2]["tool_calls"][0]["id"] == "call-1"
-    assert second[3] == {"role": "tool", "tool_call_id": "call-1", "content": turns[2]["parts"][0]["text"]}
+    assert second[2]["role"] == "system"  # The local time, after the latest user message.
+    assert second[3]["tool_calls"][0]["id"] == "call-1"
+    assert second[4] == {"role": "tool", "tool_call_id": "call-1", "content": turns[2]["parts"][0]["text"]}
 
 
 def slow_tool(monkeypatch, seconds=0.05):
@@ -250,7 +252,7 @@ def test_interrupted_committed_speculation_keeps_its_completed_steps(graph, monk
     slow_tool(monkeypatch, seconds=0)
 
     async def stream_model(messages, tools=None, tool_choice=None):
-        if tools is not None and len(messages) == 2:
+        if tools is not None and len(messages) == 3:  # System, user, the local time.
             yield [ToolCallRequest("c", "get_weather", "{}")]
             return
         yield "It is sunny"

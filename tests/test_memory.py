@@ -529,7 +529,7 @@ def test_the_greeting_is_history_the_model_sees_and_the_summary_reads(store, gra
         return await agent.load_history(cid)
     assert [m["role"] for m in asyncio.run(scenario())] == ["model"]
     agent_turn(cid, "Weather in Mysore?")
-    assert [(m["role"], m["content"]) for m in seen[0][1:]] == [
+    assert [(m["role"], m["content"]) for m in seen[0][1:] if m["role"] != "system"] == [
         ("assistant", "Hi, this is VALR. How can I help?"), ("user", "Weather in Mysore?")]
     history = asyncio.run(agent.load_history(cid))
     assert memory.dialogue_text(history).startswith("Assistant: Hi, this is VALR.")
