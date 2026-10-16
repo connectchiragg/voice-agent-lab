@@ -17,8 +17,8 @@
   (app/leads.build) and saved.
 - `gmail_watch`: users.watch on VALR_GMAIL_TOPIC, daily.
 - Notifications (app/notifications.py): a kept inbound email in an incremental pass becomes a
-  bell item (`notify_email`); after each rebuild, stage changes, "waiting on you" and gone-quiet
-  leads do too, and anything due goes out on Telegram (`notify_rebuild`).
+  bell item (`notify_email`); after each rebuild, email notifications are linked to their lead
+  and anything due goes out on Telegram (`notify_rebuild`).
 
 Settings: VALR_LEADS=1 turns the schedules on; VALR_GMAIL_TOPIC; VALR_LEADS_BACKFILL_DAYS (30),
 VALR_LEADS_BACKFILL_MAX (500), VALR_LEADS_LLM_PER_DAY (300), VALR_LEADS_POLL_MINUTES (30),
@@ -139,7 +139,8 @@ async def notify_email(connection: Any, email: Email, decision: Decision, touch:
 
 
 async def notify_rebuild(connection: Any, built: list[Any], bot: Any = None) -> None:
-    """After a lead rebuild: lead events, then Telegram for anything due. Never fails the refresh."""
+    """After a lead rebuild: link email notifications to their lead, then Telegram for anything
+    due. Never fails the refresh."""
     from app import notifications
     try:
         store = notifications.Store(connection)
@@ -511,7 +512,7 @@ def calendar_to_touches(events: list[Any], owners: set[str], known: set[str] = f
     - recruiter intro chats: the title says intro, recruiter or screen, with an outside attendee;
     - any meeting where the organizer or an attendee is already a contact on a Gmail lead
       (`known`: their email addresses)."""
-    from app.interview_types import INTERVIEW, Person, attendee_role, event_noun
+    from app.interview_types import INTERVIEW, Person, attendee_role, looks_like_interview
     out = []
     for event in events:
         if event.all_day or event.declined or event.status == "cancelled":
@@ -526,10 +527,10 @@ def calendar_to_touches(events: list[Any], owners: set[str], known: set[str] = f
                 people.append(Contact(person.email.lower(), person.name,
                                       "interviewer" if role == "candidate" else "recruiter"))
         outside = bool(people)
-        interview = bool(INTERVIEW.search(event.title)) and event_noun(event.title) == "interview"
+        interview = looks_like_interview(event, owners)
         intro = bool(INTRO.search(event.title)) and outside
         contact = any(p.email.lower() in known for p in everyone if p.email)
-        if not ((interview and (event.company or outside)) or intro or contact):
+        if not (interview or intro or contact):
             continue
         screen_only = bool(SCREEN_ONLY.search(event.title)) and not INTERVIEW.search(SCREEN_ONLY.sub("", event.title))
         hint = "interviewing" if interview and not screen_only else "screening"

@@ -1,5 +1,5 @@
 """Notifications: which emails notify, the dedupe, quiet hours and the digest, Telegram text
-without PII, lead events, and the owner-only API. All names, addresses and numbers are fictional."""
+without PII, calendar changes, the removed inferred kinds, and the owner-only API. All names, addresses and numbers are fictional."""
 import asyncio
 import json
 import os
@@ -35,7 +35,12 @@ class MemoryStore:
         self.rows, self.states, self.settings, self.next_id = [], {}, {}, 1
 
     async def setup(self):
-        return None
+        # Store.hide_removed: stored items of the removed kinds are read and never sent.
+        for r in self.rows:
+            if r["kind"] in n.REMOVED:
+                r["read_at"] = r["read_at"] or NOW
+                r["tg_state"] = "skipped" if r["tg_state"] == "pending" else r["tg_state"]
+                r["push_state"] = "skipped" if r.get("push_state") == "pending" else r.get("push_state")
 
     async def recent_for_thread(self, thread_id, since):
         found = [r for r in self.rows if r.get("thread_id") == thread_id and r["created_at"] >= since]
@@ -60,19 +65,18 @@ class MemoryStore:
         return [r for r in self.rows if r.get("lead_id") is None and r.get("thread_id")]
 
     async def pending(self):
-        return [dict(r) for r in self.rows if r["tg_state"] == "pending"]
+        return [dict(r) for r in self.rows if r["tg_state"] == "pending" and r["kind"] not in n.REMOVED]
 
     async def push_pending(self):
-        return [dict(r) for r in self.rows if r.get("push_state") == "pending"]
+        return [dict(r) for r in self.rows if r.get("push_state") == "pending" and r["kind"] not in n.REMOVED]
+
+    async def listing(self, unread_only, since, limit=100):
+        rows = [r for r in self.rows if r["created_at"] >= since and r["kind"] not in n.REMOVED
+                and not (unread_only and r["read_at"])]
+        return sorted(rows, key=lambda r: r["created_at"], reverse=True)[:limit]
 
     async def unread_count(self, since):
-        return sum(1 for r in self.rows if not r["read_at"] and r["created_at"] >= since)
-
-    async def lead_states(self):
-        return dict(self.states)
-
-    async def save_lead_states(self, states):
-        self.states = dict(states)
+        return sum(1 for r in self.rows if not r["read_at"] and r["created_at"] >= since and r["kind"] not in n.REMOVED)
 
     async def switches(self):
         return n.Switches.from_row(self.settings or None)
@@ -117,7 +121,7 @@ def touch(direction="in", company="Acme"):
     ("assessment", True, "", False, "Take-home", "take_home"),
     ("recruiter_outreach", True, "screening", False, "Quick chat?", "reply_needed"),
     ("rejection", None, "closed-lost", False, "Your application", "rejection"),
-    ("recruiter_outreach", False, "sourced", True, "Staff Backend role", "new_lead"),
+    ("recruiter_outreach", False, "sourced", True, "Staff Backend role", "reply"),  # No "new lead" kind: the email.
     ("interviewer_followup", False, "", False, "Thanks for your time", "reply"),
     ("application_update", False, "applied", False, "Thank you for applying", None),
     ("application_update", False, "applied", False, "Your application moved to the hiring team", "update"),  # FYI: a dot too.
@@ -182,9 +186,10 @@ def test_telegram_text_carries_no_pii():
         assert leak not in text, leak
     assert n.telegram_text({"kind": "reply_needed", "company": "Acme", "link": "/valr", "action": "share your availability"}) \
         == "📩 Acme — recruiter asked you to share your availability. Open: https://valr.example.test/valr"
-    digest = n.digest_text([{"kind": "rejection", "company": "Tessel"}, {"kind": "new_lead", "company": "Quillworks"},
-                            {"kind": "stage", "company": "Glintworks", "action": "interviewing"}])
-    assert digest.startswith("🗞 3 updates: Tessel said no · Quillworks is new · Glintworks moved to Interviewing.")
+    digest = n.digest_text([{"kind": "rejection", "company": "Tessel"}, {"kind": "reply", "company": "Quillworks"},
+                            {"kind": "calendar", "company": "Glintworks", "title": "Interview with Glintworks cancelled: Mon 19 Oct, 6:00 PM"}])
+    assert digest.startswith("🗞 3 updates: Tessel said no · Quillworks replied · "
+                             "Interview with Glintworks cancelled: Mon 19 Oct, 6:00 PM.")
 
 
 # Quiet hours and the digest.
@@ -220,7 +225,7 @@ def test_immediate_items_wait_for_8am_unless_an_interview_is_within_12_hours():
 def test_digest_once_a_day_at_nine_with_something_in_it():
     store, bot = MemoryStore(), Bot()
     run(n.add(store, {"source_id": "gmail:r", "kind": "rejection", "title": "x", "company": "Tessel"}, ist(1)))
-    run(n.add(store, {"source_id": "gmail:l", "kind": "new_lead", "title": "y", "company": "Quillworks"}, ist(1)))
+    run(n.add(store, {"source_id": "gmail:l", "kind": "reply", "title": "y", "company": "Quillworks"}, ist(1)))
     assert run(n.dispatch(store, ist(8, 30), bot, chat=1)) == {"sent": 0, "held": 0, "digest": 0, "pushed": 0,
                                                                "push_held": 0} and not bot.sent
     assert run(n.dispatch(store, ist(9, 1), bot, chat=1))["digest"] == 2
@@ -237,28 +242,130 @@ def test_without_a_linked_chat_nothing_is_marked():
     assert store.rows[0]["tg_state"] == "pending"
 
 
-# Lead events.
+# No inferred items: only new events notify.
 
 def lead(stage, waiting="nobody", since=None, lead_id="l1", company="Glintworks"):
     return Lead(lead_id, company, company.lower(), stage=stage, waiting_on=waiting, waiting_since=since)
 
 
-def test_first_rebuild_only_remembers_then_stage_and_waiting_notify():
+def test_lead_rebuilds_never_create_stage_waiting_quiet_or_new_lead_items():
     store = MemoryStore()
-    assert run(n.after_rebuild(store, [lead("screening")], NOW)) == 0 and store.rows == []
-    added = run(n.after_rebuild(store, [lead("interviewing", "you", NOW - timedelta(hours=1))], NOW))
-    assert added == 2
-    kinds = {r["kind"] for r in store.rows}
-    assert kinds == {"stage", "waiting"} and store.by_source("stage:l1:interviewing")["title"] == \
-        "Glintworks moved to Interviewing"
-    assert run(n.after_rebuild(store, [lead("interviewing", "you", NOW - timedelta(hours=1))], NOW)) == 0
-    assert run(n.after_rebuild(store, [lead("screening")], NOW)) == 0  # Backwards: nothing.
-    assert run(n.after_rebuild(store, [lead("offer")], NOW)) == 1 and store.by_source("stage:l1:offer")["kind"] == "offer"
+    for leads in ([lead("screening")], [lead("interviewing", "you", NOW - timedelta(hours=1))], [lead("offer")],
+                  [lead("interviewing", "them", NOW - timedelta(days=20))]):
+        assert run(n.after_rebuild(store, leads, NOW)) == 0
+    assert store.rows == []
+    assert not hasattr(n, "lead_events") and not set(n.REMOVED) & set(n.KINDS)
+    run(n.from_email(store, email(), decision("recruiter_outreach"), touch(), True, NOW))
+    assert [(r["kind"], r["title"]) for r in store.rows] == [("reply", "Acme emailed you")]
 
 
-def test_gone_quiet_after_14_days():
-    events = n.lead_events([lead("interviewing", "them", NOW - timedelta(days=15))], {"l1": ("interviewing", "them")}, NOW)
-    assert [e.kind for e in events] == ["quiet"]
+def stored_old_items(store, at):
+    """Rows of the removed kinds, as an older version stored them."""
+    for i, kind in enumerate(n.REMOVED):
+        run(store.insert({"source_id": f"{kind}:l{i}", "kind": kind, "importance": "digest", "title": "old",
+                          "company": "Glintworks", "created_at": at, "tg_state": "pending", "push_state": "pending"}))
+
+
+def test_stored_inferred_items_are_hidden_from_count_list_push_and_digest():
+    store, bot = MemoryStore(), Bot()
+    stored_old_items(store, ist(1))
+    run(n.add(store, {"source_id": "gmail:r", "kind": "rejection", "title": "x", "company": "Tessel"}, ist(1)))
+    run(store.setup())
+    assert all(r["read_at"] for r in store.rows if r["kind"] in n.REMOVED)
+    assert run(store.unread_count(ist(0))) == 1
+    assert [r["kind"] for r in run(store.listing(False, ist(0)))] == ["rejection"]
+    sender = PushSender()
+    result = run(n.dispatch(store, ist(9, 1), bot, chat=1, sender=sender))
+    assert result["digest"] == 1 and bot.sent[0].startswith("🗞 1 update: Tessel said no")
+    assert len(sender.sent) == 1 and "Tessel" in sender.sent[0]["body"]
+
+
+class PushSender:
+    def __init__(self):
+        self.sent = []
+
+    async def subscribers(self):
+        return 1
+
+    async def send(self, message, now):
+        self.sent.append(message)
+        return SimpleNamespace(delivered=True)
+
+
+# Calendar changes.
+
+def cal_event(key="ev1", title="Acme: technical interview", start="2026-10-19T12:30:00+00:00", company="Acme",
+              status="confirmed"):
+    from app.interview_types import Person, SlotEvent
+    return SlotEvent(key=key, title=title, start_utc=start, end_utc=start.replace("12:30", "13:30"), status=status,
+                     organizer_email="pat@acme.example", organizer_name="Pat Lee",
+                     attendees=[Person("pat@acme.example", "Pat Lee", "accepted", organizer=True),
+                                Person("owner@example.test", "", "accepted", is_self=True)],
+                     company=company, company_domain="acme.example")
+
+
+def test_calendar_added_moved_and_cancelled_each_notify_once():
+    store = MemoryStore()
+    event = cal_event()
+    assert run(n.from_calendar(store, event, "added", NOW)) is not None
+    assert run(n.from_calendar(store, event, "added", NOW)) is None  # Once.
+    added = store.by_source("calendar:ev1:added")
+    assert added["title"] == "Interview with Acme added: Mon 19 Oct, 6:00 PM"  # 12:30 UTC = 18:00 IST.
+    assert added["kind"] == "calendar" and added["importance"] == "digest"  # More than 48 hours away.
+    from app.interview_types import slot_workflow_id
+    assert added["link"] == f"/valr/interviews/{slot_workflow_id('ev1')}"
+    moved = cal_event(start="2026-10-18T11:30:00+00:00")
+    assert run(n.from_calendar(store, moved, "moved", NOW, event.start_utc)) is not None
+    assert run(n.from_calendar(store, moved, "moved", NOW, event.start_utc)) is None
+    row = store.rows[-1]
+    assert row["title"] == "Interview with Acme moved to Sun 18 Oct, 5:00 PM" and row["body"] == "Was Mon 19 Oct, 6:00 PM."
+    assert row["importance"] == "immediate"  # Within 48 hours.
+    assert run(n.from_calendar(store, moved, "cancelled", NOW, moved.start_utc)) is not None
+    assert run(n.from_calendar(store, moved, "cancelled", NOW, moved.start_utc)) is None
+    assert store.rows[-1]["title"] == "Interview with Acme cancelled: Sun 18 Oct, 5:00 PM"
+    assert len(store.rows) == 3
+    assert n.telegram_text(store.rows[-1]).startswith("📅 Interview with Acme cancelled: Sun 18 Oct, 5:00 PM. Open:")
+    assert n.push_message(store.rows[-1])["title"] == "Calendar · Acme"
+
+
+def test_calendar_changes_from_the_sync_first_sync_silent_and_non_interviews_ignored():
+    from app import interview_worker as w
+    from app.interview_types import SlotDiff
+    calls = []
+
+    async def fake(store, event, change, now, before_utc=""):
+        calls.append((event.key, change, before_utc))
+
+    class Connection:
+        async def execute(self, *args):
+            return SimpleNamespace(fetchone=lambda: None, fetchall=lambda: [])
+
+    import unittest.mock as mock
+    owners = {"owner@example.test"}
+    interview, dinner = cal_event(), cal_event("ev2", "Dinner with friends", company="")
+    dinner.organizer_email, dinner.attendees = "", []
+    with mock.patch.object(n, "from_calendar", fake), mock.patch.object(n.Store, "setup", lambda self: asyncio.sleep(0)):
+        # First sync: nothing stored before -> seeds silently.
+        run(w.notify_calendar(Connection(), [(interview, SlotDiff(["new"]))], {}, True, NOW, owners))
+        assert calls == []
+        before = {"seen": cal_event("seen")}
+        run(w.notify_calendar(Connection(), [(interview, SlotDiff(["new"])), (dinner, SlotDiff(["new"]))],
+                              before, False, NOW, owners))
+        assert calls == [("ev1", "added", "")]  # The dinner is not an interview.
+        calls.clear()
+        old = cal_event()
+        moved = cal_event(start="2026-10-20T12:30:00+00:00")
+        gone = cal_event("ev3", status="cancelled")
+        retitled = cal_event("ev4")
+        before = {"ev1": old, "ev3": cal_event("ev3"), "ev4": cal_event("ev4", title="Acme: coding round")}
+        run(w.notify_calendar(Connection(), [(moved, SlotDiff(["time"])), (gone, SlotDiff(["cancelled"])),
+                                             (retitled, SlotDiff(["round"]))], before, False, NOW, owners))
+        assert calls == [("ev1", "moved", old.start_utc), ("ev3", "cancelled", gone.start_utc)]
+        calls.clear()
+        # A full listing: an event only entering the 14-day window is not "added".
+        far = cal_event("ev5", start=(NOW + timedelta(days=13, hours=12)).isoformat())
+        run(w.notify_calendar(Connection(), [(far, SlotDiff(["new"]))], before, True, NOW, owners))
+        assert calls == []
 
 
 # The API: owner only.

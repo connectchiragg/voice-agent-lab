@@ -803,16 +803,15 @@ def test_unread_items_show_red_dots_and_the_counts_agree(client):
     orbit, kite = lead_id("Orbit Labs"), lead_id("Kite")
     client.box["notes"] = [note(1, "offer", "Orbit Labs sent an offer", "Orbit Labs", orbit),
                            note(2, "update", "Kite sent an update", "Kite", kite, hours=3),
-                           note(3, "stage", "Juniper moved to Interviewing", "Juniper", email=False, hours=5)]
+                           note(3, "calendar", "Interview with Juniper added: Mon 19 Oct, 6:00 PM", "Juniper",
+                                email=False, hours=5)]
     home = client.get("/valr", headers=GOOD).text
-    strip = home.split("data-notif-strip", 1)[1].split("</section>", 1)[0]
-    assert strip.count('class="notif-item unread') == 3 and "Orbit Labs sent an offer" in strip and "h ago" in strip
-    assert strip.index("Orbit Labs sent an offer") < strip.index("Kite sent an update")  # Newest first.
-    assert 'data-notif-show' in strip  # "See all" opens the bell's panel.
-    assert home.index("data-notif-strip") < home.index("Next interview")  # Above the right-now essentials.
-    # One number: the bell's badge and the strip's count; the Leads nav dot when an email is unread.
+    panel = home.split("data-notif-list>", 1)[1].split("</div>", 1)[0]
+    assert panel.count('class="notif-item unread') == 3 and "Orbit Labs sent an offer" in panel and "h ago" in panel
+    assert panel.index("Orbit Labs sent an offer") < panel.index("Kite sent an update")  # Newest first.
+    # One number, on the bell only; the Leads nav dot when an email is unread.
     counts = re.findall(r"data-notif-count>(\d*)<", home)
-    assert counts == ["3", "3"] and 'class="notif-bell has-unread"' in home
+    assert counts == ["3"] and 'class="notif-bell has-unread"' in home
     assert "data-lead-dot" in home
     leads = client.get("/valr/leads?tab=all", headers=GOOD).text
     orbit_row = leads.split(f'data-lead-row="{orbit}"', 1)[1].split("</tr>", 1)[0]
@@ -830,18 +829,29 @@ def test_opening_a_lead_clears_its_email_dots(client):
     row = opened.split(f'data-lead-row="{orbit}"', 1)[1].split("</tr>", 1)[0]
     assert "data-unread-lead" not in row and 'id="lead"' in opened
     home = client.get("/valr", headers=GOOD).text
-    assert "Orbit Labs sent an offer" not in home.split("data-notif-strip", 1)[1].split("</section>", 1)[0]
+    assert "Orbit Labs sent an offer" not in home.split("data-notif-list>", 1)[1].split("</div>", 1)[0]
     assert "data-lead-dot" in home  # Kite's email is still unread.
     client.get(f"/valr/leads?lead={kite}", headers=GOOD)
     home = client.get("/valr", headers=GOOD).text
     assert "data-lead-dot" not in home and unread_count(home) == ""
 
 
-def test_the_strip_says_all_caught_up_when_nothing_is_unread(client):
+def test_home_has_no_new_strip_only_the_bell(client):
+    """The owner removed Home's "New" card: new events are in the bell, nowhere on Home."""
+    orbit = lead_id("Orbit Labs")
+    for notes in ([], [note(1, "offer", "Orbit Labs sent an offer", "Orbit Labs", orbit)]):
+        client.box["notes"] = notes
+        home = html.unescape(client.get("/valr", headers=GOOD).text)
+        main = home.split('id="main"', 1)[1]
+        assert "data-notif-strip" not in home and "notif-strip" not in home and "data-notif-show" not in home
+        assert "You're all caught up." not in main and "Orbit Labs sent an offer" not in main
+        assert "data-notif" in home  # The bell stays.
+    assert unread_count(home) == "1" and "data-lead-dot" in home
     client.box["notes"] = []
-    home = html.unescape(client.get("/valr", headers=GOOD).text)
-    assert 'class="notif-strip is-clear"' in home and "You're all caught up." in home
+    home = client.get("/valr", headers=GOOD).text
     assert unread_count(home) == "" and "has-unread" not in home and "data-lead-dot" not in home
+    css = (ROOT / "static/valr-ds.css").read_text(encoding="utf-8")
+    assert ".notif-strip" not in css and ".strip-list" not in css and ".notif-action" not in css
 
 
 class NoteStore:
@@ -894,9 +904,9 @@ def test_clicking_an_item_reads_it_on_the_server(client, monkeypatch):
     NoteStore.rows = [{**base, "id": 7, "source_id": "gmail:m7", "kind": "reply", "title": "Orbit Labs replied",
                        "company": "Orbit Labs", "link": f"/valr/leads?lead={orbit}", "lead_id": orbit,
                        "created_at": now - timedelta(minutes=30)},
-                      {**base, "id": 8, "source_id": f"stage:{orbit}:offer", "kind": "stage", "title": "Orbit Labs moved to Offer",
-                       "company": "Orbit Labs", "link": f"/valr/leads?lead={orbit}", "lead_id": orbit,
-                       "created_at": now - timedelta(minutes=10)}]
+                      {**base, "id": 8, "source_id": "calendar:ev1:added", "kind": "calendar", "thread_id": None,
+                       "title": "Interview with Orbit Labs added: Mon 19 Oct, 6:00 PM", "company": "Orbit Labs",
+                       "link": "/valr/interviews", "lead_id": None, "created_at": now - timedelta(minutes=10)}]
     monkeypatch.setattr(notifications, "Store", NoteStore)
     monkeypatch.setattr(routes, "load_notes", REAL_LOAD_NOTES)
     monkeypatch.setattr(routes, "mark_lead_read", REAL_MARK_LEAD_READ)
@@ -907,13 +917,14 @@ def test_clicking_an_item_reads_it_on_the_server(client, monkeypatch):
     # Showing the panel reads nothing; the bell's API lists both, still unread.
     listed = client.get("/valr/api/notifications", headers=GOOD).json()
     assert listed["unread"] == 2 and all(not i["read"] for i in listed["items"])
-    assert {i["lead_id"] for i in listed["items"]} == {orbit} and [i["email"] for i in listed["items"]] == [False, True]
+    assert [i["lead_id"] for i in listed["items"]] == ["", orbit] and [i["email"] for i in listed["items"]] == [False, True]
     done = client.post("/valr/api/notifications/read", content=json.dumps({"ids": [7]}), headers=headers).json()
     assert done["unread"] == 1
     home = client.get("/valr", headers=GOOD).text
     assert 'data-notif-item="7"' not in home and unread_count(home) == "1"
-    assert "data-lead-dot" not in home  # Its email is read; the stage change has no email dot.
-    assert client.post("/valr/api/notifications/read", content=json.dumps({"lead": orbit}), headers=headers).json()["unread"] == 0
+    assert "data-lead-dot" not in home  # Its email is read; the calendar change has no email dot.
+    assert client.post("/valr/api/notifications/read", content=json.dumps({"lead": orbit}), headers=headers).json()["unread"] == 1
+    assert client.post("/valr/api/notifications/read", content=b'{"all": true}', headers=headers).json()["unread"] == 0
     assert client.post("/valr/api/notifications/read", content=json.dumps({"lead": "../x"}), headers=headers).status_code == 400
     script = (ROOT / "static/valr-notify.js").read_text(encoding="utf-8")
     assert "[data-notif-item]" in script and "/valr/api/notifications/read" in script  # Clicks read; opening doesn't.
