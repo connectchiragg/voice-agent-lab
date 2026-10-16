@@ -10,6 +10,10 @@ app page (/valr, /valr/interviews, /valr/leads, /valr/performance, /valr/setting
     .../valr?mode=telegram                                  # heads-up mode, Telegram not linked
     .../valr?extras=0                                       # without the other branches' data
     .../valr?theme=light                                    # pin light (or dark) for screenshots
+    VALR_DEV_PREVIEW=1 python scripts/preview_ui.py --media /path/to/any.mp4
+                                                            # past interviews play that local file
+    .../valr/interviews/past/<id>?media=processing          # the player's "Preparing the video" state
+                                                            # (?media=ready switches back)
     .../valr/leads?leads=small                              # the small lead sample (default: ~107, live-shaped)
 
 No Postgres, Temporal, Deepgram or LLM: the cockpit shows tests/valr_sample.py's made-up
@@ -37,6 +41,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--port", type=int, default=8090)
     parser.add_argument("--host", default=HOST, help=argparse.SUPPRESS)
+    parser.add_argument("--media", type=Path,
+                        help="a local MP4 standing in for Fathom's signed video (local only)")
     parser.add_argument("--performance", type=Path,
                         help="a real performance.json to render (local only; never served beyond 127.0.0.1)")
     args = parser.parse_args()
@@ -51,7 +57,7 @@ def main() -> None:
 
     valr_dashboard.enable_dev_preview(args.host)  # Raises unless VALR_DEV_PREVIEW=1 and loopback.
     os.environ["VALR_ADMIN_EMAILS"] = valr_dashboard.PREVIEW_EMAIL
-    state = {"paused": False, "auto_dial": None, "prep": {}, "notetakers": {"fathom": "connected", "fireflies": "not_connected",
+    state = {"media": "ready", "paused": False, "auto_dial": None, "prep": {}, "notetakers": {"fathom": "connected", "fireflies": "not_connected",
                                              "granola": "not_connected"}}
     scenario: contextvars.ContextVar[str] = contextvars.ContextVar("scenario", default="full")
     options: contextvars.ContextVar[dict] = contextvars.ContextVar("options", default={})
@@ -65,8 +71,13 @@ def main() -> None:
             return HTMLResponse(valr_page.error_page("The database didn't answer."), status_code=503)
         scenario.set(wanted if wanted in ("full", "empty", "error") else "full")
         path = request.url.path
+        if request.query_params.get("media") in ("ready", "processing", "none"):
+            state["media"] = request.query_params["media"]
+        if path == "/preview-media.mp4" and args.media and valr_dashboard.is_preview_request(request):
+            from fastapi.responses import FileResponse
+            return FileResponse(args.media, media_type="video/mp4")
         if path.startswith(("/valr/api/notetakers/", "/valr/api/leads/")) or path in (
-                "/valr/api/recording", "/valr/api/telegram/code", "/valr/api/reach", "/valr/api/prep"):
+                "/valr/api/recording", "/valr/api/recording/media", "/valr/api/telegram/code", "/valr/api/reach", "/valr/api/prep"):
             return await preview_api(request, path)
         options.set({"leads": "small" if request.query_params.get("leads") == "small" else "live",
                      "telegram": request.query_params.get("mode") == "telegram",
@@ -78,6 +89,15 @@ def main() -> None:
         from fastapi.responses import JSONResponse
         if not valr_dashboard.is_preview_request(request):
             return JSONResponse({"detail": "Preview only."}, status_code=403)
+        if path == "/valr/api/recording/media":
+            if state["media"] == "processing" or not args.media:
+                return JSONResponse({"ok": True, "status": "processing",
+                                     "message": "Preparing the video… (first play can take a minute or two)"})
+            if state["media"] == "none":
+                return JSONResponse({"ok": True, "status": "unavailable",
+                                     "message": "Fathom says this recording isn't downloadable for your account."})
+            return JSONResponse({"ok": True, "status": "completed", "url": "/preview-media.mp4",
+                                 "content_type": "video/mp4", "expires_at": "2099-01-01T00:00:00+00:00"})
         if path == "/valr/api/recording":
             return JSONResponse(sample_recording(found=request.query_params.get("ref") != "none"))
         if path == "/valr/api/reach":
@@ -146,10 +166,26 @@ def main() -> None:
         ids = [iv["id"] for iv in sample_view()["performance"]["interviews"]]
         if not options.get().get("extras", True) or interview.get("id") == ids[0]:
             return None  # The oldest has no stored recording: the page asks the notetaker.
-        return sample_recording_row(interview["id"], embed=interview.get("id") != ids[-1])  # Newest: a link.
+        return sample_recording_row(interview["id"])
+
+    async def load_rows(interviews_):
+        """Stored recordings with Fathom's invitee details (made-up people and domains)."""
+        from tests.valr_sample_extras import sample_recording_row
+        if not options.get().get("extras", True):
+            return {}
+        people = {"Juniper": ("", "juniper.example", ("Maya Lin", "Dev Kapoor")),
+                  "Nimbus": ("", "nimbus.example", ("Jo Park",)),
+                  "Kite": ("", "", ("Mia Torres", "Nina Shah"))}
+        return {iv["id"]: sample_recording_row(iv["id"], *people[iv.get("company")])
+                for iv in interviews_ if iv.get("id") and iv.get("company") in people}
 
     routes.load_leads = load_leads
     routes.load_recording = load_recording
+    routes.load_rows = load_rows
+
+    async def load_overrides(entity_ids):
+        return {}  # No "Set company" names are stored in the preview.
+    routes.load_overrides = load_overrides
 
     class Pool:
         def connection(self):

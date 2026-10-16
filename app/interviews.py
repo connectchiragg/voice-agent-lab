@@ -357,11 +357,13 @@ def round_of(title: str) -> str:
 
 
 def company_label(event: SlotEvent) -> str:
-    """The company as it should be spoken: the calendar's own spelling, never a guess."""
+    """The company as it should be spoken (app/company_names.py, the one resolver); "" when
+    none is identified, never a round label or the owner's name."""
+    from app import company_names
     name = event.company.strip()
-    if not name and event.company_domain:
-        name = event.company_domain.split(".")[0].replace("-", " ").title()
-    return name
+    if name and not company_names.is_company(name):
+        name = ""
+    return name or company_names.from_domain(event.company_domain)
 
 
 def first_names(event: SlotEvent) -> list[str]:

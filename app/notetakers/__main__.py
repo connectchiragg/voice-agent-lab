@@ -1,5 +1,7 @@
 """`python -m app.notetakers pending`: recordings waiting for the evaluation hook (no PII:
-provider, id, date, status). `python -m app.notetakers handoff`: retry the hand-off."""
+provider, id, date, status). `python -m app.notetakers handoff`: retry the hand-off.
+`python -m app.notetakers details`: fill company and interviewers of stored Fathom recordings
+from Fathom's calendar invitees (last 180 days; prints counts only)."""
 import asyncio
 import sys
 
@@ -14,6 +16,11 @@ async def main(command: str) -> int:
             return 1
         async with research.pool.connection() as connection:
             await store.setup(connection)
+            if command == "details":
+                from app import notetakers
+                async with notetakers.http_client() as http:
+                    print(await notetakers.backfill_details(connection, http))
+                return 0
             rows = await store.pending(connection, limit=100)
             for row in rows:
                 date = row["started_at"].date().isoformat() if row["started_at"] else "-"
@@ -26,6 +33,6 @@ async def main(command: str) -> int:
 
 if __name__ == "__main__":
     command = sys.argv[1] if len(sys.argv) > 1 else "pending"
-    if command not in ("pending", "handoff"):
+    if command not in ("pending", "handoff", "details"):
         sys.exit(__doc__)
     sys.exit(asyncio.run(main(command)))

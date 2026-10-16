@@ -24,7 +24,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse
 
 from app import research, valr_dashboard, valr_page
-from app.valr_ui import (attention, contracts, home, interviews, leads, performance, settings, shell,
+from app.valr_ui import (attention, contracts, home, interviews, leads, past, performance, settings, shell,
                          system)
 
 logger = logging.getLogger("uvicorn.error")
@@ -51,9 +51,66 @@ async def load_leads() -> dict[str, Any]:
         return contracts.leads(None)
 
 
+async def load_rows(interviews_: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """The stored recordings of these past interviews (company, people, links), by "<provider>:<id>"."""
+    keys = [tuple(str(iv.get("id") or "").partition(":")[::2]) for iv in interviews_]
+    keys = [k for k in keys if k[0] and k[1]]
+    if not keys or research.pool is None:
+        return {}
+    try:
+        from app.notetakers import store
+        async with research.pool.connection() as connection:
+            await store.setup(connection)
+            rows = await store.many(connection, keys)
+    except Exception as error:  # noqa: BLE001 - the page still renders, without the extras.
+        logger.warning("VALR recordings lookup failed: %s", type(error).__name__)
+        return {}
+    return {f"{p}:{i}": row for (p, i), row in rows.items()}
+
+
+async def load_overrides(entity_ids: list[str]) -> dict[str, str]:
+    """The owner's "Set company" names (app/company_resolver.company_overrides)."""
+    if not entity_ids or research.pool is None:
+        return {}
+    try:
+        from app import company_resolver
+        async with research.pool.connection() as connection:
+            await company_resolver.setup(connection)
+            return await company_resolver.overrides(connection, entity_ids)
+    except Exception as error:  # noqa: BLE001 - the page still renders with the resolver's names.
+        logger.warning("VALR company overrides unavailable: %s", type(error).__name__)
+        return {}
+
+
+async def with_slot_names(view: dict[str, Any]) -> dict[str, Any]:
+    """Upcoming slots with the owner's "Set company" applied."""
+    slots = [slot for block in view.get("blocks") or [] for slot in block.get("slots") or []]
+    manual = await load_overrides([f"slot:{slot.get('ref')}" for slot in slots if slot.get("ref")])
+    for slot in slots:
+        name = manual.get(f"slot:{slot.get('ref')}")
+        if name:
+            slot["company"], slot["company_how"] = name, "set by you"
+    return view
+
+
+async def with_details(view: dict[str, Any]) -> dict[str, Any]:
+    """The past interviews with company, interviewers and outcome filled in (app/valr_ui/past.py)."""
+    perf = view.get("performance") or {}
+    ivs = perf.get("interviews") or []
+    if not ivs:
+        return view
+    rows = await load_rows(ivs)
+    found = past.all_leads(await load_leads())
+    owner = past.base.owner_words()
+    manual = await load_overrides([f"interview:{iv.get('id')}" for iv in ivs])
+    filled = [past.enrich(iv, rows.get(iv.get("id") or ""), found, owner, manual.get(f"interview:{iv.get('id')}", ""))
+              for iv in ivs]
+    return {**view, "performance": {**perf, "interviews": filled}}
+
+
 async def load_recording(interview: dict[str, Any]) -> dict[str, Any] | None:
-    """A past interview's stored recording (valr-notetakers: webhooks and syncs store share and
-    embed links), by its performance.json id "<provider>:<id>"; None when there is none."""
+    """A past interview's stored recording (valr-notetakers: webhooks and syncs store its share
+    link), by its performance.json id "<provider>:<id>"; None when there is none."""
     provider, _, external_id = str(interview.get("id") or "").partition(":")
     if not external_id or research.pool is None:
         return None
@@ -68,7 +125,7 @@ async def load_recording(interview: dict[str, Any]) -> dict[str, Any] | None:
     if not row:
         return None
     return {"provider": provider, "share_url": base.safe_link(row.get("share_url") or ""),
-            "embed_url": base.safe_embed(row.get("embed_url") or ""), "title": row.get("title") or ""}
+            "title": row.get("title") or ""}
 
 
 def not_found(what: str, back: str, label: str) -> str:
@@ -97,8 +154,9 @@ async def render(request: Request, name: str, **params: str) -> HTMLResponse:
     if name == "home":
         body = home.page(view, clock, items, await load_leads())
     elif name == "interviews":
-        body = interviews.upcoming_page(view, clock)
+        body = interviews.upcoming_page(await with_slot_names(view), clock)
     elif name == "interview":
+        view = await with_slot_names(view)
         found = interviews.find_slot(view, params["ref"])
         if found:
             body = interviews.detail_page(view, *found, clock)
@@ -106,8 +164,9 @@ async def render(request: Request, name: str, **params: str) -> HTMLResponse:
         else:
             body, status = not_found("That interview isn't coming up.", "/valr/interviews", "Interviews"), 404
     elif name == "past":
-        body = interviews.past_page(view, clock)
+        body = interviews.past_page(await with_details(view), clock)
     elif name == "past_one":
+        view = await with_details(view)
         found = interviews.find_past(view, params["slug"])
         if found:
             stored = contracts.recording(await load_recording(found), found)

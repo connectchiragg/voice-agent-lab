@@ -487,3 +487,36 @@ def compact_for_prompt(impression: dict) -> dict:
 
 def to_json(impression: dict) -> str:
     return json.dumps(impression, ensure_ascii=False)
+
+
+def same_interview(a: str, b: str) -> bool:
+    """"fathom:123" and "fathom-123" (the page's slug) name the same interview."""
+    norm = lambda v: "".join(ch if ch.isascii() and ch.isalnum() else "-" for ch in str(v or ""))  # noqa: E731
+    return bool(a and b) and norm(a) == norm(b)
+
+
+def merge_missing(perf: dict, other: dict | None) -> dict:
+    """`perf` with each interview's impression (and the top-level impressions summary and the
+    coach read) taken from `other` where `perf` has none. The worker's live performance.json is
+    seeded once from the read-only copy (deploy/valr-data-live.sh, `cp -n`), so impressions
+    added to that copy later never reached it; this fills them in without losing new rounds."""
+    if not isinstance(perf, dict) or not isinstance(other, dict):
+        return perf
+    theirs = {str(iv.get("interview_id")): iv.get("impression") for iv in other.get("interviews") or []
+              if isinstance(iv, dict) and isinstance(iv.get("impression"), dict)}
+    if not theirs:
+        return perf
+    merged = []
+    for iv in perf.get("interviews") or []:
+        mine = iv.get("impression") if isinstance(iv, dict) else None
+        if isinstance(iv, dict) and not (isinstance(mine, dict) and mine.get("coverage") in ("transcript", "derived")):
+            found = theirs.get(str(iv.get("interview_id"))) or next(
+                (imp for key, imp in theirs.items() if same_interview(key, iv.get("interview_id"))), None)
+            if found and found.get("coverage") in ("transcript", "derived"):
+                iv = {**iv, "impression": found}
+        merged.append(iv)
+    out = {**perf, "interviews": merged}
+    for key in ("impressions", "coach"):
+        if not out.get(key) and other.get(key):
+            out[key] = other[key]
+    return out

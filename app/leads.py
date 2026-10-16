@@ -35,6 +35,14 @@ depend on the order in which sources arrived:
 6. Ball in court (`ball_in_court`): waiting_on "you" | "them" | "nobody" with a reason.
    See the function; cold, closed and expired leads are always "nobody".
 
+Company names come from app/company_names.py (the one resolver): a touchpoint's `company` is
+dropped when it is not a company (a round label, the owner's name, a tool), and a lead with
+no company is shown as "Company not identified" until the owner names it (a "rename"
+override). `company_how` says how the name was found ("attendee domain acme.com", "found via
+web: ...", "set by you"). Lead ids come from the company, so a better name changes a lead's
+id: `lead_aliases` maps each vanished id to the lead now holding its touchpoints, the owner's
+corrections follow it, and the worker re-keys `lead_overrides` (leads_store.move_overrides).
+
 Standard library only; times are aware datetimes in UTC.
 """
 from __future__ import annotations
@@ -45,6 +53,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from difflib import SequenceMatcher
 from typing import Any
+
+from app import company_names
 
 FORWARD = ("sourced", "applied", "screening", "interviewing", "offer")
 CLOSED = ("closed-won", "closed-lost")
@@ -125,6 +135,8 @@ class Touch:
     category: str = ""  # The classifier's category (emails; "" on rows stored before it was kept)
     action_requested: bool | None = None  # The email asks him to do something (None: not known)
     action: str = ""  # What it asks, in a few words
+    stated: str = ""  # The company the source itself gave (classifier, calendar, scorecard)
+    company_how: str = ""  # How `company` was found (app/company_resolver.py)
 
 
 @dataclass
@@ -148,6 +160,7 @@ class Lead:
     waiting_on: str = "nobody"  # you | them | nobody
     waiting_reason: str = ""
     waiting_since: datetime | None = None
+    company_how: str = ""
 
 
 # Names and domains.
@@ -172,24 +185,16 @@ def is_tool_domain(domain: str) -> bool:
 
 
 def company_domain(domain: str) -> str:
-    """The registrable part of a company's domain; "" for personal and tool domains."""
+    """The registrable part of a company's domain; "" for personal, ATS and tool domains."""
     domain = (domain or "").lower().strip(".")
     if not domain or domain in PERSONAL_DOMAINS or is_tool_domain(domain):
         return ""
-    labels = domain.split(".")
-    if len(labels) >= 3 and labels[-2] in SECOND_LEVEL:
-        return ".".join(labels[-3:])
-    return ".".join(labels[-2:])
+    return company_names.registrable(domain)
 
 
 def domain_company(domain: str) -> str:
-    """"careers.acme.example" -> "Acme"."""
-    core = company_domain(domain)
-    if not core:
-        return ""
-    labels = core.split(".")
-    label = labels[-3] if len(labels) >= 3 and labels[-2] in SECOND_LEVEL else labels[0]
-    return label.replace("-", " ").title()
+    """"careers.acme-robotics.example" -> "Acme Robotics" (app/company_names.from_domain)."""
+    return company_names.from_domain(company_domain(domain))
 
 
 def similar(a: str, b: str, threshold: float) -> bool:
@@ -276,8 +281,9 @@ class Index:
             self.by_domain.setdefault(domain, lead.id)
         if touch.role:
             lead.role = touch.role
-        if touch.company and lead.company.startswith("Unknown"):
+        if touch.company and (lead.company == company_names.NOT_IDENTIFIED or lead.company.startswith("Unknown")):
             lead.company = touch.company
+            lead.company_how = touch.company_how
         for person in touch.people:
             existing = lead.contacts.get(person.id)
             if existing is None:
@@ -292,14 +298,16 @@ class Index:
 
 def new_lead_for(touch: Touch) -> Lead | None:
     name = touch.company.strip() or domain_company(touch.domain)
+    how = touch.company_how if touch.company.strip() else (f"Gmail sender domain {company_domain(touch.domain)}"
+                                                           if name else "")
     key = company_key(name)
     if not key:
         person = next((p for p in touch.people if p.email or p.name), None)
         if person is None:
             return None
         key = "person:" + (person.email.lower() or norm_name(person.name))
-        name = f"Unknown ({person.name or domain_of(person.email) or 'contact'})"
-    return Lead(id=lead_id_for(key), company=name, key=key, domain=own_domain(touch))
+        name, how = company_names.NOT_IDENTIFIED, ""
+    return Lead(id=lead_id_for(key), company=name, key=key, domain=own_domain(touch), company_how=how)
 
 
 @dataclass
@@ -313,6 +321,16 @@ class Overrides:
     dismissed_threads: set[str] = field(default_factory=set)
     stages: dict[str, str] = field(default_factory=dict)
     merges: dict[str, str] = field(default_factory=dict)
+    names: dict[str, str] = field(default_factory=dict)  # lead id -> the company he set
+    aliases: dict[str, str] = field(default_factory=dict)  # Filled by build: old lead id -> its new id
+
+    def renamed(self, aliases: dict[str, str]) -> "Overrides":
+        """The same corrections, keyed by the leads' current ids."""
+        move = lambda i: aliases.get(i, i)  # noqa: E731
+        return Overrides(self.dismissed_touches, self.dismissed_threads,
+                         {move(k): v for k, v in self.stages.items()},
+                         {move(k): move(v) for k, v in self.merges.items() if move(k) != move(v)},
+                         {move(k): v for k, v in self.names.items()}, dict(aliases))
 
     def dismissed(self, touch: Touch) -> bool:
         return touch.id in self.dismissed_touches or bool(touch.thread and touch.thread in self.dismissed_threads)
@@ -339,7 +357,12 @@ def build(touches: list[Touch], now: datetime, overrides: Overrides | None = Non
     """All leads from all touchpoints (time order), the owner's merges applied; then
     stage (or his stage), status and temperature. Dismissed touchpoints count nowhere."""
     overrides = overrides or Overrides()
+    before = {t.id: t.lead_id for t in touches if t.lead_id}  # Each touchpoint's lead at the last save.
     index = Index()
+    owner = company_names.owner_words()
+    for touch in touches:  # Never a round label, the owner's name or a tool, even from old data.
+        if touch.company and not company_names.is_company(touch.company, owner):
+            touch.company, touch.company_how = "", ""
     for touch in sorted(touches, key=lambda t: (t.at, t.id)):
         if overrides.dismissed(touch):
             touch.lead_id = ""
@@ -353,13 +376,45 @@ def build(touches: list[Touch], now: datetime, overrides: Overrides | None = Non
             index.attach(lead, touch)
         else:
             touch.lead_id = ""
+    given = overrides
+    overrides = overrides.renamed(lead_aliases(index.leads, before, overrides))
+    given.aliases = overrides.aliases
     for source_id in list(index.leads):
         target_id = overrides.target(source_id)
         if target_id != source_id and target_id in index.leads:
             merge_into(index.leads[target_id], index.leads.pop(source_id))
     for lead in index.leads.values():
+        if overrides.names.get(lead.id):
+            lead.company, lead.company_how = overrides.names[lead.id], "set by you"
         evaluate(lead, now, overrides.stages.get(lead.id, ""))
     return sorted(index.leads.values(), key=lambda l: (-l.temperature, l.company.lower()))
+
+
+def lead_aliases(current: dict[str, Lead], before: dict[str, str], overrides: Overrides) -> dict[str, str]:
+    """Old lead id -> new id, when a lead's id changed but its touchpoints did not (lead ids
+    come from the company name, and the resolver can rename a company). Each vanished id goes
+    to the lead now holding most of its touchpoints, so the owner's stage, name and merge
+    corrections follow the lead. A merged lead's touchpoints were saved under its target: a
+    brand-new lead made only of the target's touchpoints, with a merge into that target left
+    dangling, is that merged lead renamed."""
+    votes: dict[str, dict[str, int]] = {}
+    for lead in current.values():
+        for touch in lead.touches:
+            old = before.get(touch.id)
+            if old and old not in current:
+                votes.setdefault(old, {}).setdefault(lead.id, 0)
+                votes[old][lead.id] += 1
+    aliases = {old: max(sorted(counts), key=lambda new: counts[new]) for old, counts in votes.items()}
+    known = set(before.values())
+    for source, target in overrides.merges.items():
+        if source in current or source in aliases:
+            continue
+        target = aliases.get(target, target)
+        fresh = [lead.id for lead in current.values() if lead.id not in known and lead.id != target
+                 and lead.touches and all(aliases.get(before.get(t.id, ""), before.get(t.id)) == target for t in lead.touches)]
+        if len(fresh) == 1:
+            aliases[source] = fresh[0]
+    return aliases
 
 
 # Stage, status, next step and temperature.
@@ -583,7 +638,8 @@ def graph(leads: list[Lead], now: datetime) -> dict[str, Any]:
     for lead in leads:
         recent = sum(1 for t in lead.touches if t.at <= now and now - t.at <= EXPIRE_AFTER)
         out.append({
-            "id": lead.id, "company": lead.company, "role": lead.role, "domain": lead.domain,
+            "id": lead.id, "company": lead.company, "company_how": lead.company_how, "role": lead.role,
+            "domain": lead.domain,
             "stage": lead.stage, "stage_manual": lead.stage_manual, "status": lead.status, "temperature": lead.temperature,
             "band": lead.band, "waiting_on": lead.waiting_on, "waiting_reason": lead.waiting_reason,
             "waiting_since": iso(lead.waiting_since),

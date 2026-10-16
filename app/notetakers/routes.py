@@ -9,7 +9,11 @@ token, see app/valr_dashboard.action_owner):
 - `POST /valr/api/notetakers/{provider}/sync`: "Check for new recordings" (last 7 days).
 - `POST /valr/api/notetakers/granola/import` {export}: a Granola note export (JSON).
 - `GET /valr/api/recording?ref=<slot ref>` or `?id=<provider>:<id>`: a past interview's
-  recording (embed or link) and its key moments; read when the detail view opens.
+  recording (player or link) and its key moments; read when the detail view opens.
+- `GET /valr/api/recording/media?id=fathom:<id>[&refresh=1]` (owner only): the signed video
+  to stream, from Fathom's official download API, cached (app/notetakers/media.py):
+  {status: completed | processing | busy | unavailable | failed | expired, url?, expires_at?,
+  content_type?, message?}. `refresh=1` when the player's URL stopped working.
 - `GET /valr/api/past-interviews?days=60` (1-180): past interviews, newest first, each with
   its matched recording (no provider call: what webhooks and syncs stored), plus
   recordings that matched no calendar event. For the Past Interviews page.
@@ -33,7 +37,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from app import notetakers, research, valr_dashboard
-from app.notetakers import base, fathom, granola, pipeline, store
+from app.notetakers import base, fathom, granola, media, pipeline, store
 from app.notetakers.base import KeyRefused, ProviderError
 from app.notetakers.signatures import verify_standard_webhook
 
@@ -105,6 +109,11 @@ async def sync(request: Request, provider: str) -> JSONResponse:
     try:
         async with pool().connection() as connection, notetakers.http_client() as http:
             result = await notetakers.sync_recent(connection, provider, http)
+            if provider == "fathom":  # Also: company and interviewers of older recordings.
+                try:
+                    await notetakers.backfill_details(connection, http)
+                except (KeyRefused, ProviderError, httpx.HTTPError) as error:
+                    logger.warning("VALR Fathom details backfill failed: %s", type(error).__name__)
     except KeyRefused:
         raise HTTPException(400, f"{label} isn't connected or refused the key.") from None
     except (ProviderError, httpx.HTTPError) as error:
@@ -159,9 +168,7 @@ async def recording(request: Request, ref: str = "", id: str = "") -> JSONRespon
                 raise HTTPException(404, "Unknown recording.")
             await store.setup(connection)
             row = await store.recording(connection, provider, external_id)
-            found = base.Recording(provider, external_id, *(
-                (row["title"], notetakers._iso(row["started_at"]), notetakers._iso(row["ended_at"]),
-                 row["share_url"], row["embed_url"]) if row else ()))
+            found = notetakers.from_row(row) if row else base.Recording(provider, external_id)
             if not row and provider == "fathom":
                 found = await _fathom_by_id(connection, external_id, http) or found
         elif ref.startswith("slot-") and len(ref) <= 40:
@@ -177,17 +184,75 @@ async def recording(request: Request, ref: str = "", id: str = "") -> JSONRespon
     return JSONResponse({"ok": True, "found": True, **view}, headers=NO_CACHE)
 
 
+def parse_id(value: str) -> tuple[str, str]:
+    provider, _, external_id = value.partition(":")
+    if provider not in notetakers.PROVIDERS or not external_id or len(external_id) > 120 \
+            or not external_id.replace("-", "").replace("_", "").isalnum():
+        raise HTTPException(404, "Unknown recording.")
+    return provider, external_id
+
+
+@router.get("/valr/api/recording/media")
+async def recording_media(request: Request, id: str = "", refresh: int = 0) -> JSONResponse:
+    """The signed video of a recording to stream in the page (owner only; never logged)."""
+    await valr_dashboard.owner(request)
+    provider, external_id = parse_id(id)
+    try:
+        async with pool().connection() as connection, notetakers.http_client() as http:
+            key = await notetakers.api_key(connection, provider)
+            result = await media.resolve(connection, provider, external_id, http, key,
+                                         notetakers.token_key(), refresh=bool(refresh))
+    except httpx.HTTPError as error:
+        logger.warning("VALR recording media: Fathom unreachable (%s)", type(error).__name__)
+        result = media.answer("failed", "Fathom didn't answer. Try again in a minute.")
+    return JSONResponse({"ok": True, **result}, headers=NO_CACHE)
+
+
+class CompanyRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    id: str = Field(min_length=6, max_length=140)
+    company: str = Field(default="", max_length=80)
+
+
+@router.post("/valr/api/interviews/company")
+async def set_company(request: Request) -> JSONResponse:
+    """The owner's "Set company" for an interview ("interview:<provider>:<id>" or
+    "slot:<ref>"); "" goes back to the resolver's name. It always wins (app/company_resolver.py)."""
+    from app import company_resolver
+    email = await valr_dashboard.action_owner(request)
+    try:
+        body = CompanyRequest.model_validate_json(await request.body())
+    except ValidationError:
+        raise HTTPException(400, "Expected {id, company}.") from None
+    if not body.id.startswith(("interview:", "slot:")):
+        raise HTTPException(400, "Unknown interview.")
+    name = " ".join(body.company.split())
+    async with pool().connection() as connection:
+        await company_resolver.setup(connection)
+        await company_resolver.set_override(connection, body.id, name, email)
+    return JSONResponse({"ok": True, "message": f"Company set to {name}." if name else "Company is automatic again."},
+                        headers=NO_CACHE)
+
+
 PAST_CALENDAR = timedelta(days=3)  # calendar_events keeps 3 days of the past (app/calendar_sync.py).
 
 
 def recording_summary(row: dict[str, Any]) -> dict[str, Any]:
-    """A stored recording for listings: its links (embed whenever it has a share token)."""
+    """A stored recording for listings: its link, whether it plays here, company and people."""
     provider = row["provider"]
     return {"id": f"{provider}:{row['external_id']}", "provider": provider,
             "label": notetakers.INFO.get(provider, {}).get("label", provider), "title": row["title"],
             "start": notetakers._iso(row["started_at"]), "end": notetakers._iso(row["ended_at"]),
             "share_url": base.safe_link(row["share_url"]),
-            "embed_url": base.safe_embed(row["embed_url"]), "evaluation": row["eval_status"]}
+            "player": notetakers.INFO.get(provider, {}).get("video") == "player",
+            "company": row.get("company") or "", "interviewers": store.names(row),
+            "evaluation": row["eval_status"]}
+
+
+def company_of(*candidates: str) -> str:
+    """The first real company name: never a round label ("L2- ...") or the owner's own name."""
+    owner = base.owner_words()
+    return next((c.strip() for c in candidates if c and base.is_company(c, owner)), "")
 
 
 def past_view(events: list[Any], rows: list[dict[str, Any]], now: datetime) -> list[dict[str, Any]]:
@@ -203,10 +268,12 @@ def past_view(events: list[Any], rows: list[dict[str, Any]], now: datetime) -> l
             continue
         row = by_event.get(event.key)
         seen.add(event.key)
+        people = [scrub(p.name) for p in event.attendees if p.name and not p.is_self][:6]
         out.append({"ref": slot_workflow_id(event.key), "title": scrub(event.title),
-                    "company": scrub(event.company or ""), "start": notetakers._iso(base._dt(event.start_utc)),
+                    "company": scrub(company_of(event.company or "", (row or {}).get("company") or "")),
+                    "start": notetakers._iso(base._dt(event.start_utc)),
                     "end": notetakers._iso(base._dt(event.end_utc)),
-                    "interviewers": [scrub(p.name) for p in event.attendees if p.name and not p.is_self][:6],
+                    "interviewers": people or [scrub(n) for n in store.names(row)][:6],
                     "recording": recording_summary(row) if row else None})
     for row in rows:
         key = row.get("event_key")
@@ -216,9 +283,10 @@ def past_view(events: list[Any], rows: list[dict[str, Any]], now: datetime) -> l
             seen.add(key)
         out.append({"ref": slot_workflow_id(key) if key else None,
                     "title": scrub(row.get("event_title") or row["title"]),
-                    "company": scrub(row.get("event_company") or ""),
+                    "company": scrub(company_of(row.get("company") or "", row.get("event_company") or "")),
                     "start": notetakers._iso(row.get("event_start") or row["started_at"]), "end": None,
-                    "interviewers": [], "matched": bool(key), "recording": recording_summary(row)})
+                    "interviewers": [scrub(n) for n in store.names(row)][:6], "matched": bool(key),
+                    "recording": recording_summary(row)})
     return sorted(out, key=lambda item: item["start"] or "", reverse=True)
 
 
