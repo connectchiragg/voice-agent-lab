@@ -76,7 +76,7 @@ def main() -> None:
         if path == "/preview-media.mp4" and args.media and valr_dashboard.is_preview_request(request):
             from fastapi.responses import FileResponse
             return FileResponse(args.media, media_type="video/mp4")
-        if path.startswith(("/valr/api/notifications", "/valr/api/phone/")):
+        if path.startswith(("/valr/api/notifications", "/valr/api/phone/", "/valr/api/push")):
             return await preview_notify(request, path)
         if path.startswith(("/valr/api/notetakers/", "/valr/api/leads/")) or path in (
                 "/valr/api/recording", "/valr/api/recording/media", "/valr/api/telegram/code", "/valr/api/reach", "/valr/api/prep"):
@@ -134,7 +134,8 @@ def main() -> None:
             return JSONResponse({"ok": True, "found": 3, "new": 1, "message": f"{label}: 3 recordings in the last 7 days, 1 new."})
         return JSONResponse({"ok": True, "message": f"{label}: 2 notes read, 2 new."})
 
-    notes = {"read": set(), "switches": {"immediate": True, "digest": True, "quiet": True}}
+    notes = {"read": set(), "switches": {"immediate": True, "digest": True, "quiet": True, "delivery": "both"},
+             "devices": set()}
 
     async def preview_notify(request, path):
         """Fictional notifications, alert switches and phone-recording status (nothing stored)."""
@@ -164,6 +165,18 @@ def main() -> None:
                 notes["switches"].update({k: v for k, v in body.items() if k in notes["switches"]})
             elif path == "/valr/api/phone/token":
                 return JSONResponse({"ok": True, "token": "preview-token-not-real", "message": "Copy it now."})
+        if path.startswith("/valr/api/push"):  # Phone push: a made-up key, devices counted in memory.
+            if request.method == "POST":
+                body = json.loads(await request.body() or b"{}")
+                if path.endswith("/subscribe"):
+                    notes["devices"].add(str(body.get("endpoint")))
+                elif path.endswith("/unsubscribe"):
+                    notes["devices"].discard(str(body.get("endpoint")))
+            out = {"ok": True, "configured": True, "public_key": PREVIEW_VAPID, "devices": len(notes["devices"]),
+                   "delivery": notes["switches"]["delivery"]}
+            if path.endswith("/test"):
+                out |= {"delivered": 0, "message": "Preview: nothing is sent."}
+            return JSONResponse(out)
         if path == "/valr/api/phone/status":
             return JSONResponse({"ok": True, "token": True, "last_upload_at": (now - timedelta(hours=3)).isoformat(),
                                  "last_status": "done", "waiting": 0, "audio_days": 7})
@@ -172,6 +185,9 @@ def main() -> None:
             items = [i for i in items if not i["read"]]
         return JSONResponse({"ok": True, "unread": unread, "items": items, "switches": notes["switches"],
                              "marked": 1})
+
+    from app import webpush
+    PREVIEW_VAPID = webpush.new_keys()[0]  # A throwaway public key, so a local browser can subscribe.
 
     real = None
     if args.performance:

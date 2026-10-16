@@ -62,6 +62,12 @@ class MemoryStore:
     async def pending(self):
         return [dict(r) for r in self.rows if r["tg_state"] == "pending"]
 
+    async def push_pending(self):
+        return [dict(r) for r in self.rows if r.get("push_state") == "pending"]
+
+    async def unread_count(self, since):
+        return sum(1 for r in self.rows if not r["read_at"] and r["created_at"] >= since)
+
     async def lead_states(self):
         return dict(self.states)
 
@@ -210,7 +216,8 @@ def test_digest_once_a_day_at_nine_with_something_in_it():
     store, bot = MemoryStore(), Bot()
     run(n.add(store, {"source_id": "gmail:r", "kind": "rejection", "title": "x", "company": "Tessel"}, ist(1)))
     run(n.add(store, {"source_id": "gmail:l", "kind": "new_lead", "title": "y", "company": "Quillworks"}, ist(1)))
-    assert run(n.dispatch(store, ist(8, 30), bot, chat=1)) == {"sent": 0, "held": 0, "digest": 0} and not bot.sent
+    assert run(n.dispatch(store, ist(8, 30), bot, chat=1)) == {"sent": 0, "held": 0, "digest": 0, "pushed": 0,
+                                                               "push_held": 0} and not bot.sent
     assert run(n.dispatch(store, ist(9, 1), bot, chat=1))["digest"] == 2
     assert len(bot.sent) == 1 and bot.sent[0].startswith("🗞 2 updates")
     run(n.add(store, {"source_id": "gmail:x", "kind": "rejection", "title": "z", "company": "Onyx"}, ist(10)))

@@ -18,7 +18,7 @@ async def connect():
     import psycopg
     connection = await psycopg.AsyncConnection.connect(os.environ["VALR_TEST_POSTGRES"], autocommit=True)
     await connection.execute("DROP TABLE IF EXISTS notifications, notify_lead_state, notify_settings, "
-                             "phone_uploads, phone_audio, phone_upload_token")
+                             "phone_uploads, phone_audio, phone_upload_token, push_subscriptions")
     return connection
 
 
@@ -100,4 +100,58 @@ def test_phone_store_sql(monkeypatch):
             await phone.stuck(c, now)
             await phone.drop_upload(c, "u1")
             assert await phone.upload(c, "u1") is None
+    run(go())
+
+
+def test_push_columns_migrate_old_rows_and_the_subscription_store():
+    from app import notifications as n
+    from app import webpush
+
+    async def go():
+        async with await connect() as c:
+            # The table as valr-notify created it, with a row from before phone push.
+            old_schema = n.SCHEMA.split("-- Phone push")[0]
+            await c.execute(old_schema)
+            await c.execute("INSERT INTO notifications (source_id, kind, importance, title) "
+                            "VALUES ('gmail:old', 'offer', 'immediate', 'Old')")
+            store = n.Store(c)
+            await store.setup()
+            await store.setup()  # Idempotent.
+            now = datetime.now(timezone.utc)
+            await n.add(store, {"source_id": "gmail:new", "kind": "reply", "title": "Kite replied"}, now)
+            assert [r["source_id"] for r in await store.push_pending()] == ["gmail:new"]  # The old row: never.
+            await store.save_switches(delivery="push")
+            assert (await store.switches()).delivery == "push"
+            subs = webpush.Store(c)
+            await subs.setup()
+            await subs.save("https://web.push.apple.com/a", "p" * 40, "a" * 16, "iPhone")
+            await subs.save("https://web.push.apple.com/a", "q" * 40, "b" * 16, "iPhone")  # Same device: updated.
+            rows = await subs.all()
+            assert await subs.count() == 1 and rows[0]["p256dh"] == "q" * 40
+            await subs.failed(rows[0]["id"])
+            await subs.ok(rows[0]["id"], now)
+            assert (await subs.all())[0]["failures"] == 0
+            assert await subs.remove("https://web.push.apple.com/a") == 1
+            await subs.save("https://web.push.apple.com/b", "p" * 40, "a" * 16, "")
+            await subs.delete((await subs.all())[0]["id"])
+            assert await subs.count() == 0
+    run(go())
+
+
+def test_phone_duplicate_by_sha256_sql():
+    from app import phone_recordings as phone
+
+    async def go():
+        async with await connect() as c:
+            await phone.setup(c)
+            for upload_id in ("d1", "d2"):
+                await phone.begin_upload(c, upload_id)
+            await phone.finish_upload(c, "d1", 10, "m4a", "", "", None, "abc")
+            assert await phone.find_duplicate(c, "abc", "d2") == "d1"
+            assert await phone.find_duplicate(c, "abc", "d1") is None
+            await phone.mark(c, "d1", status="failed")
+            assert await phone.find_duplicate(c, "abc", "d2") is None
+            await phone.release_failed(c, "abc")
+            await phone.finish_upload(c, "d2", 10, "m4a", "", "", None, "abc")  # The unique index allows it now.
+            assert (await phone.upload(c, "d1"))["status"] == "failed"
     run(go())

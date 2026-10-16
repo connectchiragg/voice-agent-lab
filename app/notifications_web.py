@@ -6,12 +6,14 @@
 - `POST /valr/api/notifications/read` {ids: [..]} or {all: true}: marks them read (CSRF, same
   origin, JSON: app/valr_dashboard.action_owner). The page marks an item read when it is
   clicked, not when the list opens.
-- `POST /valr/api/notifications/settings` {immediate?, digest?, quiet?}: the Telegram switches
-  (immediate alerts, the 09:00 digest, quiet hours 23:00-08:00).
+- `POST /valr/api/notifications/settings` {immediate?, digest?, quiet?, delivery?}: the Telegram
+  switches (immediate alerts, the 09:00 digest, quiet hours 23:00-08:00) and where alerts go:
+  "both" (Telegram + phone push), "push" (phone push only) or "telegram" (app/webpush.py).
 """
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -41,8 +43,7 @@ async def listing(request: Request, unread: int = 0) -> JSONResponse:
         count = await store.unread_count(since)
         switches = await store.switches()
     return JSONResponse({"ok": True, "unread": count, "items": [notifications.view(r, now) for r in rows],
-                         "switches": {"immediate": switches.immediate, "digest": switches.digest,
-                                      "quiet": switches.quiet}}, headers=NO_CACHE)
+                         "switches": switches.view()}, headers=NO_CACHE)
 
 
 class ReadRequest(BaseModel):
@@ -74,6 +75,7 @@ class SwitchRequest(BaseModel):
     immediate: bool | None = None
     digest: bool | None = None
     quiet: bool | None = None
+    delivery: Literal["both", "push", "telegram"] | None = None
 
 
 @router.post("/valr/api/notifications/settings")
@@ -82,7 +84,8 @@ async def switches(request: Request) -> JSONResponse:
     try:
         body = SwitchRequest.model_validate_json(await request.body())
     except ValidationError:
-        raise HTTPException(400, "Expected {immediate?, digest?, quiet?} as true or false.") from None
+        raise HTTPException(400, 'Expected {immediate?, digest?, quiet?} as true or false, or '
+                                 '{delivery: "both" | "push" | "telegram"}.') from None
     values = {k: v for k, v in body.model_dump().items() if v is not None}
     if not values:
         raise HTTPException(400, "Nothing to change.")
@@ -91,5 +94,4 @@ async def switches(request: Request) -> JSONResponse:
         await store.setup()
         await store.save_switches(**values)
         now = await store.switches()
-    return JSONResponse({"ok": True, "switches": {"immediate": now.immediate, "digest": now.digest,
-                                                  "quiet": now.quiet}}, headers=NO_CACHE)
+    return JSONResponse({"ok": True, "switches": now.view()}, headers=NO_CACHE)

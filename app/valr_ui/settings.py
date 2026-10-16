@@ -5,7 +5,7 @@ today's limits. Statuses come from the real state."""
 from typing import Any
 
 from app.valr_page import Clock, chip, e, eyebrow, meter, money, phone_label
-from app.valr_ui import attention, contracts
+from app.valr_ui import attention, contracts, pwa
 from app.valr_ui.shell import attention_list, page_head
 
 STATE = {"connected": ("Connected", "ok"), "not_connected": ("Not connected", "warn"),
@@ -188,6 +188,8 @@ def phone_recordings_row() -> str:
             '<p class="muted small">Share a call recording from Truecaller to the “Send to VALR” Shortcut: '
             'VALR transcribes it, adds it to Past interviews and the coach reviews it. The audio is stored '
             'encrypted and deleted a week after processing.</p>'
+            '<p class="small"><a href="/valr/settings/phone-help">iPhone shortcut steps</a>: one at a time, '
+            'or all at once from a Home Screen button.</p>'
             '<div class="notif-token" data-phone-token hidden><code class="mono" data-phone-token-value></code>'
             '<button class="btn small" type="button" data-phone-copy>Copy</button>'
             '<p class="muted small">Copy it now: it won’t be shown again.</p></div>'
@@ -260,5 +262,5 @@ def page(view: dict[str, Any], clock: Clock, items: list[dict[str, Any]]) -> str
 <section class="set-group" aria-labelledby="g-conn"><h2 id="g-conn" class="h-sm">Connections</h2>
   <ul class="set-list">{google_row(view, clock)}{calendar_row(view, clock)}{telegram_row(view, clock)}{notetaker_rows(view, clock)}{phone_recordings_row()}</ul></section>
 <section class="set-group" aria-labelledby="g-calls"><h2 id="g-calls" class="h-sm">Calls</h2>
-  <ul class="set-list">{prefs}{alerts_row()}{phone}{limits}</ul></section>
+  <ul class="set-list">{prefs}{alerts_row()}{pwa.card()}{phone}{limits}</ul></section>
 <p class="muted small"><a href="/valr/system">System details</a>: health, costs and recent research.</p>"""
