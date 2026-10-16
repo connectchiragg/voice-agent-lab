@@ -12,8 +12,11 @@ Activities:
 - `research_synthesize`: the spoken answer and notes, plus the claim check.
 - `research_finish`: saves the result and the job's duration to `research_jobs`.
 
-Background task: the post-call report loop (app/post_call.py; VALR_POST_CALL=0 turns it
-off): queued recordings -> scores, interviewer cues and a Telegram report.
+Background tasks: the post-call report loop (app/post_call.py; VALR_POST_CALL=0 turns it
+off): queued recordings -> scores, interviewer cues and a Telegram report; the notifications
+dispatch (app/notifications.py: Telegram alerts, quiet hours, the 09:00 digest); and phone
+call recordings (app/phone_recordings.py: Deepgram, then the notetaker pipeline;
+VALR_PHONE_RECORDINGS=0 turns it off).
 
 The callback itself is the existing CallbackWorkflow, on the callback worker's queue.
 """
@@ -354,12 +357,19 @@ async def main() -> None:
         logger.info("VALR interview briefings are off (VALR_BRIEFINGS=0 or no calendar source)")
     await ensure_lead_schedules(client)
     from app import post_call
+    from app import notifications, phone_recordings
     reports = asyncio.create_task(post_call.loop(connect)) if post_call.enabled() else None
+    # The bell's Telegram side (held items at 08:00, the 09:00 digest) and phone recordings.
+    background = [asyncio.create_task(notifications.loop(connect))]
+    if phone_recordings.enabled():
+        background.append(asyncio.create_task(phone_recordings.loop(connect)))
     try:
         await worker.run()
     finally:
         if reports:
             reports.cancel()
+        for task in background:
+            task.cancel()
 
 
 USAGE = ('usage: python -m app.research_worker [test "<topic>" | sync | blocks | '
