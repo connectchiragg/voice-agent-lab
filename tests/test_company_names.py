@@ -643,7 +643,7 @@ def test_agency_only_leads_wait_for_a_client():
     touches = [Touch("gmail:r1", "email", at(1), company="", domain="recrew.ai", direction="in",
                      people=[Contact("ops@recrew.ai", "Ops Desk")], title="Exciting opportunity", thread="r1")]
     lead = leads.build(touches, at(2))[0]
-    assert lead.company == "Recrew (agency): role not yet named" and lead.agency_only and lead.agency == "Recrew"
+    assert lead.company == "Recrew · agency" and lead.agency_only and lead.agency == "Recrew"
     touches.append(Touch("gmail:r2", "email", at(2), company="Deriv", domain="recrew.ai", direction="in",
                          people=[Contact("ops@recrew.ai", "Ops Desk")], title="Re: Exciting opportunity", thread="r1"))
     lead = leads.build(touches, at(3))[0]
@@ -658,7 +658,7 @@ def test_agency_only_leads_are_not_counted_as_companies():
     shown = contracts.leads(view, now=at(2))
     assert shown["counts"]["live"] == 0 and shown["counts"]["agencies"] == 1
     assert sum(b["count"] for b in shown["bands"]) == 0
-    assert shown["leads"][0]["company"].startswith("Recrew (agency)")
+    assert shown["leads"][0]["company"] == "Recrew · agency"
 
 
 def test_transcript_pass_reads_the_opening_only_and_never_logs_it(caplog):
@@ -685,3 +685,32 @@ def test_transcript_pass_reads_the_opening_only_and_never_logs_it(caplog):
     # A speaker's name the model offers is a person, never the company.
     who = run(make(FakeClient({"company": "Mia Chen", "confidence": 0.9})).resolve(FakeConn(), ev))
     assert who.company == ""
+
+
+# 898c438: the 30-day Gmail backfill's junk.
+
+@pytest.mark.parametrize("domain", ["hirebridgemail.com", "hirebridge.com", "recruitee-email.com", "recruitee.com",
+                                    "greenhouse-mail.io", "jobs.lever.co", "ashbyhq.com", "workable.com", "smartrecruiters.com",
+                                    "zohorecruit.in", "freshteam.com", "keka.com", "darwinbox.in", "naukri.com",
+                                    "instahyre.com", "iimjobs.com", "hirist.tech", "cutshort.io", "wellfound.com",
+                                    "weekday.works", "weekday.ai", "qrata.ai", "quickhyre.ai"])
+def test_ats_mailer_and_platform_domains_never_name_a_company(domain):
+    assert names.from_domain(domain) == ""
+    assert names.resolve(sender_email=f"jobs@{domain}", sender_name="Notifications").name == ""
+
+
+@pytest.mark.parametrize("name", ["Hirebridgemail", "Recruitee Email", "Weekday AI", "Weekday", "eekee", "faff",
+                                  "Quickhyre", "Qrata"])
+def test_backfill_junk_is_never_a_company(name):
+    assert not names.is_company(name) and names.display(name) == ""
+
+
+@pytest.mark.parametrize("name", ["Simpplr", "Composio", "Netomi", "Commure", "Sentry", "Coinbase", "TCS", "Nokia",
+                                  "Leverage", "micro1", "Zepto"])
+def test_real_employers_stay(name):
+    assert names.is_company(name)
+    assert names.from_domain("leverage.example") == "Leverage"  # Not mistaken for Lever.
+
+
+def test_mailer_words_are_stripped_from_domain_names():
+    assert names.humanize_label("zinnovmail") == "Zinnov"

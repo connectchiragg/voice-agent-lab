@@ -323,8 +323,9 @@ def new_lead_for(touch: Touch) -> Lead | None:
     if not touch.company.strip() and company_names.is_agency(touch.domain):
         agency = company_names.agency_name(touch.domain)  # Only an agency so far: no employer yet.
         key = "agency:" + touch.domain.lower()
-        return Lead(id=lead_id_for(key), company=f"{agency} (agency): role not yet named", key=key,
-                    company_how=f"recruiting agency domain {touch.domain.lower()}", agency=agency, agency_only=True)
+        return Lead(id=lead_id_for(key), company=f"{agency} · agency", key=key,  # Short: it labels the globe too.
+                    company_how=f"recruiting agency domain {touch.domain.lower()}; the role and employer are not "
+                                "named yet", agency=agency, agency_only=True)
     name = touch.company.strip() or domain_company(touch.domain)
     how = touch.company_how if touch.company.strip() else (f"Gmail sender domain {company_domain(touch.domain)}"
                                                            if name else "")
@@ -396,6 +397,9 @@ def build(touches: list[Touch], now: datetime, overrides: Overrides | None = Non
         elif touch.company:
             touch.company = company_names.display(touch.company, owner) or touch.company
     for touch in sorted(touches, key=lambda t: (t.at, t.id)):
+        if touch.kind == "email" and company_names.is_learning(touch.domain):
+            touch.lead_id = ""  # Course marketing kept before the classifier dropped it: never a lead.
+            continue
         if overrides.dismissed(touch):
             touch.lead_id = ""
             continue
