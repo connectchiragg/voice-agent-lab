@@ -5,7 +5,7 @@ top bar's .brand-mark in static/valr-ds.css).
     python scripts/make_icons.py          # the web icons (static/icons/*.png)
     python scripts/make_icons.py --mac    # the Mac app's icons (mac/VALRRecorderSync/Resources/)
 
-The Mac app gets the same orb: AppIcon-1024.png (macOS's icon grid: an 824 px rounded square
+The Mac app gets the same orb: AppIcon-1024.png (now drawn by mac/dmg/make_app_icon.swift; macOS's icon grid: an 824 px rounded square
 on a 1024 canvas with a soft shadow; mac/build.sh turns it into AppIcon.icns with sips and
 iconutil) and MenuBarIconTemplate.png/@2x (18 pt, black on transparent, so macOS tints it for
 light and dark menu bars).
@@ -179,7 +179,8 @@ def menubar_template(size: int) -> list[list[tuple[int, int, int, int]]]:
 
 def mac() -> None:
     MAC_OUT.mkdir(parents=True, exist_ok=True)
-    png(MAC_OUT / "AppIcon-1024.png", mac_app_icon(1024))
+    # AppIcon-1024.png now comes from mac/dmg/make_app_icon.swift (lit tile, edge highlight);
+    # mac_app_icon() is kept for reference but no longer overwrites it.
     png(MAC_OUT / "MenuBarIconTemplate.png", menubar_template(18))
     png(MAC_OUT / "MenuBarIconTemplate@2x.png", menubar_template(36))
     print("wrote", ", ".join(sorted(p.name for p in MAC_OUT.glob("*.png"))))
