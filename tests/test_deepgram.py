@@ -350,7 +350,26 @@ def test_speakable_writes_am_pm_the_way_aura_reads_them_well():
     assert speakable("It ends at 5 p.m. Then lunch.") == "It ends at 5 PM. Then lunch."
 
 
-def test_speakable_respells_names_for_the_voice_only():
+def test_speakable_respells_names_from_the_private_map_for_the_voice_only(tmp_path, monkeypatch):
     from app import persona
-    assert speakable("Your Brightline interview, with VALR.") == (
-        f"Your Bright Line interview, with {persona.SPOKEN_NAME}.")
+    path = tmp_path / "pronounce.json"
+    path.write_text('{"Acmecorp": "Acme Corp", "bad": 3}')
+    monkeypatch.setenv("VALR_PRONOUNCE_PATH", str(path))
+    assert persona.load_pronounce() == {"Acmecorp": "Acme Corp"}
+    monkeypatch.setattr(persona, "PRONOUNCE", persona.PRONOUNCE)
+    monkeypatch.setattr(persona, "PRONOUNCE_PATTERN", persona.PRONOUNCE_PATTERN)
+    persona.use_pronounce(persona.load_pronounce())
+    assert speakable("Your Acmecorp interview, with VALR.") == (
+        f"Your Acme Corp interview, with {persona.SPOKEN_NAME}.")
+    assert speakable("Acmecorps and acmecorp stay.") == "Acmecorps and acmecorp stay."
+    persona.use_pronounce({})
+    assert speakable("Your Acmecorp interview.") == "Your Acmecorp interview."
+
+
+def test_pronounce_map_missing_or_invalid_means_none(tmp_path):
+    from app import persona
+    assert persona.load_pronounce(tmp_path / "absent.json") == {}
+    (tmp_path / "list.json").write_text("[1]")
+    (tmp_path / "broken.json").write_text("{")
+    assert persona.load_pronounce(tmp_path / "list.json") == {}
+    assert persona.load_pronounce(tmp_path / "broken.json") == {}
