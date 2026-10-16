@@ -397,3 +397,53 @@ def test_repair_keeps_the_original_name_against_an_agency_domain():
                                    "Zoom Meeting between Alex Doe and Pat Lee", "Weekly sync"])
 def test_meeting_titles_without_a_company(title):
     assert names.resolve(title=title).name == "" and names.resolve(stated=title).name == ""
+
+
+# The 1d58b67 dry-run leftovers: role words, casing, suffixes, TLDs and prefix splits.
+
+@pytest.mark.parametrize("name", ["Software", "Deployed Engineer", "AI Software", "Deployed", "Forward Deployed Engineer",
+                                  "Founding Backend Engineer", "Senior SDE", "Staff Platform Engineer", "Consulting",
+                                  "Solutions", "AI", "Developer"])
+def test_role_and_title_words_are_never_a_company(name):
+    assert not names.is_company(name) and names.clean(name) == ""
+    assert names.resolve(title=name, stated=name).name == ""
+
+
+@pytest.mark.parametrize("raw, tidy", [
+    ("PLUGSCALE CONSULTING PRIVATE CONSULTING", "Plugscale Consulting"),
+    ("PlugScale Consulting Private Limited", "PlugScale Consulting"),
+    ("FourKites, Inc.", "FourKites"),
+    ("Broccoli AI", "Broccoli AI"),
+    ("AM Infoweb Ltd", "AM Infoweb"),
+])
+def test_normalised_names(raw, tidy):
+    assert names.clean(raw) == tidy
+
+
+@pytest.mark.parametrize("new, known, shown", [
+    ("Cermati.com", ["Cermati"], "Cermati"),                      # No TLD added to a clean name.
+    ("Fourkites", ["FourKites, Inc."], "FourKites"),              # The brand's casing, without the suffix.
+    ("Chasi", ["Chasi AI", "Chasi AI", "Chasi"], "Chasi AI"),     # The longer known name: one lead, not two.
+    ("PLUGSCALE CONSULTING PRIVATE CONSULTING", ["PlugScale Consulting", "PlugScale Consulting"], "PlugScale Consulting"),
+    ("Orvera.ai", [], "Orvera.ai"),
+    ("Acme Robotics", ["Juniper"], "Acme Robotics"),
+])
+def test_canonical_spelling(new, known, shown):
+    assert names.canonical(new, known) == shown
+
+
+def test_repair_keeps_one_spelling_per_company():
+    pytest.importorskip("temporalio")
+    from app import lead_worker
+    touches = [Touch("gmail:1", "email", at(1), company="Chasi AI", stated="Chasi AI", direction="in",
+                     domain="chasi.example", people=[Contact("ana@chasi.example", "Ana")], title="Role at Chasi AI"),
+               Touch("cal:2", "calendar", at(2), company="Chasi", stated="", title="Chasi technical round",
+                     people=[Contact("ana@chasi.example", "Ana")]),
+               Touch("gmail:3", "email", at(3), company="Cermati.com", stated="Cermati", direction="in",
+                     domain="cermati.example", people=[Contact("bo@cermati.example", "Bo")], title="Next steps"),
+               Touch("gmail:4", "email", at(4), company="Recrew AI", stated="Recrew AI", direction="in",
+                     domain="recrew.ai", people=[Contact("x@recrew.ai", "X")], title="Software")]
+    client = FakeClient(*[{"company": "Software", "confidence": 0.9}] * 4)
+    run(lead_worker.resolve_touches(FakeConn(), touches, make(client), dry_run=True))
+    assert [t.company for t in touches[:3]] == ["Chasi AI", "Chasi AI", "Cermati"]
+    assert touches[3].company != "Software"

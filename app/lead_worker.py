@@ -590,7 +590,7 @@ def touch_evidence(touch: Touch, owners: set[str], snippet: str = "") -> company
 
 
 def names_clean(name: str) -> str:
-    return company_names.clean(name) or name
+    return company_names.clean(name) or company_names.normalize(name)
 
 
 async def snippets(connection: Any) -> dict[str, str]:
@@ -615,6 +615,7 @@ async def resolve_touches(connection: Any, touches: list[Touch], resolver: compa
     await company_resolver.setup(connection)
     owners = resolver.owner_emails
     resolver.agencies |= company_resolver.learn_agencies(touches)
+    known = [n for t in touches for n in (t.stated, t.company) if n and company_names.is_company(n)]
     texts = await snippets(connection)
     changes = []
     for touch in touches:
@@ -633,6 +634,8 @@ async def resolve_touches(connection: Any, touches: list[Touch], resolver: compa
             resolver.kept += 1
             decision = company_resolver.Decision(names_clean(baseline), "", company_resolver.EXISTING, "existing",
                                                  "kept the earlier name")
+        if decision.company:  # One spelling per company: "Chasi" -> "Chasi AI", "Fourkites" -> "FourKites".
+            decision.company = company_names.canonical(decision.company, known + [baseline])
         if (decision.company, decision.how) != (touch.company, touch.company_how):
             changes.append((touch.id, before, decision.company))
             touch.company, touch.company_how = decision.company, decision.how
@@ -662,6 +665,8 @@ async def repair_recordings(connection: Any, resolver: company_resolver.Resolver
         if decision.source != "override" and not company_resolver.keep_or_change(old, decision, resolver.agencies):
             resolver.kept += 1
             continue
+        if decision.company and decision.source != "override":
+            decision.company = company_names.canonical(decision.company, [old])
         if decision.company != (company or ""):
             changes.append((f"{provider}:{external_id}", company or event_company or "", decision.company))
             if not dry_run:

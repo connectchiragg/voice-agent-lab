@@ -71,6 +71,16 @@ TOOL_NAMES = frozenset("""
     zoom google meet gmeet teams microsoft webex fathom fireflies granola calendly otter tldv
     greenhouse lever ashby workday goodtime linkedin naukri gmail outlook
     """.split())
+# Role and job-title vocabulary: a candidate made only of these is never a company
+# ("Deployed Engineer", "AI Software", "Software", "Consulting").
+ROLE_WORDS = frozenset("""
+    engineer engineers engineering deployed forward software ai ml developer developers sde swe sre staff senior
+    sr junior jr founding founder backend frontend fullstack full stack platform platforms solutions solution
+    consulting consultant consultants services service technologies technology tech labs lab systems system data
+    cloud infra infrastructure applied research product products design designer member technical mts lead
+    principal associate intern analyst scientist architect manager management director head vp operations ops
+    devops security mobile web digital global group generative genai llm automation
+    """.split())
 # Common English words: never a company on their own ("You", "Considering", "Interest").
 COMMON = frozenset("""
     you your yours we our ours us they them their he she it its this that these those here there
@@ -178,6 +188,8 @@ def is_company(name: str, owner: Iterable[str] | None = None) -> bool:
             and not re.fullmatch(r"\d+-?mins?", w)]
     if not rest or "between" in words(name) or len(words(name)) > 6:
         return False  # "Meeting between A and B" names people, not a company.
+    if all(w in ROLE_WORDS for w in rest):
+        return False  # Only role / title words: "Deployed Engineer", "AI Software".
     return any(len(w) >= 3 for w in rest) or (len(rest) == 1 and (name or "").strip().isupper() and len(rest[0]) >= 2)
 
 
@@ -220,12 +232,56 @@ def clean(name: str, owner: Iterable[str] | None = None) -> str:
     text = tidy(" ".join(tokens).strip(" -–|:,.;/&"))
     text = re.sub(r"\s+(?:software\s+|technologies\s+|solutions\s+)?(?:private|pvt\.?)(?:\s+(?:limited|ltd\.?))?$|"
                   r"\s+(?:inc\.?|llc|ltd\.?|limited|gmbh|plc|corp\.?)$", "", text, flags=re.I).strip(" ,.")
+    text = normalize(text)
     return text[:80] if is_company(text, owner) else ""
 
 
+TLDS = frozenset("com io co in net org app dev ai".split())
+
+
 def key(name: str) -> str:
-    """Comparable: "Razorpay Software Pvt. Ltd." -> "razorpay software" -> without legal words."""
-    return " ".join(w for w in words(name) if w not in LEGAL)
+    """Comparable: "Razorpay Software Pvt. Ltd." -> "razorpay software"; "Cermati.com" -> "cermati"."""
+    parts = [w for w in words(name) if w not in LEGAL]
+    if len(parts) > 1 and parts[-1] in TLDS and re.search(r"\.[a-z]{2,4}\s*$", (name or "").strip(), re.I):
+        parts.pop()  # A trailing ".com" is not part of the name.
+    return " ".join(parts)
+
+
+def normalize(name: str) -> str:
+    """Tidy casing and suffixes: "PLUGSCALE CONSULTING PRIVATE CONSULTING" -> "Plugscale Consulting";
+    "FourKites, Inc." -> "FourKites"; legal words dropped anywhere, repeated words once."""
+    tokens = [t for t in re.split(r"\s+", (name or "").replace(",", " ").strip()) if t]
+    out, seen = [], set()
+    for token in tokens:
+        bare = token.lower().strip(".,")
+        if bare in LEGAL or bare in ("pvt", "pvt.", "private", "limited"):
+            continue
+        if bare in seen:
+            continue
+        seen.add(bare)
+        out.append(token.strip(","))
+    text = " ".join(out).strip(" .,-")
+    if text.isupper() and any(len(t) > 3 for t in out):  # SHOUTING -> Title Case; short acronyms stay.
+        text = " ".join(t if len(t) <= 3 else t.capitalize() for t in text.split())
+    return text
+
+
+def canonical(name: str, known: Iterable[str] = ()) -> str:
+    """The spelling to show for `name`: a known name for the same company wins (the longer one when
+    one is the other's prefix, "Chasi" -> "Chasi AI"; else the most common casing, "Fourkites" ->
+    "FourKites"); never a TLD added to a clean name ("Cermati.com" -> "Cermati")."""
+    name = normalize(name)
+    if not name:
+        return ""
+    matches = Counter(normalize(k) for k in known if k and same(k, name) and is_company(k, frozenset()))
+    if not matches:
+        if re.search(r"\.[a-z]{2,4}$", name) and not name.islower():
+            return name  # A brand like "Orvera.ai" with no other spelling known.
+        return name
+    longest = max(len(key(m)) for m in matches)
+    best = [m for m in matches if len(key(m)) == longest]
+    choice = max(best, key=lambda m: (matches[m], not m.isupper(), not m.islower(), -len(m)))
+    return choice if len(key(choice)) >= len(key(name)) else name
 
 
 def same(a: str, b: str) -> bool:
