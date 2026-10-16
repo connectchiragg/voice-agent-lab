@@ -255,7 +255,7 @@ const globe = await mount(document.querySelector("#hero-globe"), data, {
   onSelect(node) {            // null, or {type: "lead", id, lead}
     if (node?.type === "lead") location.href = "/valr/leads#" + node.id;
   },
-  // maxNodes: 150, labels: 80, reducedMotion: media query, now: Date (for "3 days ago"),
+  // maxNodes: 150, labels: 150, reducedMotion: media query, now: Date (for "3 days ago"),
   // threeUrl: "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js"
 });
 globe.supported;      // false without WebGL: nothing is drawn, so show a list
@@ -277,14 +277,22 @@ How it draws:
   node test checks the four stay apart under deuteranopia, protanopia and tritanopia.
 - Size = stage (sourced smallest, offer largest), so size and colour say different things.
   Hot leads get a halo.
-- Every live lead has a label (up to 80). A label that would overlap a nearer one is hidden
-  until its lead is hovered or focused; labels on the back fade out. Labels are buttons: Tab
-  reaches them, focus turns the lead to the front. Hovering shows "Company · band · score ·
-  stage · last touch".
+- Every drawn lead has a label (11 px condensed capitals; Cool and Cold slightly dimmer).
+  `placeLabels` puts each one, nearest first, in the first free slot of 8 around its dot,
+  then of the same 8 further out (two rings) with a thin leader line; it is hidden only when
+  all 24 collide, or while its dot is on the back (it fades in as the dot turns to the front).
+  Measured in the preview with 70 live leads on a desktop Home panel: 100% of front-facing
+  dots labelled over 20 s of rotation; the node test asserts at least 90%. Labels are
+  buttons: Tab reaches them, focus turns the lead to the front. Hovering shows "Company ·
+  band · score · stage · last touch".
+- On desktop the panel is taller and the copy sits in a left column, so the sphere fills
+  about 90% of the panel height. Pointing at a row in the list (or focusing its link) turns
+  the globe to that lead and shows its tooltip: the list stays the full index.
 
 Controls:
 - Drag to rotate, with inertia; wheel or pinch to zoom.
-- Auto-rotation starts 2.5 s after the last input and stops while a node is selected.
+- Auto-rotation (slow, about 4°/s) starts 2.5 s after the last input; it stops while a node
+  is selected or hovered and while the mouse is over the globe.
 - With prefers-reduced-motion there is no auto-rotation, no inertia and no animated focus.
 - The globe renders only while it is on screen.
 
@@ -375,7 +383,7 @@ per email that reaches it:
 | `tests/leads-globe.test.mjs` | bands, colours (colour-blind check on static/leads.css), layout, label collisions, tooltip | `node --test` |
 
 Preview with made-up data: `VALR_DEV_PREVIEW=1 python scripts/preview_ui.py`, then open
-http://127.0.0.1:8090/valr/leads: about 107 fictional leads shaped like the real mailbox
+http://127.0.0.1:8090/valr/leads: about 115 fictional leads (70 live) shaped like the real mailbox
 (`tests/leads_sample.live_shaped_touches`) through the real `leads.build` and `leads.graph`;
 `?leads=small` for the small sample.
 

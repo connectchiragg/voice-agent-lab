@@ -82,23 +82,49 @@ test("80 leads spread evenly: no clumps", () => {
   assert.ok(min > 0.55 * ideal, `closest pair ${min.toFixed(1)} vs ideal ${ideal.toFixed(1)}`);
 });
 
-test("labels: nearer wins a collision, hovered always shows, the back side fades", () => {
+test("labels: a colliding label moves to a free slot; hidden only when all are taken or on the back", () => {
+  const base = { w: 60, h: 12, r: 4, forced: 0 };
   const items = [
-    { id: "near", x: 100, y: 100, w: 60, h: 12, depth: 0.9, forced: 0 },
-    { id: "far", x: 120, y: 104, w: 60, h: 12, depth: 0.4, forced: 0 },
-    { id: "apart", x: 300, y: 100, w: 60, h: 12, depth: 0.5, forced: 0 },
-    { id: "back", x: 500, y: 100, w: 60, h: 12, depth: -0.6, forced: 0 },
-    { id: "edge", x: 700, y: 100, w: 60, h: 12, depth: 0.0, forced: 0 },
+    { ...base, id: "near", x: 100, y: 100, depth: 0.9 },
+    { ...base, id: "close", x: 100, y: 110, depth: 0.4 },  // Its right-hand slot is taken: it goes elsewhere.
+    { ...base, id: "back", x: 400, y: 100, depth: -0.6 },
+    { ...base, id: "edge", x: 790, y: 300, depth: 0.0 },
   ];
-  let out = placeLabels(items);
+  const out = placeLabels(items, { width: 800, height: 600 });
   assert.equal(out.get("near").show, true);
-  assert.equal(out.get("far").show, false);
-  assert.equal(out.get("apart").show, true);
+  assert.equal(out.get("near").x, 100 + 4 + 3);  // First choice: right of its dot.
+  assert.equal(out.get("close").show, true);
+  assert.notDeepEqual([out.get("close").x, out.get("close").y], [107, 110 - 6]);
   assert.equal(out.get("back").show, false);
-  assert.ok(out.get("edge").show && out.get("edge").opacity < 1 && out.get("edge").opacity > 0);
-  out = placeLabels(items.map((it) => (it.id === "far" ? { ...it, forced: 1 } : it)));
-  assert.equal(out.get("far").show, true);
-  assert.equal(out.get("near").show, false);
+  const edge = out.get("edge");
+  assert.ok(edge.show && edge.x + 60 <= 800, "flips left at the right edge");
+  assert.ok(edge.opacity > 0 && edge.opacity < 1, "fades as it turns to the front");
+  // Boxed in on all sides: a leader line takes it further out.
+  const crowd = [{ ...base, id: "c", x: 300, y: 300, depth: 1 }];
+  for (const [i, [dx, dy]] of [[0, 1], [0, -1], [1, 0], [-1, 0], [1, 1], [1, -1], [-1, 1], [-1, -1]].entries()) {
+    crowd.push({ ...base, id: `n${i}`, x: 300 + dx * 40, y: 300 + dy * 16, depth: 1.1 });
+  }
+  const boxed = placeLabels(crowd, { width: 800, height: 600 }).get("c");
+  assert.ok(boxed.show);
+});
+
+test("at least 90% of the front-facing dots get a label (70 leads, desktop panel)", () => {
+  const leads = Array.from({ length: 70 }, (_, i) => lead(`${["ARC", "BRIGHT", "CINDER", "DELTA", "ECHO", "FABLE", "GLINT"][i % 7]}${["WORKS", "LOOP", "FORGE", "STACK"][i % 4]}${i}`, 100 - i, "applied"));
+  const { nodes } = layout({ leads });
+  const W = 900, H = 660, scale = H / 2 / 1.12 / RADIUS;  // The sphere fills about 89% of the panel height.
+  let worst = 1;
+  for (const turn of [0, 0.7, 1.4, 2.1, 2.8, 3.5, 4.2, 4.9, 5.6]) {
+    const items = nodes.map((n) => {
+      const [x0, y0, z0] = n.pos;
+      const x = x0 * Math.cos(turn) + z0 * Math.sin(turn), z = -x0 * Math.sin(turn) + z0 * Math.cos(turn);
+      return { id: n.id, x: W / 2 + x * scale, y: H / 2 - y0 * scale, r: n.r * scale, w: n.ref.company.length * 6.6 + 4, h: 13,
+        depth: z / RADIUS, forced: 0 };
+    });
+    const out = placeLabels(items, { width: W, height: H });
+    const front = items.filter((it) => it.depth > 0);
+    worst = Math.min(worst, front.filter((it) => out.get(it.id).show).length / front.length);
+  }
+  assert.ok(worst >= 0.9, `worst share ${worst.toFixed(2)}`);
 });
 
 test("the tooltip: company · band · score · stage · last touch", () => {

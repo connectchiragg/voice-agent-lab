@@ -14,7 +14,7 @@ app page (/valr, /valr/interviews, /valr/leads, /valr/performance, /valr/setting
                                                             # past interviews play that local file
     .../valr/interviews/past/<id>?media=processing          # the player's "Preparing the video" state
                                                             # (?media=ready switches back)
-    .../valr/leads?leads=small                              # the small lead sample (default: ~107, live-shaped)
+    .../valr/leads?leads=small                              # the small lead sample (default: ~115, 70 live)
 
 No Postgres, Temporal, Deepgram or LLM: the cockpit shows tests/valr_sample.py's made-up
 interviews, its buttons change in-memory state only, and a call talks to the stub
