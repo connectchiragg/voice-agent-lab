@@ -363,6 +363,15 @@ section.card, article.card, details.card { padding: var(--s5) var(--s6); }
   border-radius: var(--r-md); background: var(--surface-2); }
 .notif-token code { word-break: break-all; }
 .notif-steps { list-style: decimal; padding-left: 20px; display: grid; gap: 6px; margin: var(--s2) 0; color: var(--text-2); font-size: var(--fs-14); }
+/* Settings › Phone call recordings: Record calls on iPhone, VALR for Mac, Upload token, Status. */
+.rec-part { min-width: 0; }
+.rec-part + .rec-part { border-top: 1px solid var(--line); }
+.rec-part .sub-title { margin: var(--s3) 0 var(--s2); }
+.rec-download { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2) var(--s3); margin: var(--s1) 0 var(--s2); }
+.rec-download .btn { gap: 6px; }
+.rec-sha code { word-break: break-all; font-size: var(--fs-xs); }
+.rec-notes { list-style: disc; padding-left: 20px; display: grid; gap: 2px; margin: var(--s2) 0 0; }
+.rec-buttons { display: flex; flex-wrap: wrap; gap: var(--s2); margin-top: var(--s2); }
 
 /* Home: the stage. Always night-sky dark; the "right now" cards sit on it. */
 .stage { position: relative; display: grid; grid-template-columns: minmax(340px, 420px) 1fr; min-height: 620px;

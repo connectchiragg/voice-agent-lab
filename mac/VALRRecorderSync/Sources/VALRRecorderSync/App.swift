@@ -8,10 +8,28 @@ struct VALRRecorderSyncApp: App {
     @ObservedObject private var model = AppModel.shared
 
     var body: some Scene {
-        MenuBarExtra("VALR Recorder Sync", systemImage: model.problem == nil ? "waveform.circle" : "exclamationmark.circle") {
+        MenuBarExtra {
             MenuContent(model: model)
+        } label: {
+            if model.problem == nil, let mark = MenuBarIcon.mark {
+                Image(nsImage: mark).accessibilityLabel("VALR")
+            } else {
+                Image(systemName: model.problem == nil ? "waveform.circle" : "exclamationmark.circle")
+                    .accessibilityLabel("VALR")
+            }
         }
     }
+}
+
+/// The VALR orb as a monochrome template image (Resources/MenuBarIconTemplate.png and @2x,
+/// 18 pt), so macOS tints it for light and dark menu bars.
+enum MenuBarIcon {
+    static let mark: NSImage? = {
+        guard let image = NSImage(named: "MenuBarIconTemplate") else { return nil }
+        image.isTemplate = true
+        image.size = NSSize(width: 18, height: 18)
+        return image
+    }()
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
@@ -49,7 +67,7 @@ struct MenuContent: View {
         }
         Button("Settings…") { Windows.shared.showSettings() }
             .keyboardShortcut(",")
-        Button("Quit VALR Recorder Sync") { NSApp.terminate(nil) }
+        Button("Quit VALR") { NSApp.terminate(nil) }
             .keyboardShortcut("q")
     }
 }
@@ -63,7 +81,7 @@ final class Windows {
 
     func showOnboarding() {
         if onboarding == nil {
-            onboarding = make(title: "Set up VALR Recorder Sync", view: OnboardingView(model: AppModel.shared) { [weak self] in
+            onboarding = make(title: "Set up VALR", view: OnboardingView(model: AppModel.shared) { [weak self] in
                 self?.onboarding?.close()
                 self?.onboarding = nil
                 AppModel.shared.start()
@@ -74,7 +92,7 @@ final class Windows {
 
     func showSettings() {
         if settings == nil {
-            settings = make(title: "VALR Recorder Sync Settings", view: SettingsView(model: AppModel.shared))
+            settings = make(title: "VALR Settings", view: SettingsView(model: AppModel.shared))
             settings?.isReleasedWhenClosed = false
         }
         present(settings)

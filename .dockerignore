@@ -4,6 +4,7 @@
 !static/
 !requirements.lock
 !docs/phone-recordings.md
+!downloads/
 !requirements-worker.lock
 **/__pycache__
 **/*.py[cod]

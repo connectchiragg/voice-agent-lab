@@ -5,6 +5,8 @@ import Security
 public struct TokenKeychain: Sendable {
     public var service: String
 
+    /// The service name predates the rename to "VALR" and stays the same on purpose: an existing
+    /// install keeps its token (macOS may ask once to let the renamed app read it: Always Allow).
     public init(service: String = "com.haciensus.valr.recordersync.upload-token") {
         self.service = service
     }
@@ -24,7 +26,7 @@ public struct TokenKeychain: Sendable {
             var add = base
             add[kSecValueData as String] = data
             add[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-            add[kSecAttrLabel as String] = "VALR Recorder Sync upload token"
+            add[kSecAttrLabel as String] = "VALR upload token"
             let rc = SecItemAdd(add as CFDictionary, nil)
             guard rc == errSecSuccess else { throw KeychainError(status: rc) }
         } else if status != errSecSuccess {

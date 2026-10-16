@@ -1,7 +1,7 @@
 import Foundation
 import os
 
-let log = Logger(subsystem: "com.haciensus.valr.recordersync", category: "sync")
+let log = Logger(subsystem: "com.haciensus.valr.mac", category: "sync")
 
 public struct RetryPolicy: Sendable {
     public var attempts: Int

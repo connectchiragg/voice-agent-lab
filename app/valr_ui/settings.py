@@ -175,33 +175,59 @@ def run_row(job: dict[str, Any], clock: Clock) -> str:
             f'<span class="muted num">{clock.when(job["created_at"])} · {took}{money(job["spend_usd"])}</span></span></li>')
 
 
-PHONE_STEPS = [
-    "In the Shortcuts app, tap + and name the shortcut “Send to VALR”.",
-    "Tap ⓘ, turn on “Show in Share Sheet”, and set it to receive Audio and Files.",
-    "Add “Get Contents of URL”: the upload address below, Method POST, a header Authorization = "
-    "Bearer followed by your upload token, Request Body Form, a field file (type File) = Shortcut Input.",
-    "Add “Show Result” so you see “Got it”.",
-    "After a recorded call: open it in Truecaller, tap Share, choose “Send to VALR”.",
+IPHONE_STEPS = [
+    "During a call, tap More → Call Recording. iPhone announces it to both people; tell the other person first.",
+    "After the call, iPhone saves the recording in Notes.",
+]
+MAC_STEPS = [
+    "Open the download and drag VALR to Applications.",
+    "The first time, right-click VALR and choose Open.",
+    "Paste your upload token (below).",
+    "Allow Full Disk Access when it asks.",
+    "Click Start syncing.",
 ]
 
 
+def mac_download() -> str:
+    """VALR for Mac's Download button, version, size and SHA-256 (app/mac_release.py)."""
+    from app import mac_release
+    release = mac_release.info()
+    if release is None:
+        return '<p class="field-help">The Mac app isn\'t in this build yet.</p>'
+    return (f'<div class="rec-download"><a class="btn sm primary" href="/valr/downloads/mac" download>'
+            f'{icon("download", 16)}Download for Mac</a>'
+            f'<span class="field-help num">DMG · version {e(release["version"])} · {e(release["size_label"])} · macOS 14 or later</span></div>'
+            f'<p class="field-help rec-sha">SHA-256 <code class="token">{e(release["sha256"])}</code></p>')
+
+
 def phone_recordings_row() -> str:
-    """The iPhone's call recordings (Truecaller -> the Shortcut -> VALR). static/valr-notify.js
-    fills the status from /valr/api/phone/status and runs the two token buttons."""
-    steps = "".join(f"<li>{e(step)}</li>" for step in PHONE_STEPS)
-    body = ('<p class="muted" data-phone-status>Checking…</p>'
-            '<p class="muted">Share a call recording from Truecaller to the “Send to VALR” Shortcut: VALR transcribes it, '
-            'adds it to Past interviews and the coach reviews it. The audio is stored encrypted and deleted a week later.</p>'
-            '<p><a href="/valr/settings/phone-help">iPhone shortcut steps</a>: one at a time, or all at once from a Home Screen button.</p>'
-            '<div class="notif-token" data-phone-token hidden><code class="token" data-phone-token-value></code>'
-            '<button class="btn sm" type="button" data-phone-copy>Copy</button>'
-            '<p class="field-help">Copy it now: it won’t be shown again.</p></div>'
-            f'<details class="fold inline" id="phone-steps"><summary><span class="fold-title">Set up the iPhone Shortcut</span>{icon("chevron-down", 16)}</summary>'
-            f'<ol class="notif-steps">{steps}</ol><p class="field-help">Upload address: '
-            '<code class="token" data-phone-url>/hooks/recording-upload</code></p></details>')
-    actions = ('<button class="btn sm" type="button" data-phone-action="show">Show upload token</button>'
-               '<button class="btn sm ghost" type="button" data-phone-action="rotate">Rotate token</button>')
-    return row("phone-recordings", "Phone call recordings", "mic", "", body, actions)
+    """Call recordings from the iPhone: record on the iPhone, VALR for Mac sends them (or the
+    iPhone Shortcut does), the shared upload token, and the last upload. static/valr-notify.js
+    fills the status from /valr/api/phone/status and runs the token buttons."""
+    iphone = "".join(f"<li>{e(step)}</li>" for step in IPHONE_STEPS) + (
+        '<li>It reaches VALR automatically through the Mac app (below), or tap Share → Send to VALR on the iPhone '
+        '(<a href="/valr/settings/phone-help">iPhone shortcut steps</a>).</li>')
+    mac = "".join(f"<li>{e(step)}</li>" for step in MAC_STEPS)
+    body = (
+        '<p class="muted">VALR transcribes each call, adds it to Past interviews and the coach reviews it. '
+        'The audio is stored encrypted and deleted a week later.</p>'
+        '<section class="rec-part" aria-labelledby="rec-iphone"><h4 class="sub-title" id="rec-iphone">Record calls on iPhone</h4>'
+        f'<ol class="notif-steps">{iphone}</ol></section>'
+        '<section class="rec-part" aria-labelledby="rec-mac"><h4 class="sub-title" id="rec-mac">VALR for Mac</h4>'
+        f'{mac_download()}<ol class="notif-steps">{mac}</ol>'
+        '<ul class="rec-notes field-help"><li>Your Mac must be on and signed into the same iCloud with Notes sync on.</li>'
+        '<li>Only call recordings are sent; note text never leaves your Mac.</li></ul></section>'
+        '<section class="rec-part" aria-labelledby="rec-token"><h4 class="sub-title" id="rec-token">Upload token</h4>'
+        '<p class="field-help">The Mac app and the iPhone shortcut share the same token. Rotating it means pasting the new one into both.</p>'
+        '<div class="rec-buttons"><button class="btn sm" type="button" data-phone-action="show">Show upload token</button>'
+        '<button class="btn sm ghost" type="button" data-phone-action="rotate">Rotate token</button></div>'
+        '<div class="notif-token" data-phone-token hidden><code class="token" data-phone-token-value></code>'
+        '<button class="btn sm" type="button" data-phone-copy>Copy</button>'
+        '<p class="field-help">Copy it now: it won’t be shown again.</p></div>'
+        '<p class="field-help">Upload address: <code class="token" data-phone-url>/hooks/recording-upload</code></p></section>'
+        '<section class="rec-part" aria-labelledby="rec-status"><h4 class="sub-title" id="rec-status">Status</h4>'
+        '<p class="muted" data-phone-status>Checking…</p></section>')
+    return row("phone-recordings", "Phone call recordings", "mic", "", body)
 
 
 def alerts_row() -> str:

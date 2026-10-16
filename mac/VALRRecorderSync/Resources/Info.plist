@@ -3,18 +3,19 @@
 <plist version="1.0">
 <dict>
 	<key>CFBundleDevelopmentRegion</key><string>en</string>
-	<key>CFBundleExecutable</key><string>VALRRecorderSync</string>
-	<key>CFBundleIdentifier</key><string>com.haciensus.valr.recordersync</string>
+	<key>CFBundleExecutable</key><string>VALR</string>
+	<key>CFBundleIdentifier</key><string>com.haciensus.valr.mac</string>
 	<key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
-	<key>CFBundleName</key><string>VALR Recorder Sync</string>
-	<key>CFBundleDisplayName</key><string>VALR Recorder Sync</string>
+	<key>CFBundleName</key><string>VALR</string>
+	<key>CFBundleDisplayName</key><string>VALR</string>
+	<key>CFBundleIconFile</key><string>AppIcon</string>
 	<key>CFBundlePackageType</key><string>APPL</string>
 	<key>CFBundleShortVersionString</key><string>__VERSION__</string>
 	<key>CFBundleVersion</key><string>__BUILD__</string>
 	<key>LSMinimumSystemVersion</key><string>14.0</string>
 	<key>LSUIElement</key><true/>
 	<key>LSApplicationCategoryType</key><string>public.app-category.productivity</string>
-	<key>NSAppleEventsUsageDescription</key><string>VALR Recorder Sync moves a call-recording note to Recently Deleted after VALR has received it, only if you turned that on.</string>
+	<key>NSAppleEventsUsageDescription</key><string>VALR moves a call-recording note to Recently Deleted after VALR has received it, only if you turned that on.</string>
 	<key>NSHumanReadableCopyright</key><string>VALR</string>
 </dict>
 </plist>

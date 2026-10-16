@@ -2,7 +2,13 @@
 orb with a soft glow on a night-sky square (static/icons/valr-mark.svg; the same orb as the
 top bar's .brand-mark in static/valr-ds.css).
 
-    python scripts/make_icons.py
+    python scripts/make_icons.py          # the web icons (static/icons/*.png)
+    python scripts/make_icons.py --mac    # the Mac app's icons (mac/VALRRecorderSync/Resources/)
+
+The Mac app gets the same orb: AppIcon-1024.png (macOS's icon grid: an 824 px rounded square
+on a 1024 canvas with a soft shadow; mac/build.sh turns it into AppIcon.icns with sips and
+iconutil) and MenuBarIconTemplate.png/@2x (18 pt, black on transparent, so macOS tints it for
+light and dark menu bars).
 
 Pure Python (no Pillow): every pixel is shaded analytically (radial gradients, an
 anti-aliased edge), so the icons are crisp at every size. The badge stays a white V.
@@ -126,6 +132,59 @@ def badge(size: int) -> list[list[tuple[int, int, int, int]]]:
     return [[(255, 255, 255, round(255 * mark[y][x])) for x in range(size)] for y in range(size)]
 
 
+MAC_OUT = OUT.parent.parent / "mac" / "VALRRecorderSync" / "Resources"
+
+
+def mac_app_icon(size: int = 1024) -> list[list[tuple[int, int, int, int]]]:
+    """macOS's icon grid: the orb on an 824/1024 rounded square, with a soft drop shadow."""
+    body = round(size * 824 / 1024)
+    pad = (size - body) // 2
+    radius = 0.2237 * body
+    tile = orb(body, 0.2237)
+    out: list[list[tuple[int, int, int, int]]] = []
+    for py in range(size):
+        row = []
+        for px in range(size):
+            # Signed distance to the rounded square, shifted down for the shadow.
+            x, y = px + 0.5 - size / 2, py + 0.5 - size / 2 - size * 0.012
+            qx, qy = abs(x) - (body / 2 - radius), abs(y) - (body / 2 - radius)
+            d = (max(qx, 0) ** 2 + max(qy, 0) ** 2) ** 0.5 + min(max(qx, qy), 0) - radius
+            shadow = 0.32 * max(0.0, 1 - d / (size * 0.03)) ** 2 if d > 0 else 0.32
+            fg = tile[py - pad][px - pad] if 0 <= py - pad < body and 0 <= px - pad < body else (0, 0, 0, 0)
+            a = fg[3] / 255
+            alpha = a + shadow * (1 - a)
+            color = tuple(round(c * a / alpha) for c in fg[:3]) if alpha > 0 else (0, 0, 0)
+            row.append((*color, round(255 * alpha)))
+        out.append(row)
+    return out
+
+
+def menubar_template(size: int) -> list[list[tuple[int, int, int, int]]]:
+    """The orb as a menu-bar template: a solid disc inside a thin halo ring, black on transparent."""
+    c = size / 2
+    disc, ring_in, ring_out = 0.25 * size, 0.38 * size, 0.47 * size
+    out = []
+    for py in range(size):
+        row = []
+        for px in range(size):
+            hits = 0
+            for sy in range(SS):
+                for sx in range(SS):
+                    d = ((px + (sx + 0.5) / SS - c) ** 2 + (py + (sy + 0.5) / SS - c) ** 2) ** 0.5
+                    hits += d <= disc or ring_in <= d <= ring_out
+            row.append((0, 0, 0, round(255 * hits / (SS * SS))))
+        out.append(row)
+    return out
+
+
+def mac() -> None:
+    MAC_OUT.mkdir(parents=True, exist_ok=True)
+    png(MAC_OUT / "AppIcon-1024.png", mac_app_icon(1024))
+    png(MAC_OUT / "MenuBarIconTemplate.png", menubar_template(18))
+    png(MAC_OUT / "MenuBarIconTemplate@2x.png", menubar_template(36))
+    print("wrote", ", ".join(sorted(p.name for p in MAC_OUT.glob("*.png"))))
+
+
 def main() -> None:
     OUT.mkdir(parents=True, exist_ok=True)
     png(OUT / "icon-192.png", orb(192, 0.22))
@@ -137,4 +196,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    import sys
+    mac() if "--mac" in sys.argv[1:] else main()

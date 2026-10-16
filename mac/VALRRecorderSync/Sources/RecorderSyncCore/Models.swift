@@ -63,10 +63,18 @@ public struct AppSettings: Codable, Equatable, Sendable {
 }
 
 public enum Paths {
-    /// ~/Library/Application Support/VALR Recorder Sync/
+    static var applicationSupport: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+    }
+
+    /// ~/Library/Application Support/VALR/
     public static var supportDirectory: URL {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        return base.appendingPathComponent("VALR Recorder Sync", isDirectory: true)
+        applicationSupport.appendingPathComponent("VALR", isDirectory: true)
+    }
+
+    /// Where the app kept its state before it was renamed from "VALR Recorder Sync" to "VALR".
+    public static var legacySupportDirectory: URL {
+        applicationSupport.appendingPathComponent("VALR Recorder Sync", isDirectory: true)
     }
 
     /// ~/Library/Group Containers/group.com.apple.notes/

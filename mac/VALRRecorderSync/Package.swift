@@ -5,7 +5,8 @@ let package = Package(
     name: "VALRRecorderSync",
     platforms: [.macOS(.v14)],
     products: [
-        .executable(name: "VALRRecorderSync", targets: ["VALRRecorderSync"]),
+        // The binary inside VALR.app is named VALR (Activity Monitor shows it).
+        .executable(name: "VALR", targets: ["VALRRecorderSync"]),
     ],
     targets: [
         // Everything testable without a GUI: reading Notes, classifying, uploading, state.

@@ -3,7 +3,7 @@ import Foundation
 /// App side of a future "Connect a Mac" flow (see README, "Multi-user design note").
 ///
 /// Proposed VALR endpoint (not built yet): POST <server>/hooks/device-pair
-///   JSON {"code": "ABCD-1234", "device": "VALR Recorder Sync on <Mac model>"}
+///   JSON {"code": "ABCD-1234", "device": "VALR on <Mac name>"}
 ///   200 {"ok": true, "token": "<per-device upload token>", "account": "<display name>"}
 ///   400/404 for a wrong or expired code. The code is short-lived (10 min) and single-use,
 ///   created by the signed-in user in VALR Settings.
