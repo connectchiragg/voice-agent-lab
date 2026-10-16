@@ -7,7 +7,10 @@ from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
 from app import access, main
+from app.auth import Identity, gate
 from tests.test_pipeline import FakeListener, make_engines
+
+REAL_IDENTIFY = gate.identify
 
 
 class TalkingListener(FakeListener):
@@ -24,6 +27,15 @@ def speech_packets():
     return [np.full(1600, 0.1, "<f4").tobytes() for _ in range(3)]
 
 START = {"type": "start", "sample_rate": 16000, "encoding": "pcm_f32le", "echo_cancelled": True}
+
+
+@pytest.fixture(autouse=True)
+def signed_in(monkeypatch):
+    """The call surfaces need the signed-in owner (app/auth, tested in tests/test_auth.py);
+    these tests are about the call itself."""
+    async def owner(connection):
+        return Identity("owner@example.com", "session")
+    monkeypatch.setattr(gate, "identify", owner)
 
 
 @pytest.fixture
@@ -124,14 +136,21 @@ def test_only_a_verified_access_token_identifies_a_browser_caller(engines, monke
         callers.append(caller_id)
 
     main.app.state.engines.begin_call = begin_call
+    monkeypatch.setattr(gate, "identify", REAL_IDENTIFY)
+    monkeypatch.setenv("VALR_AUTH_MODE", "access")
+    monkeypatch.delenv("VALR_OWNER_EMAILS", raising=False)
+    monkeypatch.delenv("VALR_ADMIN_EMAILS", raising=False)
     monkeypatch.setattr(access, "verifier", access.AccessVerifier(
         TEAM, AUD, keys=keys(), fetched_at=time.monotonic()))
-    for headers in ({"Cf-Access-Authenticated-User-Email": "asha@example.com"},
-                    {"Cf-Access-Jwt-Assertion": token()}):
-        with TestClient(main.app).websocket_connect("/ws/voice", headers=headers) as socket:
-            socket.send_json(START)
-            assert socket.receive_json()["type"] == "ready"
-    assert callers == [None, "email:asha@example.com"]
+    with pytest.raises(WebSocketDisconnect):  # An unverified header is no one: refused.
+        with TestClient(main.app).websocket_connect(
+                "/ws/voice", headers={"Cf-Access-Authenticated-User-Email": "asha@example.com"}):
+            pass
+    with TestClient(main.app).websocket_connect(
+            "/ws/voice", headers={"Cf-Access-Jwt-Assertion": token()}) as socket:
+        socket.send_json(START)
+        assert socket.receive_json()["type"] == "ready"
+    assert callers == ["email:asha@example.com"]
 
 
 def test_the_call_page_is_served_at_slash_call_on_any_host():

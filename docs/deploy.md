@@ -416,6 +416,34 @@ anonymised caller hashes, never numbers.
 - Check: `sudo docker exec voice-research python -m app.research_worker blocks` (dry run)
   or `... sync` (sync now, then the blocks and their workflows).
 
+## Sign-in (VALR's own Google login)
+
+VALR can sign its owner in itself ("Sign in with Google", app/auth/) instead of relying on
+the Cloudflare Access login screen. Only addresses in `VALR_OWNER_EMAILS` get a session;
+any other Google account sees "VALR is private" and gets nothing (the log keeps its domain
+only). Every page, API, action and voice surface (`/valr*`, `/call`, `/ws/voice`,
+`/webrtc/*`, `/oauth/google/start`) needs the owner; the webhooks (`/hooks/*`,
+`/telnyx/webhook`, `/ws/telnyx`), `/healthz`, the sign-in pages and `/static` stay public.
+
+It reuses the Gmail/Calendar OAuth client and its redirect URI
+(`GOOGLE_OAUTH_REDIRECT_URI`, `/oauth/google/callback`), so nothing changes in the Google
+Cloud console. The sign-in asks for `openid email profile` only and never touches the
+stored Gmail/Calendar grant. No new secret: session tokens are random and kept hashed in
+Postgres (`valr_sessions`), login states are one-time rows (`valr_login_states`).
+
+Cut-over, with no moment where the owner is locked out:
+
+1. Set `VALR_OWNER_EMAILS=<the owner's Google address>` in `.env` (leave `VALR_AUTH_MODE`
+   unset: the default `both` accepts an Access login or a VALR session) and deploy.
+2. Open `https://valr.haciensus.com/login` (Access still in front), choose "Sign in with
+   Google" and the owner's account. You land on `/valr` with a `__Host-valr` cookie.
+3. In Cloudflare Zero Trust, delete the Access application "voice" for
+   `valr.haciensus.com` (and its bypass rules for `/hooks/*` and the Telnyx paths, which
+   are no longer needed). Reload `/valr`: the VALR session alone now lets you in.
+4. Set `VALR_AUTH_MODE=app` in `.env` and restart. Access JWTs are now ignored.
+
+To roll back: set `VALR_AUTH_MODE=access` (today's behaviour) and restore the Access app.
+
 ## Updating and rolling back
 
 Ship the source to a fresh directory, keep `.env`, rebuild only the app
@@ -471,6 +499,8 @@ To roll back, run the same `docker rm -f` and `docker run` with the rollback tag
 | `LLM_GATEWAY_FALLBACK`, `LLM_BYOK_GUARD`, `LLM_GATEWAY_TIMEOUT_S` | `1`, `refuse`, `600` | An OpenRouter error retries on Anthropic direct (`0`: fail). A response with `usage.is_byok=false` logs "VALR BYOK ALERT"; `refuse` then skips OpenRouter for the rest of the process, `warn` only logs, `off` ignores. Agent calls time out after 600 s, the inner search, check and classify calls after 60 s |
 | `VALR_JOB_USD`, `VALR_JOBS_PER_CALLER_DAY`, `VALR_JOBS_PER_DAY`, `VALR_MONTH_USD` | `0.25`, `3`, `15`, `20` | VALR cost limits (README, Research callbacks); the app checks them at booking, the worker within each job |
 | `VALR_SEARCHES_PER_RESEARCHER`, `VALR_PAGES_PER_RESEARCHER`, `VALR_PAGE_CHARS`, `VALR_RESULTS_PER_CALL`, `VALR_MAX_ITER`, `VALR_RESEARCHER_MODEL`, `VALR_SYNTH_MODEL` | `3`, `3`, `4000`, `5`, `5`, `claude-haiku-5-5`, `claude-sonnet-5-5` | Per-researcher caps and models (any `Caps` field in app/research_agents.py as `VALR_<NAME>`) |
+| `VALR_OWNER_EMAILS` | unset | Comma-separated Google addresses that may sign in to VALR (the owner); env only |
+| `VALR_AUTH_MODE` | `both` | `access` (Cloudflare Access only), `app` (VALR's own Google sign-in only) or `both` (either; for the cut-over, see Sign-in) |
 | `VALR_HOST`, `VALR_ACCESS_AUD` | `valr.haciensus.com`, unset | The dashboard's hostname, and the AUD tag of its Cloudflare Access application (else `CF_ACCESS_AUD`; neither: the dashboard is closed) |
 | `CF_TURN_KEY_ID`, `CF_TURN_KEY_API_TOKEN` | unset | Cloudflare Realtime TURN key for WebRTC media; run time only. Unset: public STUN only (see below) |
 | `WEBRTC_MAX_CALL_S`, `WEBRTC_MAX_CALLS` | `900`, `4` | WebRTC call time limit (TURN credentials expire 60 s later) and concurrent WebRTC calls |

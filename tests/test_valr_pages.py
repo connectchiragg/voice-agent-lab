@@ -58,6 +58,7 @@ def client(monkeypatch):
     monkeypatch.setattr(research, "pool", Pool())
     monkeypatch.setattr(valr_dashboard, "verifier", Verifier())
     monkeypatch.setenv("VALR_ADMIN_EMAILS", OWNER)
+    monkeypatch.setenv("VALR_AUTH_MODE", "access")  # Cloudflare Access only (app/auth).
     test_client = TestClient(app)
     test_client.box = box
     return test_client

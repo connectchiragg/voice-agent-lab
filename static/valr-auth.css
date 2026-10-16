@@ -1,0 +1,38 @@
+/* VALR sign-in (app/auth): the /login and /private pages, and the account menu in the
+   app's top bar. Tokens: theme.css (light and dark). Square edges, mono caps. */
+
+/* The sign-in pages. */
+.auth-page { display: grid; min-height: 100vh; min-height: 100dvh; }
+.auth-main { display: grid; place-items: center; padding: 32px 16px; }
+.auth-card { width: min(440px, 100%); padding: 36px 28px 30px; background: color-mix(in srgb, var(--graphite) 88%, transparent);
+  border: 1px solid var(--hairline-strong); box-shadow: 0 24px 60px rgba(0, 0, 0, 0.28); }
+.auth-brand { display: flex; align-items: center; gap: 10px; margin: 0 0 34px; font-weight: 600; font-size: 1.25rem; letter-spacing: -0.02em; }
+.auth-card h1 { margin: 16px 0 12px; font-weight: 500; font-size: clamp(2rem, 1.5rem + 2vw, 2.6rem); letter-spacing: -0.04em; line-height: 1.02; }
+.auth-card .accent { color: var(--signal); }
+.auth-pitch { margin: 0 0 26px; color: var(--ash); font-size: 1.0625rem; line-height: 1.55; }
+.gbtn { width: 100%; gap: 12px; min-height: 50px; background: var(--graphite); border-color: var(--hairline-strong);
+  font: 500 0.9375rem/1 var(--display); letter-spacing: 0; text-transform: none; }
+.gbtn:hover { border-color: var(--signal); background: var(--glow); }
+.g-mark { flex: none; }
+.auth-note { margin: 0 0 18px; padding: 10px 12px; border-left: 2px solid var(--ash); background: var(--glow-2); font-size: var(--fs-sm); }
+.auth-note.bad { border-color: var(--bad); color: var(--bone); }
+.auth-note.ok { border-color: var(--ok); }
+.auth-privacy { margin: 22px 0 0; padding-top: 18px; border-top: 1px solid var(--hairline); color: var(--ash); font-size: var(--fs-sm); line-height: 1.6; }
+@media (min-width: 640px) { .auth-card { padding: 44px 40px 36px; } }
+
+/* The account menu in the top bar: an initial (and the address on wide screens), opening Sign out. */
+.acct { position: relative; }
+.acct > summary { list-style: none; cursor: pointer; display: inline-flex; align-items: center; gap: 10px; height: 40px; padding: 0 4px;
+  border: 1px solid var(--hairline-strong); color: var(--bone); }
+.acct > summary::-webkit-details-marker { display: none; }
+.acct > summary:hover, .acct[open] > summary { border-color: var(--signal); }
+.acct-avatar { width: 30px; height: 30px; display: grid; place-items: center; background: var(--signal-fill); color: var(--on-signal);
+  font: 600 0.875rem/1 var(--display); }
+.acct-email { display: none; max-width: 22ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-right: 8px;
+  font: 500 var(--fs-xs)/1 var(--mono); letter-spacing: 0.04em; color: var(--ash); }
+.acct-pop { position: absolute; right: 0; top: calc(100% + 8px); width: min(300px, calc(100vw - 32px)); background: var(--graphite);
+  border: 1px solid var(--hairline-strong); padding: 16px; box-shadow: 0 18px 40px rgba(0, 0, 0, 0.35); z-index: 30; }
+.acct-addr { margin: 6px 0 14px; overflow-wrap: anywhere; }
+.acct-pop form { margin: 0; }
+.acct-pop .btn { width: 100%; }
+@media (min-width: 1100px) { .acct-email { display: inline; } }

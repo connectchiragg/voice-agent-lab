@@ -89,8 +89,10 @@ def caller_key_from_email(email: object) -> str | None:
 
 
 async def web_caller_key(headers: Mapping[str, str]) -> str | None:
-    """The Cloudflare Access user of a browser call, from a verified token only."""
-    return caller_key_from_email(await access.verified_email(headers))
+    """The browser caller: the signed-in VALR owner (app/auth), else the Cloudflare Access
+    user from a verified token only."""
+    from app.auth import signed_in_email
+    return caller_key_from_email(signed_in_email() or await access.verified_email(headers))
 
 
 # Storage.

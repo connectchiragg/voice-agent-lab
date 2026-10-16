@@ -12,10 +12,10 @@ code (15 minutes) and its t.me deep link that links the owner's Telegram chat;
 with the caches bypassed. Each needs a same-origin JSON request carrying the page's
 CSRF token (HMAC of the viewer's email and the issue time, 12 hours).
 
-Cloudflare Access guards the hostname; every request must also carry a valid
-`Cf-Access-Jwt-Assertion` for the dashboard's Access application
-(VALR_ACCESS_AUD, else CF_ACCESS_AUD), verified with app/access.py. Without one,
-or with neither variable set, the answer is 403.
+Who may see it is app/auth's decision (VALR_AUTH_MODE): the owner's VALR session (Sign in
+with Google, VALR_OWNER_EMAILS), or a valid `Cf-Access-Jwt-Assertion` for the dashboard's Access
+application (VALR_ACCESS_AUD, else CF_ACCESS_AUD), verified with app/access.py. app/auth's gate
+checks it before any route runs; `viewer` checks it again.
 """
 import hashlib
 import hmac
@@ -31,10 +31,10 @@ from typing import Any
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from app import (access, calendar_sync, callbacks, google_oauth, interview_store, interviews,
+from app import (access, auth, calendar_sync, callbacks, google_oauth, interview_store, interviews,
                  research, telegram_api, valr_view)
 from app.interview_types import group_blocks, slot_workflow_id
 
@@ -95,28 +95,21 @@ def is_preview_request(request: Request) -> bool:
 
 
 async def viewer(request: Request) -> str:
-    """The verified Access email, or 403."""
-    if is_preview_request(request):
-        return PREVIEW_EMAIL
-    if verifier is None:
-        raise HTTPException(403, "The dashboard is not configured.")
-    try:
-        email = await verifier.email(request.headers.get(access.HEADER))
-    except Exception as error:  # noqa: BLE001
-        logger.warning("VALR dashboard: Access check failed: %s", type(error).__name__)
-        email = None
-    if not email:
-        raise HTTPException(403, "A valid Cloudflare Access login is required.")
-    return email
+    """The signed-in owner's email (app/auth: a VALR session or an Access login), or 403."""
+    who = await auth.identify(request)
+    if who is None:
+        raise HTTPException(403, "Sign in to VALR first.")
+    return who.email
 
 
 def owner_emails() -> set[str]:
     return {email.strip().lower() for email in os.getenv("VALR_ADMIN_EMAILS", "").split(",")
-            if email.strip()}
+            if email.strip()} | auth.owner_emails()
 
 
 async def owner(request: Request) -> str:
-    """The verified Access email, and (with VALR_ADMIN_EMAILS set) one of them; else 403."""
+    """The signed-in email, and (with VALR_ADMIN_EMAILS or VALR_OWNER_EMAILS set) one of
+    them; else 403."""
     email = await viewer(request)
     allowed = owner_emails()
     if allowed and email.lower() not in allowed:
@@ -143,7 +136,9 @@ async def google_start(request: Request) -> RedirectResponse:
 
 @router.get("/oauth/google/callback", response_class=HTMLResponse)
 async def google_callback(request: Request, code: str = "", state: str = "",
-                          error: str = "") -> HTMLResponse:
+                          error: str = "") -> Response:
+    if auth.is_login_state(state):  # Signing in to VALR (app/auth), not the Gmail grant.
+        return await auth.finish_login(code, state, error)
     await owner(request)
     settings = google_oauth.OAuthSettings.from_env()
     if settings is None or research.pool is None:
