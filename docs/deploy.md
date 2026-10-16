@@ -422,6 +422,13 @@ anonymised caller hashes, never numbers.
   summary on, and its `whsec_` secret in `.env`; Granola Settings → Connectors → Webhooks
   (`note.generated`, Business plan and up). Everything else (`/valr/api/notetakers/*`,
   `/valr/api/recording`) stays behind Access.
+- Lead tracker (docs/leads.md): `valr.haciensus.com/hooks/gmail` (exact path, POST) is
+  bypassed (Pub/Sub cannot log in); the app accepts only Pub/Sub's OIDC token for the push
+  service account and audience. `.env` (read by both containers): VALR_LEADS=1,
+  VALR_GMAIL_TOPIC, VALR_GMAIL_SUBSCRIPTION, VALR_GMAIL_PUSH_SA, VALR_GMAIL_PUSH_AUDIENCE.
+  GCP (project framer-511620, the OAuth client's project): Pub/Sub API, topic `valr-gmail`
+  (gmail-api-push@system.gserviceaccount.com is Publisher), push subscription
+  `valr-gmail-push` with OIDC. Check: `sudo docker exec voice-research python -m app.lead_worker stats`.
 - The app container now runs with the data mount:
   `sudo docker run -d --name voice-agent-lab --restart unless-stopped --env-file .env --network voice-agent-lab -v /srv/valr-data:/data:ro -p 127.0.0.1:7860:7860 voice-agent-lab:latest`
 - Check: `sudo docker exec voice-research python -m app.research_worker blocks` (dry run)

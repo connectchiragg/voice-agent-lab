@@ -751,6 +751,19 @@ briefs (about 2,500 tokens in all); Groq's free tier allows 8,000 input tokens a
 so long quiz sessions lean on the gpt-oss-20b hedge. ICS keys are mapped to Google's ids,
 but switching sources can make a recurring event look new once (a cache hit if unchanged).
 
+### Lead tracker (owner only)
+
+Every email about the owner's own job search becomes part of a **lead**: one per company or
+opportunity, merged with his calendar interviews, Fathom recordings and interview scores.
+Gmail pushes through Cloud Pub/Sub to `/hooks/gmail` (Pub/Sub's OIDC token verified), with
+a 30-minute safety poll and a daily watch renewal (Temporal Schedules). Cheap heuristics
+drop job alerts and bulk mail; Claude Haiku decides the rest (25/25 on a synthetic eval set,
+$0.00017 per call, about $0.25 a month). Only decisions, metadata and 20-word summaries are
+stored, never bodies. Each lead has a stage, expires after 30 quiet days, and has a 0-100
+temperature with its parts shown: recency, stage, momentum and quality. `/valr/leads` draws
+the leads as a 3D globe, coloured from cold blue to hot orange, with a list fallback. Details,
+data model, formula and the embeddable globe API: [docs/leads.md](docs/leads.md).
+
 ## Run locally
 
 Create `.env` from `.env.example` and set `GROQ_API_KEY` and `DEEPGRAM_API_KEY`.
@@ -768,7 +781,7 @@ To test over the public internet, see [docs/deploy.md](docs/deploy.md).
 
 ```sh
 python -m pytest
-node --test tests/audio-player.test.mjs
+node --test tests/audio-player.test.mjs tests/leads-globe.test.mjs
 node tests/audio-worklet.test.mjs
 ```
 
