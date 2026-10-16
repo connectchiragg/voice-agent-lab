@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
-from app.profile import classify, evaluate, recordings, trend
+from app.profile import classify, evaluate, performance, recordings, rubric, trend
 from app.profile.config import Settings, write_private
 from app.profile.llm import JsonLLM, LLMError
 from app.profile.profile import redact_compensation
@@ -85,18 +85,55 @@ def run(cfg: Settings, sources: Sources, llm: JsonLLM | None, days: int = 60,
              "classified_by_llm": sum(1 for _, l in labels if l["stage"] == "llm"),
              "interviews": len(interviews), "analysed": len(analyses), "errors": errors,
              "interview_titles": [m["title"] for m, _ in interviews]}
-    record = evaluate.evaluation_record(analyses, result, stats,
-                                        llm.ledger.calls if llm is not None else {})
-    # The owner's own comp figures belong only in profile.json.
-    text = redact_compensation(json.dumps(record, indent=2, ensure_ascii=False), comp)
+    record = evaluate.evaluation_record(analyses, result, stats, {})
     if llm is not None:
-        write_private(cfg.evaluation_path, text + "\n")
         rows = result.get("score_rows") or []
         if rows:
             write_private(cfg.scores_path, redact_compensation(trend.to_csv(rows), comp))
             write_private(cfg.scores_path.with_suffix(".json"), redact_compensation(
                 trend.table_json(rows, result["trends"]), comp) + "\n")
+        by_id = {f"{m['source']}:{m['id']}": m for m, _ in interviews}
+        record = score_performance(cfg, record, by_id, llm, comp)
+    # The owner's own comp figures belong only in profile.json.
+    text = redact_compensation(json.dumps(record, indent=2, ensure_ascii=False), comp)
+    if llm is not None:
+        write_private(cfg.evaluation_path, text + "\n")
     return json.loads(text)
+
+
+def score_performance(cfg: Settings, record: dict, meetings_by_id: dict, llm: JsonLLM,
+                      comp: dict | None) -> dict:
+    """Schema v2: granular rubric per interview -> performance.json + CSV; the evaluation
+    record gains schema_version 2, a v2 Trend section and a pointer to performance.json.
+    All v1 keys are kept, so v1 readers keep working."""
+    analyses = record.get("interviews") or []
+    scored, errors = [], []
+    for a in analyses:
+        iid = f"{a.get('source')}:{a.get('id')}"
+        log.info("scoring %d/%d", len(scored) + len(errors) + 1, len(analyses))
+        try:
+            scored.append(rubric.score_interview(meetings_by_id.get(iid), a, llm,
+                                                 cfg.evaluator_model, cfg.candidate_name))
+        except LLMError as exc:
+            errors.append(f"{iid}: {exc}")
+    topics = (performance.recurring_weak_topics(analyses, scored, llm, cfg.evaluator_model,
+                                                cfg.candidate_name) if scored else [])
+    if analyses and not scored:
+        raise LLMError(f"no interview could be scored ({errors[0] if errors else 'unknown'})")
+    perf = performance.build(scored, topics)
+    perf["errors"] = errors
+    write_private(cfg.performance_path, redact_compensation(
+        json.dumps(perf, indent=2, ensure_ascii=False), comp) + "\n")
+    write_private(cfg.performance_csv, redact_compensation(performance.to_csv(perf), comp))
+    record = dict(record)
+    record["schema_version"] = rubric.SCHEMA_VERSION
+    record["performance_path"] = str(cfg.performance_path.name)
+    if record.get("brief"):
+        record["brief"] = dict(record["brief"], trend=perf["trend_text"])
+        record["brief_text"] = evaluate.fit_brief(record["brief"], len(analyses))
+    record["token_spend"] = llm.ledger.calls
+    log.info("performance v2: %d interviews scored, %d errors", len(scored), len(errors))
+    return record
 
 
 def load_comp(profile_path: Path) -> dict | None:

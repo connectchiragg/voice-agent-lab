@@ -54,7 +54,7 @@ class AnthropicJsonLLM:
     def __init__(self, client=None, ledger: Ledger | None = None):
         if client is None:
             import anthropic
-            client = anthropic.Anthropic()
+            client = anthropic.Anthropic(timeout=300.0, max_retries=2)
         self.client = client
         self.ledger = ledger or Ledger()
 
@@ -64,12 +64,16 @@ class AnthropicJsonLLM:
                       messages=[{"role": "user", "content": user}],
                       output_config={"effort": effort,
                                      "format": {"type": "json_schema", "schema": schema}})
-        if model.startswith("claude-sonnet-5-5"):
-            # Server-side fallback on a safety-classifier refusal (Claude API only).
-            response = self.client.beta.messages.create(
-                **kwargs, betas=["server-side-fallback-2026-07-01"], fallbacks="default")
-        else:
-            response = self.client.messages.create(**kwargs)
+        import anthropic
+        try:
+            if model.startswith("claude-sonnet-5-5"):
+                # Server-side fallback on a safety-classifier refusal (Claude API only).
+                response = self.client.beta.messages.create(
+                    **kwargs, betas=["server-side-fallback-2026-07-01"], fallbacks="default")
+            else:
+                response = self.client.messages.create(**kwargs)
+        except anthropic.APIStatusError as exc:
+            raise LLMError(f"{model} request failed with HTTP {exc.status_code}") from exc
         usage = response.usage
         self.ledger.add(model, usage.input_tokens, usage.output_tokens)
         log.info("llm %s: %d in / %d out tokens", model, usage.input_tokens, usage.output_tokens)
