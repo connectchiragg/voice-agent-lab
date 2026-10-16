@@ -294,19 +294,11 @@ p { margin: 0.4em 0; }
   .hero-globe canvas { cursor: default; }
 }
 
-/* Leads (valr-leads' data): the 3D globe's labels and temperature ramp, a lead's
-   temperature breakdown, timeline and corrections. Tokens read by static/leads-globe.js. */
-:root { --temp-cold: #3b7bff; --temp-cool: #8fd0ff; --temp-warm: #ffc46b; --temp-hot: #ff6a2b; --st-sourced: var(--ash); }
+/* Leads (valr-leads' data): a lead's temperature breakdown, timeline and corrections. The
+   bands, the globe's labels and tooltip: static/leads.css. */
+:root { --st-sourced: var(--ash); }
 .sw.st-sourced { background: var(--st-sourced); }
-.globe-labels { position: absolute; inset: 0; pointer-events: none; }
-.globe-label { position: absolute; left: 0; top: 0; margin: -22px 0 0 8px; white-space: nowrap; font: 500 0.6875rem/1 var(--mono);
-  letter-spacing: 0.08em; text-transform: uppercase; color: var(--bone); text-shadow: 0 1px 6px #05070c, 0 0 2px #05070c; transition: opacity 0.2s var(--ease); }
-.globe-label.is-back { opacity: 0.12; }
-.globe-label.is-dim { opacity: 0.18; }
-.globe-label.is-person { color: var(--ice); text-transform: none; letter-spacing: 0.02em; margin-top: 8px; }
-.globe-label.is-hidden { display: none; }
-.globe-key { display: flex; align-items: center; gap: 8px; margin: 10px 0 0; color: var(--ash); letter-spacing: 0.12em; text-transform: uppercase; }
-.ramp { display: inline-block; width: 96px; height: 6px; background: linear-gradient(90deg, var(--temp-cold), var(--temp-cool), var(--temp-warm), var(--temp-hot)); }
+.sw.st-ghosted { background: var(--mute); }
 .temp-num { font-variant-numeric: tabular-nums; font-weight: 500; }
 .temp-dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; vertical-align: 0; }
 .temp-parts { list-style: none; padding: 0; display: grid; gap: 10px; margin: 8px 0 0; }

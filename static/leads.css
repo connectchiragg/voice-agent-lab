@@ -1,0 +1,105 @@
+/* Lead temperature: four bands and Closed, the globe's labels and tooltip, the band pills.
+   Loaded by the leads hero (app/valr_ui/home.py) on Home and Leads.
+
+   Each band has a key colour (its warm end) and a "-lo" colour (its cold end); a score is
+   drawn on a smooth ramp between the two inside its band, so the step between bands is
+   large and the change within one is small. Blue -> teal -> amber -> red keeps the four
+   apart for all three kinds of colour blindness (tests/leads-globe.test.mjs measures it,
+   OKLab distance under Machado simulation). Closed is a neutral grey, never "cold".
+   static/leads-globe.js reads these tokens; the globe panel is always dark. */
+:root {
+  --band-cold-lo: #3553a8; --band-cold: #4f7be6;
+  --band-cool-lo: #23877c; --band-cool: #2fb3a0;
+  --band-warm-lo: #d9b64c; --band-warm: #eda233;
+  --band-hot-lo: #f0703a; --band-hot: #e8392b;
+  --band-closed-lo: #5a6170; --band-closed: #5a6170;
+}
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --band-cold-lo: #5b77c8; --band-cold: #2443ad;
+    --band-cool-lo: #45b3a4; --band-cool: #12a08f;
+    --band-warm-lo: #e0b23e; --band-warm: #d9950f;
+    --band-hot-lo: #cf4e2c; --band-hot: #b02a1d;
+    --band-closed-lo: #c3c8d0; --band-closed: #c3c8d0;
+  }
+}
+:root[data-theme="light"] {
+  --band-cold-lo: #5b77c8; --band-cold: #2443ad;
+  --band-cool-lo: #45b3a4; --band-cool: #12a08f;
+  --band-warm-lo: #e0b23e; --band-warm: #d9950f;
+  --band-hot-lo: #cf4e2c; --band-hot: #b02a1d;
+  --band-closed-lo: #c3c8d0; --band-closed: #c3c8d0;
+}
+/* The globe sits on a night-sky panel in both themes: the dark set, always. */
+.hero-globe {
+  --band-cold-lo: #3553a8; --band-cold: #4f7be6;
+  --band-cool-lo: #23877c; --band-cool: #2fb3a0;
+  --band-warm-lo: #d9b64c; --band-warm: #eda233;
+  --band-hot-lo: #f0703a; --band-hot: #e8392b;
+  --band-closed-lo: #5a6170; --band-closed: #5a6170;
+}
+
+/* A band swatch and pill: "Hot 82". --f (0..1) is where the score sits inside its band. */
+.band-sw { display: inline-block; width: 10px; height: 10px; border-radius: 50%; flex: none; vertical-align: -1px;
+  background: color-mix(in oklab, var(--lo) calc((1 - var(--f, 1)) * 100%), var(--hi)); }
+.b-cold { --lo: var(--band-cold-lo); --hi: var(--band-cold); }
+.b-cool { --lo: var(--band-cool-lo); --hi: var(--band-cool); }
+.b-warm { --lo: var(--band-warm-lo); --hi: var(--band-warm); }
+.b-hot { --lo: var(--band-hot-lo); --hi: var(--band-hot); }
+.b-closed { --lo: var(--band-closed-lo); --hi: var(--band-closed); }
+.band-pill { display: inline-flex; align-items: center; gap: 7px; white-space: nowrap; padding: 3px 8px 3px 6px;
+  border: 1px solid color-mix(in oklab, var(--hi) 55%, transparent); font: 500 0.6875rem/1.2 var(--mono);
+  letter-spacing: 0.06em; text-transform: uppercase; color: var(--bone); }
+.band-pill .num { font-variant-numeric: tabular-nums; color: var(--ash); letter-spacing: 0; }
+.band-pill.b-closed { border-style: dashed; }
+
+/* The band legend on the globe and the band chips on Leads. */
+.band-legend { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 14px; pointer-events: auto; }
+.band-legend .legend-item { gap: 7px; }
+.band-legend .legend-item .num { color: var(--ash); }
+.globe-toggle { display: inline-flex; align-items: center; gap: 7px; padding: 6px 10px; border: 1px dashed var(--hairline-strong, var(--hairline));
+  background: rgba(5, 7, 12, 0.55); cursor: pointer; font: 500 0.6875rem/1 var(--mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--ash); }
+.globe-toggle input { width: 14px; height: 14px; margin: 0; accent-color: var(--band-closed); }
+.globe-toggle:has(input:checked) { color: var(--bone); border-style: solid; }
+.globe-toggle:has(input:focus-visible) { outline: 2px solid var(--ice); outline-offset: 1px; }
+.hero-globe.compact .band-legend .legend-item { display: none; }
+.pick-link .band-sw { margin-right: -1px; }
+.chips-sep { flex: none; width: 1px; align-self: stretch; background: var(--hairline-strong); margin: 0 4px; }
+
+/* Home, wide screens: the globe beside the hero copy, not under it. */
+@media (min-width: 900px) { .hero-globe:not(.compact) .globe { left: 32%; } }
+/* Narrow screens: the globe below the hero copy, so the copy never covers the hot leads. */
+@media (max-width: 899.98px) {
+  .hero-globe:not(.compact) { height: 640px; }
+  .hero-globe:not(.compact) .globe { top: 250px; }
+  .hero-globe.compact { height: 470px; }
+  .hero-globe.compact .globe { top: 100px; }
+}
+
+/* The globe's labels: every live lead gets one; a label that would overlap a nearer one is
+   hidden until its lead is hovered or focused. Back-side labels fade out. */
+.globe-labels { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
+.globe-label { position: absolute; left: 0; top: 0; display: flex; align-items: center; gap: 5px; padding: 2px 4px; border: 0; margin: 0;
+  background: transparent; white-space: nowrap; font: 500 0.625rem/1 var(--mono); letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--bone); text-shadow: 0 1px 5px #05070c, 0 0 2px #05070c; cursor: pointer; pointer-events: auto; will-change: transform, opacity; }
+.globe-label.is-culled { opacity: 0 !important; pointer-events: none; }
+.globe-label.is-forced, .globe-label:focus-visible { opacity: 1 !important; pointer-events: auto; z-index: 2; }
+.globe-label:focus-visible { outline: 1px solid var(--ice); outline-offset: 1px; }
+.globe-label.is-hot { font-weight: 700; }
+.globe-label.is-closed { color: var(--ash); }
+.globe-label.is-dim { opacity: 0.25 !important; }
+.globe-tip { position: absolute; left: 0; top: 0; z-index: 3; pointer-events: none; padding: 7px 10px; max-width: 280px;
+  background: rgba(8, 12, 22, 0.94); border: 1px solid var(--hairline); border-left: 3px solid var(--tip, var(--signal));
+  color: var(--bone); font: 500 0.75rem/1.35 var(--mono); white-space: nowrap; }
+.globe-tip b { font-family: var(--display); font-size: 0.875rem; font-weight: 500; }
+.globe-tip[hidden] { display: none; }
+
+/* Leads list: the band pill and the ball-in-court line. */
+.leads-table td.temp { white-space: nowrap; }
+.court { display: block; margin-top: 2px; font-size: var(--fs-xs); color: var(--ash); }
+.court.you { color: var(--warn); }
+.court-line { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; padding: 8px 10px; margin: 10px 0;
+  border-left: 3px solid var(--hairline-strong); background: var(--glow-2); }
+.court-line.you { border-left-color: var(--warn); }
+.court-line.them { border-left-color: var(--signal); }
+.todo-sub { display: block; margin-left: 26px; font-size: var(--fs-xs); color: var(--ash); }

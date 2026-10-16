@@ -14,6 +14,7 @@ app page (/valr, /valr/interviews, /valr/leads, /valr/performance, /valr/setting
                                                             # past interviews play that local file
     .../valr/interviews/past/<id>?media=processing          # the player's "Preparing the video" state
                                                             # (?media=ready switches back)
+    .../valr/leads?leads=small                              # the small lead sample (default: ~107, live-shaped)
 
 No Postgres, Temporal, Deepgram or LLM: the cockpit shows tests/valr_sample.py's made-up
 interviews, its buttons change in-memory state only, and a call talks to the stub
@@ -78,7 +79,8 @@ def main() -> None:
         if path.startswith(("/valr/api/notetakers/", "/valr/api/leads/")) or path in (
                 "/valr/api/recording", "/valr/api/recording/media", "/valr/api/telegram/code", "/valr/api/reach", "/valr/api/prep"):
             return await preview_api(request, path)
-        options.set({"telegram": request.query_params.get("mode") == "telegram",
+        options.set({"leads": "small" if request.query_params.get("leads") == "small" else "live",
+                     "telegram": request.query_params.get("mode") == "telegram",
                      "extras": request.query_params.get("extras") != "0"})
         return await call_next(request)
 
@@ -157,7 +159,7 @@ def main() -> None:
     async def load_leads():
         if scenario.get() == "empty" or not options.get().get("extras", True):
             return contracts.leads(None)
-        return contracts.leads(sample_leads(gmail=True))
+        return contracts.leads(sample_leads(gmail=True, shape=options.get().get("leads", "live")))
 
     async def load_recording(interview):
         from tests.valr_sample_extras import sample_recording_row

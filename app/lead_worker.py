@@ -115,7 +115,9 @@ def email_touch(email: Email, decision: Decision, owners: set[str]) -> Touch:
                  summary=decision.summary, direction="out" if outbound else "in",
                  sentiment=None if outbound else decision.sentiment, cue=decision.cue,
                  stage_hint=decision.stage_hint, next_step=decision.next_step,
-                 url=gmail_api.thread_url(email.thread_id), role=decision.role, thread=email.thread_id)
+                 url=gmail_api.thread_url(email.thread_id), role=decision.role, thread=email.thread_id,
+                 category=decision.category, action_requested=None if outbound else decision.action_requested,
+                 action="" if outbound else decision.action)
 
 
 def beat() -> None:
@@ -423,11 +425,13 @@ class LeadActivities:
                                       limit=int(os.getenv("VALR_COMPANY_LLM_PER_RUN", "10")))
             except Exception as error:  # noqa: BLE001 - the rebuild still runs on the rules' names.
                 logger.warning("VALR leads: company review skipped (%s)", type(error).__name__)
-            built = leads.build(everything, now, await leads_store.overrides(connection))
+            corrections = await leads_store.overrides(connection)
+            built = leads.build(everything, now, corrections)
+            await leads_store.move_overrides(connection, corrections.aliases)  # Renamed leads keep his corrections.
             await leads_store.save_leads(connection, built, everything, now)
         summary.leads, summary.touches = len(built), len(everything)
         summary.active = sum(1 for lead in built if lead.status == "active")
-        summary.expired = summary.leads - summary.active
+        summary.expired = sum(1 for lead in built if lead.status == "expired")  # Closed leads are neither.
         logger.info("VALR leads refreshed (%s): %d leads, %d active, %d expired, %d touchpoints; sources %s",
                     reason, summary.leads, summary.active, summary.expired, summary.touches,
                     json.dumps(summary.sources, sort_keys=True))
@@ -682,8 +686,10 @@ async def repair_companies(dry_run: bool = False) -> dict[str, Any]:
                               for t in everything], now, await leads_store.overrides(connection))
         touches = await resolve_touches(connection, everything, resolver, dry_run=dry_run)
         recordings = await repair_recordings(connection, resolver, dry_run=dry_run)
-        after = leads.build(everything, now, await leads_store.overrides(connection))
+        corrections = await leads_store.overrides(connection)
+        after = leads.build(everything, now, corrections)
         if not dry_run:
+            await leads_store.move_overrides(connection, corrections.aliases)
             await leads_store.save_leads(connection, after, everything, now)
     return {"dry_run": dry_run, "model_calls": resolver.calls, "usd": round(resolver.usd, 4),
             "kept_by_stability_rule": resolver.kept, "agency_domains_learned": len(resolver.agencies),

@@ -167,8 +167,15 @@ def test_actions_stay_post_owner_and_csrf(client, monkeypatch):
 def test_home_hits_you_with_right_now(client):
     page = html.unescape(client.get("/valr", headers=GOOD).text)
     leads = contracts.leads(sample_leads())
-    live = [r for r in leads["leads"] if r["stage"] != "closed"]
+    live = leads["leads"]
+    assert all(r["stage"] != "closed" and r["status"] != "expired" for r in live)
     assert 'data-globe' in page and 'id="leads-data"' in page and f"{len(live)} live leads" in page
+    c = leads["counts"]
+    assert c["live"] == len(live) == sum(c[b] for b in ("hot", "warm", "cool", "cold"))
+    import re
+    words = " ".join(re.sub(r"<[^>]+>", " ", page).split())
+    for b in leads["bands"]:  # The legend: "Hot 1 · Warm 3 ...", the same numbers as the Leads chips.
+        assert f'{b["label"]} {b["count"]}' in words
     assert "/static/leads-globe.js" in page and "/static/valr-globe-lite.js" in page  # 3D, lite fallback.
     for text in ("Next interview", "Juniper", "Next Telegram heads-up", "To do", "Read your Juniper briefing",
                  "Reconnect Google tomorrow", "Call me now", "Coming up"):
@@ -176,9 +183,11 @@ def test_home_hits_you_with_right_now(client):
     data = json.loads(page.split('id="leads-data">', 1)[1].split("</script>", 1)[0])
     assert len(data["leads"]) == len(leads["leads"]) and {s["key"] for s in data["stages"]} >= {"offer", "interviewing"}
     raw = json.loads(page.split('id="leads-raw">', 1)[1].split("</script>", 1)[0])
-    assert {lead["id"] for lead in raw["leads"]} == {r["id"] for r in leads["leads"]}  # Expired left out.
-    assert all("temperature" in lead and "timeline" in lead for lead in raw["leads"])
-    assert raw["contacts"] and all(set(c["leads"]) <= {r["id"] for r in leads["leads"]} for c in raw["contacts"])
+    # Live and closed (drawn only with "Show closed"); expired left out; no people, no links.
+    assert {lead["id"] for lead in raw["leads"]} == {r["id"] for r in leads["leads"] + leads["closed"]}
+    assert {lead["id"] for lead in raw["leads"] if lead["status"] == "closed"} == {r["id"] for r in leads["closed"]}
+    assert all({"temperature", "band", "stage", "last_touch_at"} <= set(lead) for lead in raw["leads"])
+    assert set(raw) == {"leads"}
 
 
 def test_home_shows_prep_ticks_from_the_server(client):
@@ -492,20 +501,21 @@ def test_contracts_tolerate_partial_data():
     assert contracts.recording({"share_url": "https://fathom.video/share/x", "provider": "fathom"})["provider"] == "Fathom"
     leads = contracts.leads({"leads": [{"id": "a b", "company": "Acme", "stage": "closed-lost",
                                         "timeline": [{"kind": "email", "summary": "call +1 415 555 0134"}]}]})
-    assert leads["leads"][0]["id"] == "a-b" and leads["leads"][0]["stage"] == "closed"
-    assert leads["leads"][0]["stage_label"] == "Not moving forward"
+    assert leads["leads"] == [] and leads["counts"]["closed"] == 1  # Closed is its own bucket, not live.
+    assert leads["closed"][0]["id"] == "a-b" and leads["closed"][0]["stage"] == "closed"
+    assert leads["closed"][0]["stage_label"] == "Not moving forward" and leads["closed"][0]["band"] == "closed"
     assert "555 0134" not in json.dumps({k: v for k, v in leads.items() if k != "raw"})
     assert contracts.leads(None)["available"] is False and contracts.leads({"leads": []})["available"] is True
 
 
-def test_waiting_on_you_means_their_email_is_the_latest_touch():
-    now = datetime(2026, 10, 16, tzinfo=timezone.utc)
-    lead = {"id": "x", "company": "Acme", "stage": "screening", "status": "active",
-            "timeline": [{"kind": "email", "direction": "in", "at": (now - timedelta(days=2)).isoformat()},
-                         {"kind": "email", "direction": "out", "at": (now - timedelta(days=5)).isoformat()}]}
-    assert contracts.leads({"leads": [lead]}, now)["leads"][0]["waiting_on_you"] is True
-    lead["timeline"][0]["direction"] = "out"
-    assert contracts.leads({"leads": [lead]}, now)["leads"][0]["waiting_on_you"] is False
+def test_waiting_on_you_comes_from_the_ball_in_court():
+    lead = {"id": "x", "company": "Acme", "stage": "screening", "status": "active", "temperature": 55,
+            "waiting_on": "you", "waiting_reason": "Recruiter: share your availability (2 days ago)"}
+    row = contracts.leads({"leads": [lead]})["leads"][0]
+    assert row["waiting_on_you"] is True and row["waiting_reason"].startswith("Recruiter")
+    assert contracts.leads({"leads": [{**lead, "temperature": 20}]})["leads"][0]["waiting_on"] == "nobody"  # Cold.
+    assert contracts.leads({"leads": [{**lead, "status": "closed", "stage": "closed-lost"}]})["closed"][0]["waiting_on"] == "nobody"
+    assert contracts.leads({"leads": [{**lead, "waiting_on": None}]})["leads"][0]["waiting_on_you"] is False  # No guessing.
 
 
 def test_notetaker_status_maps_to_one_state():
@@ -604,6 +614,33 @@ def test_no_owner_name_in_the_code_only_in_settings(monkeypatch):
     assert not calendar_ics.is_company_name("Rivera") and not calendar_ics.is_company_name("L2- Sam")
     monkeypatch.setenv("VALR_OWNER_NAME", "Alex")
     assert interviews.owner_name() == "Alex"
+
+
+def test_leads_bands_closed_and_waiting_agree_everywhere(client):
+    import re
+    client.box["leads"] = lambda: contracts.leads(sample_leads(shape="live"))
+    leads = contracts.leads(sample_leads(shape="live"))
+    c = leads["counts"]
+    assert (c["live"], c["closed"], c["expired"]) == (62, 39, 6)
+    words = lambda page: " ".join(re.sub(r"<[^>]+>", " ", html.unescape(page)).split())  # noqa: E731
+    home, page = (words(client.get(path, headers=GOOD).text) for path in ("/valr", "/valr/leads"))
+    assert f"{c['live']} live leads" in home and f"{c['live']} live leads" in page
+    assert f"{c['waiting_on_you']} waiting on you" in home and f"Waiting on you {c['waiting_on_you']}" in page
+    for b in ("Hot", "Warm", "Cool", "Cold"):
+        assert f"{b} {c[b.lower()]}" in home and f"{b} {c[b.lower()]}" in page
+    assert f"Live {c['live']}" in page and f"Closed {c['closed']}" in page and f"Expired {c['expired']}" in page
+    rows = lambda text: text.count("data-lead-row=")  # noqa: E731
+    assert rows(client.get("/valr/leads", headers=GOOD).text) == c["live"]
+    assert rows(client.get("/valr/leads?band=hot", headers=GOOD).text) == c["hot"]
+    closed = client.get("/valr/leads?band=closed", headers=GOOD).text
+    assert rows(closed) == c["closed"] and "data-globe-closed checked" in closed
+    assert rows(client.get("/valr/leads?waiting=you", headers=GOOD).text) == c["waiting_on_you"]
+    # Sorted by temperature, each row with its band pill.
+    temps = [int(t) for t in re.findall(r'class="band-pill b-\w+">.*?<span class="num">(\d+)</span>', client.get("/valr/leads", headers=GOOD).text)]
+    assert temps == sorted(temps, reverse=True) and len(temps) == c["live"]
+    # Home's to-dos: the reason line and the Gmail thread.
+    you = next(r for r in leads["leads"] if r["waiting_on"] == "you")
+    assert you["waiting_reason"] in home
 
 
 # Past interviews filled in: company, interviewers and outcome (app/valr_ui/past.py).

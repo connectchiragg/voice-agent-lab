@@ -108,3 +108,11 @@ def test_touch_people():
     assert lead_classify.touch_people(sent, decision, OWNERS) == [("lena@orbitlabs.example", "Lena Park", "other")]
     ats = next(e for e, item in EMAILS if item["id"] == "e02")
     assert lead_classify.touch_people(ats, decision, OWNERS) == []
+
+
+def test_parse_reads_the_requested_action():
+    asked = lead_classify.parse('{"keep": true, "confidence": 0.9, "category": "scheduling", "action_requested": true,'
+                                ' "action": "share your availability for a thirty minute screen next week please"}')
+    assert asked.action_requested is True and asked.action == "share your availability for a thirty minute screen next week"
+    assert lead_classify.parse('{"keep": true, "confidence": 0.9, "action_requested": "yes"}').action_requested is None
+    assert lead_classify.parse('{"keep": true, "confidence": 0.9}').action == ""

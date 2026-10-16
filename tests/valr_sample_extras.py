@@ -7,12 +7,14 @@ person and address is fictional (.example domains)."""
 from datetime import datetime, timezone
 
 
-def sample_leads(now: datetime | None = None, gmail: bool = True) -> dict:
-    """GET /valr/api/leads for the sample touchpoints, as app/leads_web.collect builds it."""
+def sample_leads(now: datetime | None = None, gmail: bool = True, shape: str = "small") -> dict:
+    """GET /valr/api/leads for the sample touchpoints, as app/leads_web.collect builds it.
+    shape "live": about 107 leads shaped like the real mailbox (tests/leads_sample.live_shaped_touches)."""
     from app import leads
-    from tests.leads_sample import sample_touches
+    from tests.leads_sample import live_shaped_touches, sample_touches
     now = now or datetime.now(timezone.utc)
-    view = leads.graph(leads.build(sample_touches(now), now), now)
+    touches = live_shaped_touches(now) if shape == "live" else sample_touches(now)
+    view = leads.graph(leads.build(touches, now), now)
     view["gmail"] = {"enabled": gmail, "watch": "active" if gmail else "off", "watch_expires": None,
                      "last_push_at": None, "last_sync_at": now.isoformat(), "backfill_done_at": now.isoformat(),
                      "last_error": "", "decisions_30d": {"kept": 31, "dropped": 212}}
