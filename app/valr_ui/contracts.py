@@ -10,10 +10,13 @@ the owner sees them) and returns a small, stable dict the pages render.
   "temperature" 0-100, "parts" {recency, stage, momentum, quality: {points, max, why}, cap},
   "activity", "touches", "last_touch_at", "next_step", "next_step_at", "contacts": [{"id",
   "name", "email", "role"}], "timeline": [{"kind", "at", "title", "summary", "direction",
-  "cue", "url", "detail_url"}]}], "contacts", "links", "stages", "generated_at", "gmail":
-  {"enabled", "watch", "last_sync_at", ...}}. The pages group stages into STAGES (closed-won,
-  closed-lost and ghosted are "closed"; the exact one stays in `stage_label`); the raw JSON is
-  kept for the 3D globe (static/leads-globe.js), which reads it as is.
+  "cue", "url", "detail_url"}], "band" (hot | warm | cool | cold | closed), "waiting_on" (you |
+  them | nobody), "waiting_reason"}], "contacts", "links", "stages", "counts", "generated_at",
+  "gmail": {"enabled", "watch", "last_sync_at", ...}}. The pages group stages into STAGES
+  (closed-won and closed-lost are "closed"; ghosted is "Gone quiet"; the exact one stays in
+  `stage_label`). Every lead is in exactly one bucket: expired (hidden), closed (its own
+  filter), or live; every count on every page comes from these buckets. The raw JSON is kept
+  for the 3D globe (static/leads-globe.js).
 - Coach and impressions (valr-eval, performance.json schema 3): mapped by
   app/valr_view.coach_view and impression_view (not here).
 - Recording (valr-notetakers, a stored row of app/notetakers/store.py): {"provider",
@@ -32,13 +35,17 @@ EMAIL = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
 PHONE = re.compile(r"\+\d[\d\s().-]{7,}\d|\(\d{3}\)\s?\d{3}[-.\s]\d{4}|\b\d{3}[-.\s]\d{3}[-.\s]\d{4}\b"
                    r"|\b\d{5}\s?\d{5}\b")
 STAGES = [("sourced", "Sourced"), ("applied", "Applied"), ("screening", "Screening"),
-          ("interviewing", "Interviewing"), ("offer", "Offer"), ("closed", "Closed"), ("other", "Other")]
+          ("interviewing", "Interviewing"), ("offer", "Offer"), ("ghosted", "Gone quiet"), ("closed", "Closed"),
+          ("other", "Other")]
 STAGE_ALIASES = {"new": "sourced", "lead": "sourced", "screen": "screening", "recruiter": "screening",
                  "interview": "interviewing", "onsite": "interviewing", "final": "interviewing",
-                 "offered": "offer", "closed-won": "closed", "closed-lost": "closed", "ghosted": "closed",
+                 "offered": "offer", "closed-won": "closed", "closed-lost": "closed", "quiet": "ghosted",
                  "rejected": "closed", "declined": "closed", "withdrawn": "closed", "archived": "closed"}
 STAGE_LABELS = {"closed-won": "Won", "closed-lost": "Not moving forward", "ghosted": "Gone quiet"}
-WAITING_DAYS = 10  # Their email is the latest touch and is this recent: the ball is in his court.
+# Temperature bands (app/leads.band_of), hottest first, in the owner's words.
+BANDS = [("hot", "Hot", "An active process, next step soon"), ("warm", "Warm", "Engaged recently"),
+         ("cool", "Cool", "Applied or sourced, waiting"), ("cold", "Cold", "Quiet or ghosted")]
+CLOSED_BAND = ("closed", "Closed", "Won or not moving forward")
 EMBED_HOSTS = {"fathom.video", "app.fireflies.ai", "share.fireflies.ai", "app.granola.ai",
                "notes.granola.ai"}
 NOTETAKER_STATE = {"connected": "connected", "server": "connected", "refused": "error",
@@ -93,18 +100,20 @@ def touches(lead: dict[str, Any]) -> list[dict[str, Any]]:
     return [t for t in lead.get("timeline") or [] if isinstance(t, dict)]
 
 
-def waiting_on_you(lead: dict[str, Any], stage: str, now: datetime) -> bool:
-    """The latest past touch is their email, recent, on a live lead: he owes a reply."""
-    if stage == "closed" or lead.get("status", "active") != "active":
-        return False
-    if lead.get("waiting_on_you") or lead.get("needs_reply"):
-        return True
-    past = [t for t in touches(lead) if (iso_age_days(t.get("at"), now) or -1) >= 0]
-    latest = max(past, key=lambda t: str(t.get("at")), default=None)
-    if not latest or latest.get("kind") != "email" or latest.get("direction") != "in":
-        return False
-    age = iso_age_days(latest.get("at"), now)
-    return age is not None and age <= WAITING_DAYS
+def band(lead: dict[str, Any], stage: str, temp: float | None) -> str:
+    from app.leads import BAND_NAMES, band_of
+    given = str(lead.get("band") or "")
+    if stage == "closed":
+        return "closed"
+    return given if given in BAND_NAMES else band_of(temp, stage)
+
+
+def court(lead: dict[str, Any], bucket: str, band_name: str) -> tuple[str, str]:
+    """app/leads.ball_in_court's answer; cold, closed and expired leads wait on nobody."""
+    who = str(lead.get("waiting_on") or "nobody")
+    if bucket != "live" or band_name == "cold" or who not in ("you", "them"):
+        who = "nobody"
+    return who, text(lead.get("waiting_reason"), 160)
 
 
 def timeline_rows(lead: dict[str, Any], limit: int = 6) -> list[dict[str, Any]]:
@@ -151,6 +160,10 @@ def leads(raw: Any, now: datetime | None = None) -> dict[str, Any]:
         latest_email = next((t for t in touches(lead) if t.get("kind") == "email" and https(t.get("url"))), {})
         latest = next(iter(touches(lead)), {})
         temp = number(lead.get("temperature"))
+        bucket = ("expired" if lead.get("status") == "expired" else
+                  "closed" if lead.get("status") == "closed" or stage == "closed" else "live")
+        band_name = band(lead, stage, temp)
+        waiting, reason = court(lead, bucket, band_name)
         rows.append({
             "id": re.sub(r"[^\w-]", "-", str(lead.get("id") or f"lead-{i}"))[:64],
             "company": text(lead.get("company"), 80) or "Unknown company",
@@ -158,12 +171,12 @@ def leads(raw: Any, now: datetime | None = None) -> dict[str, Any]:
             "stage": stage, "stage_raw": raw_stage,
             "stage_label": STAGE_LABELS.get(raw_stage) or dict(STAGES).get(stage, "Other"),
             "stage_manual": bool(lead.get("stage_manual")),
-            "status": "expired" if lead.get("status") == "expired" else "active",
+            "status": "expired" if bucket == "expired" else "active", "bucket": bucket, "band": band_name,
             "temperature": int(round(temp)) if temp is not None else None,
             "parts": temperature_parts(lead.get("parts")),
             "last_activity_at": lead.get("last_touch_at") or lead.get("last_activity_at") or lead.get("updated_at"),
             "next_step": text(lead.get("next_step"), 200), "next_step_at": lead.get("next_step_at"),
-            "waiting_on_you": waiting_on_you(lead, stage, now),
+            "waiting_on": waiting, "waiting_reason": reason, "waiting_on_you": waiting == "you",
             "source": text(lead.get("source"), 40) or ("Gmail" if latest_email else ""),
             "domain": text(lead.get("domain"), 80), "location": text(lead.get("location"), 80),
             "lat": number(lead.get("lat")), "lng": number(lead.get("lng")),
@@ -173,15 +186,23 @@ def leads(raw: Any, now: datetime | None = None) -> dict[str, Any]:
             "timeline": timeline_rows(lead),
         })
     rows.sort(key=lambda r: (-(r["temperature"] if r["temperature"] is not None else -1), r["company"].lower()))
-    active = [r for r in rows if r["status"] == "active"]
-    counts = {key: sum(1 for r in active if r["stage"] == key) for key, _ in STAGES}
+    live = [r for r in rows if r["bucket"] == "live"]
+    closed = [r for r in rows if r["bucket"] == "closed"]
+    stage_counts = {key: sum(1 for r in live if r["stage"] == key) for key, _ in STAGES}
+    bands = [{"key": k, "label": label, "meaning": meaning, "count": sum(1 for r in live if r["band"] == k)}
+             for k, label, meaning in BANDS]
     gmail = raw.get("gmail") if isinstance(raw.get("gmail"), dict) else {}
     return {"available": isinstance(raw.get("leads"), list) and raw.get("connected", True) is not False,
             "enabled": bool(gmail.get("enabled", raw.get("connected", bool(raw)))),
-            "generated_at": raw.get("generated_at"), "leads": active,
-            "expired": [r for r in rows if r["status"] == "expired"],
-            "stages": [{"key": k, "label": label, "count": counts[k]} for k, label in STAGES
-                       if counts[k] or k != "other"],
+            "generated_at": raw.get("generated_at"), "leads": live, "closed": closed,
+            "expired": [r for r in rows if r["bucket"] == "expired"],
+            "stages": [{"key": k, "label": label, "count": stage_counts[k]} for k, label in STAGES
+                       if k not in ("closed", "other") or stage_counts[k]],
+            "bands": bands, "closed_band": {"key": CLOSED_BAND[0], "label": CLOSED_BAND[1],
+                                            "meaning": CLOSED_BAND[2], "count": len(closed)},
+            "counts": {"live": len(live), "closed": len(closed), "expired": len(rows) - len(live) - len(closed),
+                       "waiting_on_you": sum(1 for r in live if r["waiting_on"] == "you"),
+                       **{b["key"]: b["count"] for b in bands}},
             "raw_stages": [s for s in raw.get("stages") or [] if isinstance(s, str)],
             "gmail": {"enabled": bool(gmail.get("enabled")), "watch": str(gmail.get("watch") or "off"),
                       "last_sync_at": gmail.get("last_sync_at"),

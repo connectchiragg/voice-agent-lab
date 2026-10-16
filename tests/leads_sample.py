@@ -96,3 +96,67 @@ def fixture_emails():
                           to=[(n, a.lower()) for n, a in to], subject=item["subject"],
                           headers=item.get("headers", {}), text=item["text"], snippet=item["text"][:120]), item))
     return data["owner"], out
+
+
+FIRST = ("Arc", "Bright", "Cinder", "Delta", "Echo", "Fable", "Glint", "Hollow", "Iris", "Jade", "Kestrel", "Lark",
+         "Maple", "North", "Onyx", "Pike", "Quill", "Rook", "Sable", "Tide", "Umber", "Vireo", "Wren", "Yarrow")
+SECOND = ("works", "loop", "forge", "stack", "path", "grid", "field", "base", "mint", "line")
+
+
+def live_shaped_touches(now: datetime = NOW) -> list[Touch]:
+    """About 107 fictional leads shaped like the owner's real mailbox on 2026-10-16: many
+    closed (rejections), a lump of fresh applications, a few warm and hot ones, some gone
+    quiet and a few expired. Deterministic; every name and domain is made up."""
+    d = lambda days: now - timedelta(days=days)  # noqa: E731
+    names = iter(f"{a}{b}" for b in SECOND for a in FIRST)
+    out: list[Touch] = []
+
+    def lead(kind: str, i: int) -> None:
+        name = next(names)
+        dom = f"{name.lower()}.example"
+        rec = Contact(f"talent@{dom}", f"Sam {name[:4]}", "recruiter")
+        tid = f"t-{name}"
+        mail = lambda key, days, **kw: Touch(f"gmail:{name}-{key}", "email", d(days), name, dom,  # noqa: E731
+                                             kw.pop("people", [rec]), f"{name}: {key}", kw.pop("summary", ""),
+                                             thread=tid, **kw)
+        meet = lambda key, days, hint="interviewing": Touch(f"cal:{name}-{key}", "calendar", d(days), name, dom,  # noqa: E731
+                                                            [rec], f"{name} · {key}", stage_hint=hint)
+        ack = dict(people=[], direction="in", sentiment=0.1, stage_hint="applied", category="application_update",
+                   action_requested=False)
+        if kind == "hot":
+            out.extend([mail("screen", 12 + i, direction="in", sentiment=0.6, stage_hint="screening"),
+                        meet("Technical round", 6 + i), mail("next", 2 + i % 2, direction="in", sentiment=0.8, cue="positive",
+                                                            stage_hint="interviewing", next_step="Panel next week"),
+                        meet("Panel", -(1 + i))])
+            if i == 0:
+                out.append(mail("offer", 1, direction="in", sentiment=0.9, cue="positive", stage_hint="offer",
+                                category="offer", action_requested=True, action="decide on the offer by Friday"))
+        elif kind == "warm":
+            asks = i % 3 == 0
+            out.extend([mail("applied", 9 + i, **ack),
+                        mail("reply", 1 + i % 5, direction="in", sentiment=0.5 + 0.05 * (i % 4), stage_hint="screening",
+                             category="scheduling" if asks else "application_update", action_requested=asks,
+                             action="share your availability for a screen" if asks else "")])
+            if i % 4 == 1:
+                out.append(meet("Intro call", 2 + i % 3, "interviewing"))
+        elif kind == "cool":
+            if i % 5 == 0:
+                out.append(mail("outreach", 1 + i % 9, direction="in", sentiment=0.4, stage_hint="sourced",
+                                category="recruiter_outreach"))
+            else:
+                out.append(mail("applied", 1 + (i * 7) % 14, **ack))
+        elif kind == "cold":
+            out.extend([mail("applied", 18 + i % 10, **ack)])
+            if i % 3 == 0:
+                out.append(meet("Screen", 22 + i % 6, "screening"))
+        elif kind == "closed":
+            out.extend([mail("applied", 8 + i % 18, **ack),
+                        mail("update", 2 + i % 20, direction="in", sentiment=-0.3, cue="negative", stage_hint="closed-lost",
+                             category="rejection", action_requested=False)])
+        else:  # expired
+            out.append(mail("applied", 31 + i, **ack))
+
+    for kind, count in (("hot", 5), ("warm", 12), ("cool", 30), ("cold", 15), ("closed", 39), ("expired", 6)):
+        for i in range(count):
+            lead(kind, i)
+    return out

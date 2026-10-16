@@ -118,19 +118,71 @@ on the page and in the worker.
 API: `POST /valr/api/leads/<id>/override` {action: dismiss | stage | merge, stage?, into?}.
 It needs the owner, the CSRF token and a same-origin JSON request.
 
-### Temperature (0–100)
+### Temperature (0–100) and the four bands
+
+Every live lead lands in one of four bands. Closed leads are their own grey band, never "cold".
+
+| Band | Score | Means |
+|---|---|---|
+| **Hot** | 75–100 | An active process, next step soon (an interview within a week, an offer) |
+| **Warm** | 50–74 | Engaged recently (a reply, an interview, a take-home in the last days) |
+| **Cool** | 25–49 | Applied or sourced, waiting |
+| **Cold** | 0–24 | Quiet or ghosted (about 2.5 weeks without their move, or 21 days of silence) |
+| Closed | – | Won or not moving forward: its own filter, hidden on the globe until "Show closed" |
 
 | Part | Points | Formula |
 |---|---|---|
-| Recency | 0–35 | 35 × 0.5^(days since the last touch / 7): halves every week |
-| Stage | 0–25 | 25 × weight: sourced 0.2, applied 0.35, screening 0.55, interviewing 0.8, offer and won 1.0, ghosted 0.05, lost 0 |
-| Momentum | 0–20 | 12 × min(1, touches in the last 14 days / 5), + 8 if an interview is on the calendar in the next 14 days |
-| Quality | 0–20 | Interview performance: 8 × (mean score for the company / 10), or 4 with no score; + recruiter tone: 6 × (mean sentiment of the last 3 inbound emails + 1) / 2, or 3; + latest explicit cue: positive 6, none 3, negative 0 |
+| Recency | 0–30 | 30 × 0.5^(days since **their** last move / 7). His own follow-up emails do not warm a lead. |
+| Stage | 0–30 | 30 × weight: sourced 0.2, applied 0.3, screening 0.55, interviewing 0.8, offer and won 1.0, ghosted 0.1, lost 0 |
+| Momentum | 0–25 | Next step: an interview within 7 days 15, within 14 days 9, an open offer 15; + 10 × min(1, touches in the last 14 days / 4) |
+| Quality | 0–15 | Interview score 5 × mean/10 (2.5 with none) + recruiter tone 5 × (mean of the last 3 inbound sentiments + 1)/2 (2.5) + latest cue: positive 5, none 2.5, negative 0 |
 
-Caps: closed-lost at most 10, ghosted at most 20. Each lead carries its parts (points,
-maximum and a one-line reason), and the panel shows them as bars. Example: an email
-7 days ago, at screening, sentiment +1, a positive cue, and no score. That gives
-17.5 + 13.75 + 2.4 + (4 + 6 + 6), so 50.
+Caps: ghosted at most 24 (always Cold), closed-lost at most 10. Each lead carries its parts
+(points, maximum, a one-line reason), and the card shows them as bars.
+
+The archetypes in `tests/test_leads_temperature.py` are the spec (scores within ±2):
+
+| Situation | Score | Band | Ball in court |
+|---|---|---|---|
+| Final round tomorrow after two strong rounds | 90 | Hot | nobody (booked) |
+| Interviewing, next interview in 3 days | 86 | Hot | nobody (booked) |
+| Offer received 3 days ago | 84 | Hot | **you** (decide) |
+| Recruiter screen booked in 2 days | 68 | Warm | nobody (booked) |
+| Interviewed 2 days ago, waiting for feedback | 66 | Warm | them |
+| Take-home sent 3 days ago, not submitted | 60 | Warm | **you** |
+| Recruiter replied yesterday asking for availability | 58 | Warm | **you** |
+| You answered the recruiter's question yesterday | 53 | Warm | them |
+| Interviewed 2 weeks ago, then silence | 46 | Cool | them |
+| Applied 2 days ago, no reply | 44 | Cool | them |
+| A recruiter reached out 4 days ago | 37 | Cool | them |
+| A recruiter question unanswered for 15 days | 32 | Cool | nobody (cooling) |
+| Applied 20 days ago, no reply | 21 | Cold | nobody |
+| Interviewing, then 25 days of silence (ghosted) | 15 | Cold | nobody |
+| Rejected | 10 | Closed | nobody |
+
+**Counts.** Every lead is in exactly one bucket: **expired** (30 quiet days, nothing
+scheduled; hidden), else **closed** (won or lost; status `closed`), else **live** (status
+`active`). Home's hero, the Leads header and chips, the legend and the globe all use these
+buckets (`leads.counts`, `contracts.leads`), so the numbers agree: live = Hot + Warm + Cool + Cold.
+
+### Ball in court (`waiting_on`: you, them or nobody)
+
+`leads.ball_in_court`, beside the temperature, with a one-line reason.
+- **you**, only when all hold: the lead is live and not Cold; their latest email comes from a
+  real person (no-reply senders, ATS acknowledgements, job alerts and rejections never count);
+  it asks something of him (availability, a reply, documents, an assignment, an offer decision,
+  salary details); he has not acted since (no email of his in that thread; for a scheduling
+  ask, no calendar event after it); and it is under 14 days old. Older: nobody, the lead cools.
+  Reason: "Recruiter: share your availability (2 days ago)".
+- **them**: he moved last (replied, applied, interviewed) or their message asks nothing.
+  "Waiting on Acme for 3 days". After 21 days: nobody (the lead is Cold by then).
+- **nobody**: cold, closed and expired leads; an interview already booked.
+
+"Asks something" comes from the classifier: it now returns `action_requested` and `action`
+(≤ 8 words), stored on the touchpoint's `data` (old rows: unknown). For an old row, only a
+stored next step that clearly asks him ("Reply with availability"), or an offer, counts.
+Home's to-dos and "waiting on you", the Leads chip "Waiting on you" (`?waiting=you`) and the
+lead card all read `waiting_on`; the to-do shows the reason and the Gmail thread.
 
 ## Data model (Postgres, created if missing)
 
@@ -140,7 +192,7 @@ maximum and a one-line reason), and the panel shows them as bars. Example: an em
 | `lead_emails` | one row per message ever looked at: message and thread id, received time, **sender domain**, decision (keep/drop/deferred), method (heuristic/llm/deferred), reason, category, confidence, $ | subject, addresses, any text |
 | `lead_touchpoints` | id (`gmail:<msg>`, `cal:<event>`, `fathom:<recording>`, `perf:<interview>`), kind, time, lead id, `data` jsonb: company, domain, people [{email, name, role}], title, **derived summary** (≤ 24 words), direction, sentiment, cue, stage hint, next step, Gmail/Fathom link, interview-detail link, score, role, Gmail thread id; `snippet_enc`: the Gmail snippet (≤ 200 characters), Fernet-encrypted with VALR_TOKEN_KEY, never shown | message bodies |
 | `lead_overrides` | the owner's corrections, replayed in order: lead id, kind (dismiss, stage, merge), value (the stage, or the lead merged into), the dismissed touchpoint ids and threads, who, when | |
-| `leads` | the last rebuild: company, key, domain, role, stage, status (active/expired), temperature, parts, contacts [{email, name, role}], touch count, last touch, next step, `archived_at` | |
+| `leads` | the last rebuild: company, key, domain, role, stage, status (active/closed/expired), temperature, parts, contacts [{email, name, role}], touch count, last touch, next step, `archived_at` | |
 
 The page rebuilds the leads from the touchpoints on each request, so temperatures are
 current. The `leads` table is the snapshot from the last worker refresh, for other readers.
@@ -159,18 +211,20 @@ the owner's Access login (VALR_ADMIN_EMAILS).
 
 `GET /valr/leads` is the app's Leads page (app/valr_ui/leads.py), and Home uses the same
 globe as its hero. The page reads `app.leads_web.collect` (the same JSON as
-`/valr/api/leads`), normalised in app/valr_ui/contracts.py:
-- **Globe**: static/leads-globe.js (three.js) gets the raw JSON (active leads only);
-  static/valr-globe-lite.js is the fallback when the module or WebGL is unavailable.
-  Clicking a lead opens it in the list (on Home: a small preview card).
-- **Filters**: stage chips (closed-won, closed-lost and ghosted group as "Closed"; the
-  exact one is shown on the lead), a search box, and "Expired" for leads quiet 30+ days.
-- **List and lead card**: temperature, stage, next step, last activity; the card adds the
-  temperature breakdown, the people, the latest timeline entries with their Gmail,
-  recording and interview links (`/valr/interviews/past/<provider>-<id>`; links stored as
-  the old `/valr#past-<provider>-<id>` are rewritten), and the corrections (stage, merge,
-  dismiss: `POST /valr/api/leads/<id>/override`). "Check Gmail now" posts the sync.
-- "Waiting on you" means their email is the latest touch on a live lead, within 10 days.
+`/valr/api/leads`, which now adds `band`, `waiting_on`, `waiting_reason` per lead and
+`counts`), normalised in app/valr_ui/contracts.py:
+- **Globe**: static/leads-globe.js (three.js) gets one small record per live and closed
+  lead (no people, no links); static/valr-globe-lite.js is the fallback. Clicking a lead
+  opens it in the list (on Home: a small preview card).
+- **Legend**: "Hot 5 · Warm 10 · Cool 35 · Cold 12", each a link to that band, and a
+  "Show closed 39" toggle that adds the closed leads, in grey, at the bottom of the globe.
+- **Filters**: Live, Waiting on you, the band chips (Hot, Warm, Cool, Cold, Closed), the stage
+  chips, a search box, and "Expired" (`?band=&stage=&waiting=you&q=&status=expired`).
+- **List and lead card**: sorted by temperature with a band pill ("Hot 82"), the ball in
+  court under the company, stage, next step, last activity; the card adds whose move it is,
+  the temperature breakdown, the people, the latest timeline entries with their Gmail,
+  recording and interview links, and the corrections (stage, merge, dismiss). "Check Gmail
+  now" posts the sync.
 
 ### Embedding the globe: `static/leads-globe.js`
 
@@ -178,29 +232,35 @@ globe as its hero. The page reads `app.leads_web.collect` (the same JSON as
 import { mount } from "/static/leads-globe.js";
 const data = await (await fetch("/valr/api/leads")).json();
 const globe = await mount(document.querySelector("#hero-globe"), data, {
-  onSelect(node) {            // null, or {type: "lead", id, lead} / {type: "contact", id, contact}
+  onSelect(node) {            // null, or {type: "lead", id, lead}
     if (node?.type === "lead") location.href = "/valr/leads#" + node.id;
   },
-  // maxNodes: 120 (40 under 640 px), labels: 24 (10), reducedMotion: media query,
+  // maxNodes: 150, labels: 80, reducedMotion: media query, now: Date (for "3 days ago"),
   // threeUrl: "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js"
 });
 globe.supported;      // false without WebGL: nothing is drawn, so show a list
 globe.update(data);   // new data, e.g. after filtering (same shape)
-globe.select(id);     // highlight a lead or person and its neighbours (no onSelect)
+globe.select(id);     // highlight a lead (no onSelect)
 globe.focus(id);      // rotate it to the front (instant with reduced motion)
 globe.hidden;         // leads left out by maxNodes
 globe.destroy();
 ```
 
 How it draws:
-- Leads sit on a sphere along a Fibonacci spiral, hottest first, and leads that share
-  people sit next to each other.
-- Node size follows activity (touches in 30 days). Colour runs from cold blue to hot
-  orange, through CSS variables `--temp-cold`, `--temp-cool`, `--temp-warm` and
-  `--temp-hot` (defined in `static/valr-app.css`).
-- People float at 1.3× the radius, above their leads, joined by hairlines. Leads that
-  share a person are joined by blue arcs.
-- Hot leads (60 or more) get a halo. Expired leads are faded.
+- Only leads: people and their links belong in the lead card.
+- A Fibonacci sphere ordered by temperature: hottest at the top, coldest at the bottom,
+  closed last, latitudes within ±64° so nothing piles up at a pole. Auto-rotation brings
+  every lead to the front.
+- Colour = band: a distinct colour per band (blue, teal, amber, red; grey for closed) with a
+  small ramp inside it, from CSS variables `--band-<band>-lo` and `--band-<band>` in
+  `static/leads.css` (a light and a dark set; the globe panel always uses the dark one). The
+  node test checks the four stay apart under deuteranopia, protanopia and tritanopia.
+- Size = stage (sourced smallest, offer largest), so size and colour say different things.
+  Hot leads get a halo.
+- Every live lead has a label (up to 80). A label that would overlap a nearer one is hidden
+  until its lead is hovered or focused; labels on the back fade out. Labels are buttons: Tab
+  reaches them, focus turns the lead to the front. Hovering shows "Company · band · score ·
+  stage · last touch".
 
 Controls:
 - Drag to rotate, with inertia; wheel or pinch to zoom.
@@ -210,7 +270,7 @@ Controls:
 
 The container needs only a size; the component adds a canvas and a label layer, so give
 it `position: relative`. The only dependency is three.js r160, pinned on jsDelivr.
-`layout()` and `tempColor()` are pure and tested with `node --test tests/leads-globe.test.mjs`.
+`bandOf()`, `bandColor()`, `layout()`, `placeLabels()` and `tipText()` are pure and tested with `node --test tests/leads-globe.test.mjs`.
 
 ## Set-up
 
@@ -291,11 +351,13 @@ per email that reaches it:
 | `tests/test_leads_web.py` | OIDC with generated RSA keys, the webhook's answers, owner-only page and JSON, CSRF, the correction endpoint | |
 | `tests/test_lead_workflow.py` | pokes and the refresh | Temporal test server |
 | `tests/test_lead_worker.py` | calendar rules, scorecard anchors; backfill, history, recovery, his own replies, budget deferral, watch, encrypted snippet, no content in the log, corrections storage, the Telegram alert (once per expiry) | fake Gmail, fake model, Postgres via `VALR_TEST_POSTGRES` |
-| `tests/leads-globe.test.mjs` | the globe's layout | `node --test` |
+| `tests/test_leads_temperature.py` | the band archetypes, counts, ball in court | |
+| `tests/leads-globe.test.mjs` | bands, colours (colour-blind check on static/leads.css), layout, label collisions, tooltip | `node --test` |
 
 Preview with made-up data: `VALR_DEV_PREVIEW=1 python scripts/preview_ui.py`, then open
-http://127.0.0.1:8090/valr/leads (tests/leads_sample.py's touchpoints through the real
-`leads.build` and `leads.graph`).
+http://127.0.0.1:8090/valr/leads: about 107 fictional leads shaped like the real mailbox
+(`tests/leads_sample.live_shaped_touches`) through the real `leads.build` and `leads.graph`;
+`?leads=small` for the small sample.
 
 ## Not yet verified
 

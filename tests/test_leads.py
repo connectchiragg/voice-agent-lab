@@ -101,10 +101,10 @@ def test_temperature_formula_by_hand():
     touch = Touch("gmail:a", "email", NOW - timedelta(days=7), "Opal", "opal.example", [], direction="in",
                   sentiment=1.0, cue="positive", stage_hint="screening")
     lead = leads.build([touch], NOW)[0]
-    # recency 35 x 0.5 = 17.5; stage 25 x 0.55 = 13.75; momentum 12 x 1/5 = 2.4;
-    # quality 4 (no score) + 6 (sentiment +1) + 6 (positive) = 16 -> 49.65
-    assert lead.temperature == 50
-    assert lead.parts["recency"]["points"] == 17.5 and lead.parts["quality"]["points"] == 16.0
+    # recency 30 x 0.5 = 15; stage 30 x 0.55 = 16.5; momentum 10 x 1/4 = 2.5;
+    # quality 2.5 (no score) + 5 (tone +1) + 5 (positive) = 12.5 -> 46.5
+    assert lead.temperature == 46 and lead.band == "cool"
+    assert lead.parts["recency"]["points"] == 15.0 and lead.parts["quality"]["points"] == 12.5
 
 
 def test_graph_links_contacts_and_shared_people():
