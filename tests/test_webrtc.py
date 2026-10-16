@@ -177,6 +177,9 @@ class FakeCall:
     def report_played(self, seconds):
         self.played.append(seconds)
 
+    async def finished(self):
+        await asyncio.Event().wait()  # Never: only the assistant's goodbye ends a call.
+
     async def close(self):
         self.closed = True
 
@@ -328,7 +331,8 @@ def test_call_time_limit_warns_then_closes(monkeypatch):
     async def scenario():
         peer, channel = connected_peer()
         peer.start()
-        await asyncio.gather(*peer.tasks)
+        # close() cancels the peer's other tasks (the wait for a goodbye among them).
+        await asyncio.gather(*peer.tasks, return_exceptions=True)
         return peer, channel
 
     peer, channel = run(scenario())

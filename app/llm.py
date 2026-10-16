@@ -3,6 +3,7 @@ import asyncio
 import logging
 import os
 import time
+from collections import deque
 from collections.abc import AsyncIterator, Sequence
 from contextlib import nullcontext
 from dataclasses import dataclass
@@ -19,10 +20,22 @@ from app.groq_api import ProviderError, groq_client, provider_error
 logger = logging.getLogger("uvicorn.error")
 
 SYSTEM_PROMPT = (
-    "You are a friendly voice assistant on a live call. Reply conversationally in English, "
-    "usually in one or two short sentences. Never use Markdown, lists, emoji, symbols or URLs: "
-    "everything you write is spoken aloud, so write units and numbers as words, for example "
-    "twenty-eight degrees. Ask a brief follow-up question when it helps. "
+    "You are a friendly voice assistant on a live phone call, speaking English. Everything you "
+    "write is spoken aloud, so write the way people talk:\n"
+    "- Short turns: one to three short sentences, unless asked for more.\n"
+    "- Contractions and everyday words: it's, you've, that's.\n"
+    "- A brief acknowledgement like 'Sure.', 'Got it.' or 'Okay,' only when it fits, and vary "
+    "it; often just answer. A light 'so' or 'alright' now and then is fine; don't overdo it.\n"
+    "- Never read out lists or say 'first', 'second': give the one or two things that matter, "
+    "then offer more.\n"
+    "- Ask at most one question, and end on it.\n"
+    "- Reuse the user's own words for things.\n"
+    "- Say numbers, times and dates as people say them, in words: 'about twenty-eight degrees', "
+    "'four thirty', 'the sixteenth'. At most one number per sentence, rounded when exactness "
+    "doesn't matter.\n"
+    "- No Markdown, lists, emoji, symbols, web addresses or domains.\n"
+    "When the caller is done (goodbye, that's all, they're all set), say a short goodbye and "
+    "call end_call. "
     "Always answer the user's latest message; never repeat your previous reply instead. "
     "Use your tools for weather, and for the time in other places, instead of guessing: "
     "call the tool in this same response, and never say you will check something without "
@@ -43,11 +56,16 @@ CUT_OFF_NOTE = "\n[Your reply was cut off here; the user heard only this much.]"
 DEFAULT_MODEL = "openai/gpt-oss-120b"
 # Hedge for stalled requests: a separate Groq rate-limit bucket, same prompt and tool format.
 DEFAULT_FALLBACK_MODEL = "openai/gpt-oss-20b"
-# Measured on the AWS VM (30 requests each, this prompt and tools): gpt-oss-120b's first
-# token p50 466 ms, p75 479, p90 680, max 2.6 s; gpt-oss-20b p50 404, p90 505, max 722.
-# 600 ms is past the 120b's usual spread, so about one request in eight is hedged, and
-# a hedged reply typically starts about 1 s after the request instead of stalling.
-FIRST_TOKEN_DEADLINE_MS = 600
+# The hedge deadline adapts to the primary's recent first tokens: their p75 plus a margin,
+# never below FIRST_TOKEN_DEADLINE_MS. A fixed 600 ms (from a 2026-10 benchmark: p50 466,
+# p90 680) fell below the 120b's first token on 2026-10-16 (620-930 ms, queue 300-450),
+# so every request was hedged, the 20b's own quota ran out, and both models then failed
+# together. With no hedge near the rate limit, a slow reply waits instead of spending
+# the quota the next turn needs.
+FIRST_TOKEN_DEADLINE_MS = 900  # Floor.
+HEDGE_MARGIN_MS = 200
+HEDGE_WINDOW = 20  # Recent primary first tokens kept.
+HEDGE_MAX_MS = 2500
 GIVE_UP_S = 5.0
 REPLY_MAX_TOKENS = 400  # A spoken reply (other uses, such as caller-memory summaries, set their own).  # Neither model has started: report an error instead of waiting on.
 
@@ -253,8 +271,17 @@ class HedgeStats:
 hedge_stats = HedgeStats()
 
 
+recent_first_tokens_ms: deque[float] = deque(maxlen=HEDGE_WINDOW)  # The primary's, when it won.
+
+
 def first_token_deadline_s() -> float:
-    return float(os.getenv("FIRST_TOKEN_DEADLINE_MS", FIRST_TOKEN_DEADLINE_MS)) / 1000
+    """p75 of the primary's recent first tokens plus a margin, within [floor, max]."""
+    floor = float(os.getenv("FIRST_TOKEN_DEADLINE_MS", FIRST_TOKEN_DEADLINE_MS))
+    if len(recent_first_tokens_ms) < 5:
+        return floor / 1000
+    ordered = sorted(recent_first_tokens_ms)
+    p75 = ordered[min(len(ordered) - 1, round(0.75 * (len(ordered) - 1)))]
+    return min(max(floor, p75 + HEDGE_MARGIN_MS), HEDGE_MAX_MS) / 1000
 
 
 def worth_falling_back(error: BaseException) -> bool:
@@ -286,6 +313,9 @@ async def first_reply(client: AsyncGroq, messages: list[dict[str, Any]],
         return bool(fallback) and fallback != primary and fallback not in attempts.values() \
             and fallback not in errors
 
+    # A slow primary is waited for near the rate limit; a failed one still falls back.
+    slow_hedge = not groq_api.near_rate_limit()
+
     def hedge(reason: str) -> None:
         logger.warning("Groq LLM %s %s; falling back to %s", primary, reason, fallback)
         hedge_stats.hedged += 1
@@ -296,11 +326,11 @@ async def first_reply(client: AsyncGroq, messages: list[dict[str, Any]],
     start(primary)
     try:
         while attempts:
-            limit_s = deadline_s if may_hedge() else GIVE_UP_S
+            limit_s = deadline_s if may_hedge() and slow_hedge else GIVE_UP_S
             done, _ = await asyncio.wait(attempts, return_when=asyncio.FIRST_COMPLETED,
                                          timeout=max(0.0, limit_s - (time.perf_counter() - started)))
             if not done:
-                if not may_hedge():
+                if not (may_hedge() and slow_hedge):
                     raise TimeoutError
                 hedge(f"sent nothing for {deadline_s * 1000:.0f} ms")
                 continue
@@ -328,6 +358,8 @@ async def first_reply(client: AsyncGroq, messages: list[dict[str, Any]],
 def log_winner(model: str, primary: str, elapsed_ms: float) -> None:
     if model != primary:
         hedge_stats.fallback_won += 1
+    else:
+        recent_first_tokens_ms.append(elapsed_ms)
     stats = hedge_stats
     logger.info("Groq LLM first token from %s after %.0f ms; hedged %d of %d requests (%.0f%%), "
                 "fallback won %d", model, elapsed_ms, stats.hedged, stats.requests,

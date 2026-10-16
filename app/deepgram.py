@@ -273,8 +273,32 @@ class FluxListener:
                              return_exceptions=True)
 
 
+# Web addresses and bare domains are never read out ("kestrelapp dot com"): a URL is
+# dropped, and a domain becomes its name ("kestrelapp.com" -> "kestrelapp"), as is the
+# spoken form "kestrelapp dot com".
+URL = re.compile(r"\(?\bhttps?://\S+|\(?\bwww\.\S+", re.I)
+TLD = r"(?:com|io|ai|in|co|org|net|app|dev|so|xyz|tech|co\.in|co\.uk)"
+DOMAIN = re.compile(rf"\b([A-Za-z0-9][A-Za-z0-9-]*)\.{TLD}\b(?:/\S*)?")
+SPOKEN_DOMAIN = re.compile(rf"\b([A-Za-z0-9-]+) dot {TLD.replace(chr(92) + '.', ' dot ')}\b", re.I)
+# "a.m."/"p.m." mid-sentence made Aura pause after each letter (3.2-4.8 s for a line that
+# takes 3.0 s with "AM"; measured 2026-10-16), so they are written the way Aura reads well.
+MERIDIEM = re.compile(r"\b([ap])\.\s?m\.(?=\s|$|[,;:!?)])", re.I)
+
+
+def meridiem(match: re.Match[str], text: str) -> str:
+    """ "a.m." -> "AM", keeping its period when it also ended the sentence."""
+    rest = text[match.end():]
+    ends = not rest.strip() or re.match(r"\s+[A-Z]", rest) is not None
+    return match.group(1).upper() + "M" + ("." if ends else "")
+
+
 def speakable(text: str) -> str:
-    return persona.spoken(re.sub(r"\s+", " ", UNSPOKEN.sub("", text)).strip())
+    text = URL.sub("", text)
+    text = DOMAIN.sub(r"\1", text)
+    text = SPOKEN_DOMAIN.sub(r"\1", text)
+    text = MERIDIEM.sub(lambda match: meridiem(match, text), text)
+    text = re.sub(r"\s+([,.;:!?])", r"\1", re.sub(r"\s+", " ", UNSPOKEN.sub("", text)))
+    return persona.spoken(text.strip())
 
 
 CLOSED = object()  # Queued when the Aura socket stops delivering messages.

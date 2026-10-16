@@ -643,3 +643,44 @@ def test_saved_recording_without_an_id_is_found_by_call(board, monkeypatch):
         post_event(client, event)
         wait_for(lambda: saved)
     assert (saved[0].recording_id, saved[0].duration_ms) == ("new", 2000)
+
+
+def test_the_call_hangs_up_after_the_assistants_goodbye(board, phone_engines):
+    from app import closing
+    engines = main.app.state.phone_engines
+
+    async def goodbye(conversation_id, text):
+        closing.request_end(conversation_id)  # As the end_call tool does.
+        yield "Bye!"
+
+    engines.reply = goodbye
+    board.pending["tok"] = PendingCall(CALL_ID, time.monotonic() + 5)
+    with TestClient(main.app).websocket_connect("/ws/telnyx?token=tok") as socket:
+        socket.send_json(start_message())
+        for frame in media_frames(12):
+            socket.send_json(frame)
+        try:
+            while True:  # Play out the goodbye (marks back) until we hang up and close.
+                message = socket.receive_json()
+                if message["event"] == "mark":
+                    socket.send_json({"event": "mark", "mark": {"name": message["mark"]["name"]}})
+        except WebSocketDisconnect:
+            pass
+    wait_for(lambda: len(board.requests) == 1)
+    assert board.requests[0][0] == f"/v2/calls/{CALL_ID}/actions/hangup"
+
+
+def test_a_called_person_gets_to_say_hello_before_the_greeting():
+    async def scenario(spoken_at):
+        async def to_telnyx(message):
+            pass
+
+        session = PhoneSession(to_telnyx, L16)
+        started = time.monotonic()
+        if spoken_at is not None:
+            session.heard_loud = started + spoken_at  # Their "Hello?" ends at this time.
+        await session.callee_settled(first_s=0.1, quiet_s=0.15, limit_s=1.0)
+        return time.monotonic() - started
+
+    assert 0.09 <= asyncio.run(scenario(None)) < 0.3  # Silence: greet after `first_s`.
+    assert 0.3 <= asyncio.run(scenario(0.2)) < 0.6  # After their hello and a short pause.

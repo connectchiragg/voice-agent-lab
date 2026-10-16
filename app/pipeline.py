@@ -17,6 +17,7 @@ from typing import Literal, Protocol
 import numpy as np
 from numpy.typing import NDArray
 
+from app import closing
 from app.deepgram import TurnEvent, to_linear16
 
 logger = logging.getLogger("uvicorn.error")
@@ -40,10 +41,31 @@ class Speaker(Protocol):
 
 SENTENCE_END = re.compile(r"[.!?][\"'”’)\]]*\s+|\n+")
 CLAUSE_END = re.compile(r"[,;:—–]\s+")
+# A period that ends an abbreviation, not a sentence: "a.m.", "e.g.", "U.S.", "Dr.".
+INITIALISM = re.compile(r"(?:[A-Za-z]\.){2,}")
+TITLES = frozenset({"mr.", "mrs.", "ms.", "dr.", "prof.", "st.", "vs.", "approx.", "etc."})
+
+
+def abbreviation_end(text: str, match: re.Match[str]) -> bool:
+    """Whether a SENTENCE_END match is only an abbreviation's period ("at ten a.m. with
+    Priya"): cutting there would split one phrase into two Aura segments, each with
+    its own falling intonation and a pause between. A title never ends a sentence; an
+    initialism does only when a capitalised word follows ("at ten a.m. Then...")."""
+    head = text[:match.start() + 1]
+    if not head.endswith("."):
+        return False
+    token = head.split()[-1].lstrip("(\"'“‘") if head.split() else ""
+    if token.lower() in TITLES:
+        return True
+    if not INITIALISM.fullmatch(token):
+        return False
+    rest = text[match.end():]
+    return not rest or not rest[0].isupper()
 
 
 RETRY_FILLER = "One sec."
-RETRY_SORRY = "Sorry, I didn't catch that. Could you say it again?"
+# The LLM failed twice: the caller was heard fine, so never "I didn't catch that".
+RETRY_SORRY = "Sorry, I'm having trouble on my end. Could you say that again?"
 
 
 class ReplyText:
@@ -54,8 +76,11 @@ class ReplyText:
     so the first segment is simply the first sentence: no short opening piece.
     Each later segment is every whole sentence written by the time the
     previous one has been synthesized. That keeps flushes few (Deepgram allows
-    20 a minute) and prosody whole-sentence. A run-on with no sentence end is
-    cut after `max_words`, at the last clause end if there is one.
+    20 a minute) and prosody whole-sentence: Aura shapes the intonation of each
+    Speak message on its own, so a segment never ends mid-phrase (an
+    abbreviation's period is not a sentence end) and is never cut at commas.
+    A run-on with no sentence end is cut after `max_words`, at the last clause
+    end if there is one.
     """
 
     def __init__(self, max_words: int = 40) -> None:
@@ -79,7 +104,8 @@ class ReplyText:
         if self.done:
             cut: int | None = len(self.text)
         else:
-            ends = [match.end() for match in SENTENCE_END.finditer(self.text)]
+            ends = [match.end() for match in SENTENCE_END.finditer(self.text)
+                    if not abbreviation_end(self.text, match)]
             cut = ends[-1] if ends else self.forced_cut()
         if not cut:
             return ""
@@ -131,6 +157,10 @@ def nothing_to_remember(conversation_id: str) -> None:
 
 
 async def forget_greeting(conversation_id: str, text: str, status: str) -> None:
+    """Default for engines without history: nothing to record."""
+
+
+async def forget_turn(conversation_id: str, user_text: str | None, reply: str) -> None:
     """Default for engines without history: nothing to record."""
 
 
@@ -207,6 +237,13 @@ class Engines:
     # or briefing). Then a backchannel said over our speech ("okay", "yes") is not dropped:
     # it is answered as the caller's next turn once the reply ends.
     awaiting_answer: Callable[[str], bool] = lambda conversation_id: False
+    # A fixed line spoken without the LLM (a goodbye, "Still there?"), stored as the
+    # reply to `user_text` (None: said unprompted).
+    record_turn: Callable[[str, str | None, str], Awaitable[None]] = forget_turn
+    # Silence (no one speaking) before "Still there?", and before a goodbye and the
+    # end of the call. None: no idle handling (the browser call page).
+    idle_prompt_s: float | None = None
+    idle_end_s: float | None = None
 
 
 def heard_text(spoken: list[tuple[str, float]], played_s: float) -> str:
@@ -406,6 +443,14 @@ class Call:
         # A backchannel that answers a pending proposal, said over our speech: answered as
         # the next turn once the current reply (or greeting) has ended.
         self.deferred: TurnEvent | None = None
+        self.answered = 0  # User turns answered so far.
+        self.user_speaking = False  # Between Flux's StartOfTurn and EndOfTurn.
+        self.last_activity = time.monotonic()  # Anyone speaking, for the idle timer.
+        self.idle_prompted = False
+        self.idle_task: asyncio.Task[None] | None = None
+        # Set once the call should end (a goodbye was said): the transport hangs up
+        # after `finished`.
+        self.ended = asyncio.Event()
 
     async def start(self) -> None:
         """Open the Deepgram sockets, and load the caller's memory meanwhile.
@@ -414,6 +459,53 @@ class Call:
         """
         await asyncio.gather(self.listener.start(), self.speaker.start(),
                              self.engines.begin_call(self.conversation_id, self.caller_id))
+        if self.engines.idle_prompt_s is not None and self.engines.idle_end_s is not None:
+            self.idle_task = asyncio.create_task(
+                self.watch_idle(self.engines.idle_prompt_s, self.engines.idle_end_s))
+
+    async def finished(self, playback_limit_s: float = 15.0) -> None:
+        """Return once the call has ended and its last words have played."""
+        await self.ended.wait()
+        if self.reply_task is not None and not self.reply_task.done():
+            await asyncio.gather(self.reply_task, return_exceptions=True)
+        deadline = time.monotonic() + playback_limit_s
+        while self.playing and time.monotonic() < deadline:
+            await asyncio.sleep(0.05)
+
+    def touch(self) -> None:
+        self.last_activity = time.monotonic()
+
+    async def watch_idle(self, prompt_s: float, end_s: float, tick_s: float = 0.25) -> None:
+        """After `prompt_s` of silence, ask "Still there?"; once `end_s` of silence has
+        passed in all, say goodbye and end the call."""
+        while not self.ended.is_set():
+            await asyncio.sleep(tick_s)
+            if self.assistant_busy or self.user_speaking or self.holding:
+                self.touch()
+                continue
+            idle = time.monotonic() - self.last_activity
+            if not self.idle_prompted and idle >= prompt_s:
+                self.idle_prompted = True
+                logger.info("Idle for %.0f s: asking if the caller is still there", idle)
+                self.reply_task = asyncio.create_task(self.say_fixed(closing.STILL_THERE))
+            elif self.idle_prompted and idle >= end_s - prompt_s:
+                logger.info("Still silent after the idle prompt: ending the call")
+                self.reply_task = asyncio.create_task(
+                    self.say_fixed(closing.IDLE_GOODBYE, end=True))
+                return
+
+    async def say_fixed(self, text: str, user_text: str | None = None, end: bool = False) -> None:
+        """Speak a fixed line (no LLM), store it, and end the call after it if `end`."""
+        self.user_text, self.spoken, self.current = None, [], None
+        reply_text = ReplyText()
+        reply_text.push(text)
+        reply_text.finish()
+        await self.speak(reply_text)  # A barge-in cancels it, and the call goes on.
+        if end:
+            self.ended.set()
+        self.history_task = asyncio.create_task(
+            self.engines.record_turn(self.conversation_id, user_text, text))
+        await self.send({"type": "reply_end"})
 
     def greet(self) -> None:
         """Speak the engines' greeting before the caller says anything.
@@ -465,6 +557,11 @@ class Call:
 
     async def on_turn_event(self, event: TurnEvent) -> None:
         """Flux events for this call, in order."""
+        if event.event in ("StartOfTurn", "EndOfTurn", "Reset"):
+            self.user_speaking = event.event == "StartOfTurn"
+            self.touch()
+            if event.event == "StartOfTurn":
+                self.idle_prompted = False
         if event.event == "StartOfTurn":
             await self.turn_started(event.transcript)
         elif self.holding and event.event in ("Update", "EagerEndOfTurn", "TurnResumed"):
@@ -499,8 +596,15 @@ class Call:
         """A held turn's words so far: interrupt unless they are only backchannel."""
         self.held_text = text
         backchannel = self.engines.backchannel
-        if self.holding and text.strip() and backchannel and not backchannel.only(text):
+        if self.holding and text.strip() and backchannel and not self.ignorable(text):
             await self.barge_in_now("the user's words while the assistant was speaking")
+
+    def ignorable(self, text: str) -> bool:
+        """Words said over our speech that do not interrupt it: backchannel, and a
+        pickup "Hello?" over the greeting (it would otherwise cut the call's purpose)."""
+        backchannel = self.engines.backchannel
+        return bool(backchannel and backchannel.only(text)) or (
+            self.greeting is not None and closing.only_hello(text))
 
     async def hold_expired(self, hold_s: float) -> None:
         await asyncio.sleep(hold_s)
@@ -549,7 +653,7 @@ class Call:
         self.partial = ""
         if self.holding:
             backchannel = self.engines.backchannel
-            if not event.transcript.strip() or (backchannel and backchannel.only(event.transcript)):
+            if not event.transcript.strip() or (backchannel and self.ignorable(event.transcript)):
                 self.stop_holding()
                 if speculation is not None:
                     speculation.cancel("the turn was a backchannel")
@@ -561,6 +665,12 @@ class Call:
                 logger.info("Ignored a backchannel while the assistant was speaking")
                 return
             await self.barge_in_now("the user's words while the assistant was speaking")
+        if self.greeting is not None and closing.only_hello(event.transcript):
+            # A pickup "Hello?" that began before the greeting and ended during it.
+            logger.info("Ignored a hello said over the greeting")
+            if speculation is not None:
+                speculation.cancel("the turn was a hello over the greeting")
+            return
         if self.overlapped:
             self.overlapped = False
             logger.info("Ignored a turn that began while the assistant was speaking")
@@ -627,6 +737,9 @@ class Call:
                 speculation.cancel("the turn had no words")
             await self.send({"type": "partial", "text": ""})  # Clear the live line.
             return
+        self.answered += 1
+        if await self.answered_without_llm(text, speculation):
+            return
         deltas = self.reuse(speculation, text, metrics)
         # History stores the text the committed reply answered (same words).
         self.user_text = speculation.text if metrics.speculative == "committed" else text
@@ -653,7 +766,11 @@ class Call:
                                          reply_text, metrics)
                     except Exception as again:
                         logger.warning("Reply retry failed: %s", type(again).__name__)
-                        reply_text.push(RETRY_SORRY)
+                        if closing.closing(text):  # "That's all": a goodbye, LLM or not.
+                            reply_text.push(closing.goodbye_line(self.conversation_id))
+                            closing.request_end(self.conversation_id)
+                        else:
+                            reply_text.push(RETRY_SORRY)
             reply_text.finish()
             await speaker
         finally:
@@ -661,8 +778,30 @@ class Call:
                 speaker.cancel()
                 await asyncio.gather(speaker, return_exceptions=True)
         self.user_text = None
+        if closing.take_end_request(self.conversation_id):  # end_call, or the goodbye above.
+            logger.info("Ending the call after the goodbye")
+            self.ended.set()
         await self.send({"type": "reply_end"})
         self.answer_deferred()
+
+    async def answered_without_llm(self, text: str, speculation: Speculation | None) -> bool:
+        """A clear goodbye ends the call, and a lone "Hello?" before anything was answered
+        repeats the greeting (the caller missed it): both without the LLM."""
+        goodbye = closing.closing(text) == "strong"
+        if goodbye:
+            logger.info("The caller said goodbye: ending the call")
+            line = closing.goodbye_line(self.conversation_id)
+        elif self.answered == 1 and self.engines.greeting is not None and closing.only_hello(text):
+            logger.info("A lone hello before any answer: repeating the greeting")
+            line = self.engines.greeting(self.conversation_id)
+        else:
+            return False
+        if speculation is not None:
+            speculation.cancel("answered without the LLM")
+        await self.send({"type": "transcript", "text": text})
+        await self.say_fixed(line, user_text=text, end=goodbye)
+        self.answer_deferred()
+        return True
 
     def answer_deferred(self) -> None:
         """Once a reply has ended: answer a held yes to a pending proposal (see turn_ended)."""
@@ -752,6 +891,9 @@ class Call:
             logger.info("Estimated playback gaps: %.0f ms over %d segments", gaps_s * 1000, len(self.spoken))
 
     async def close(self) -> None:
+        if self.idle_task is not None:
+            self.idle_task.cancel()
+        closing.end_requests.discard(self.conversation_id)
         self.stop_holding()
         self.drop_speculation("the call ended")
         for task in (self.reply_task, self.history_task):

@@ -91,18 +91,19 @@ def test_briefing_prompt_and_greeting():
     prompt = interviews.prompt_note("brief-call")
     assert "<briefing>" in prompt and "Prepared brief: Acme builds voice agents" in prompt
     assert "(private: from his email or recordings)" in prompt
-    assert "offer a quick quiz" in prompt
+    assert "three short beats" in prompt and "don't call get_briefing" in prompt
+    assert "practice question now or later" in prompt
     # The evaluation part of the profile is shortened on briefing calls (token budget).
     assert len(prompt) < 4 * 2600
     greeting = interviews.greeting("brief-call", "")
-    assert greeting.startswith(f"Hi Chirag, it's {ASSISTANT_NAME} with your briefing for your 4:00 PM "
-                               "interview with Acme, starting in about 15 minutes")
+    assert greeting.startswith(f"Hi Chirag, it's {ASSISTANT_NAME}. Got your brief for your 4:00 PM "
+                               "interview with Acme, in about 15 minutes")
 
 
 def test_a_briefing_with_no_research_says_so():
     as_caller("empty", OWNER)
     interviews.briefings["empty"] = {**block(), "slots": []}
-    assert "research is not ready yet" in interviews.prompt_note("empty")
+    assert "research isn't ready yet" in interviews.prompt_note("empty")
 
 
 def test_block_calls_route_greeting_and_prompt_to_interview_mode():
@@ -111,7 +112,7 @@ def test_block_calls_route_greeting_and_prompt_to_interview_mode():
     callbacks.calls["cb"] = callbacks.CallbackCall("briefing-x", 1, "your 4:00 PM interview with Acme",
                                                    "block:briefing-x")
     try:
-        assert callbacks.greeting("cb").startswith(f"Hi Chirag, it's {ASSISTANT_NAME}, calling back")
+        assert callbacks.greeting("cb").startswith(f"Hi Chirag, it's {ASSISTANT_NAME}, back with your brief")
         assert callbacks.prompt_note("cb") == ""  # The briefing is in interviews.prompt_note.
     finally:
         callbacks.calls.pop("cb")
@@ -230,7 +231,7 @@ def test_proposal_says_the_labels_verbatim_with_the_capped_promise(monkeypatch):
     monkeypatch.setattr(interviews.research, "pool", object())
     result = asyncio.run(interviews.research_interviews(
         "today", caller_key=OWNER, conversation_id="c9", turn=TurnContext("research today", 1)))
-    assert result["say"].startswith("I see 6 interviews today: Co0, at eleven thirty a.m.; Co1, at "
+    assert result["say"].startswith("6 interviews today: Co0, at eleven thirty a.m.; Co1, at "
                                     "twelve thirty p.m.;")
     assert "within five minutes, starting with the earliest one. Okay?" in result["say"]
     assert result["minutes"] == 5 and "why_minutes" in result
@@ -240,7 +241,8 @@ def test_proposal_says_the_labels_verbatim_with_the_capped_promise(monkeypatch):
 
 def test_owner_greeting_uses_his_name():
     as_caller("g", OWNER)
-    assert callbacks.greeting("g") == f"Hi Chirag, it's {ASSISTANT_NAME}. What can I help you prepare?"
+    assert callbacks.greeting("g") in [line.format(name="Chirag", assistant=ASSISTANT_NAME)
+                                       for line in interviews.OWNER_GREETINGS]
     as_caller("h", STRANGER)
     assert callbacks.greeting("h") == f"Hi, this is {ASSISTANT_NAME}. How can I help?"
 
@@ -525,3 +527,60 @@ def test_refresh_ignores_ready_briefs_and_changed_inputs_need_research(monkeypat
 def test_get_briefing_is_owner_only():
     assert asyncio.run(interviews.get_briefing("next", caller_key=STRANGER)) == interviews.NOT_OWNER
     assert "get_briefing" not in {s["function"]["name"] for s in tools.schemas_for(STRANGER)}
+
+
+def test_company_matching_survives_speech_recognition():
+    day = datetime(2026, 10, 16, 6, tzinfo=timezone.utc).isoformat()
+    events = [SlotEvent("f", "Brightline | Intro", day, day, company="Brightline"),
+              SlotEvent("z", "Post offer connect", day, day, company="Northwind"),
+              SlotEvent("a", "Kestrel screen", day, day, company="Kestrel")]
+    keys = lambda found: [e.key for e in found]  # noqa: E731
+    assert keys(interviews.matching(events, "Bright line")) == ["f"]
+    assert keys(interviews.matching(events, "Bright Lion")) == ["f"]
+    assert keys(interviews.matching(events, "Nortwen")) == ["z"]
+    assert keys(interviews.matching(events, "kestrel")) == ["a"]
+    assert keys(interviews.matching(events, "Google")) == []
+
+
+def test_meetings_are_not_called_interviews():
+    from app.interview_types import event_noun
+    assert event_noun("Post offer connect") == "meeting"
+    assert event_noun("Northwind - Round 2 System Design") == "interview"
+    assert event_noun("Kestrel screen call") == "interview"
+
+
+def test_briefing_calls_offer_no_get_briefing_tool():
+    from app import tools
+    as_caller("bt", OWNER)
+    interviews.briefings["bt"] = block()
+    names = lambda schemas: {s["function"]["name"] for s in schemas}  # noqa: E731
+    try:
+        assert "get_briefing" not in names(tools.schemas_for(OWNER, "bt"))
+        assert {"get_briefing", "end_call"} <= names(tools.schemas_for(OWNER, "other"))
+        assert "end_call" in names(tools.schemas_for(STRANGER, "bt"))
+        assert "get_briefing" not in names(tools.schemas_for(STRANGER, "other"))
+    finally:
+        interviews.briefings.pop("bt")
+
+
+def test_an_interview_about_to_start_gets_no_research_callback(monkeypatch):
+    soon = datetime.now(timezone.utc) + timedelta(minutes=4)
+
+    async def upcoming_events(limit_days=8):
+        return [SlotEvent("s1", "Brightline | Intro", soon.isoformat(),
+                          (soon + timedelta(minutes=30)).isoformat(), company="Brightline")]
+
+    async def split_ready(events, refresh=False):
+        return [], events
+
+    async def temporal():
+        return object()
+    monkeypatch.setattr(interviews, "upcoming_events", upcoming_events)
+    monkeypatch.setattr(interviews, "split_ready", split_ready)
+    monkeypatch.setattr(callbacks, "temporal", temporal)
+    monkeypatch.setattr(interviews.research, "pool", object())
+    result = asyncio.run(interviews.research_interviews(  # The default day is "next".
+        company="Bright Lion", caller_key=OWNER, conversation_id="soon",
+        turn=TurnContext("my next interview", 1)))
+    assert result["too_soon"] and "proposed" not in result and "soon" not in interviews.proposals
+    assert "don't offer it" in result["how"]
