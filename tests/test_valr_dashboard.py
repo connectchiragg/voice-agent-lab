@@ -53,6 +53,7 @@ def client(monkeypatch):
     monkeypatch.setattr(research, "pool", Pool())
     monkeypatch.setattr(valr_dashboard, "verifier", Verifier())
     monkeypatch.setenv("VALR_ADMIN_EMAILS", OWNER)
+    monkeypatch.setenv("VALR_AUTH_MODE", "access")  # Cloudflare Access only (app/auth).
     test_client = TestClient(app)
     test_client.flags = flags
     return test_client
@@ -223,6 +224,7 @@ def test_dev_preview_is_loopback_only(monkeypatch):
     monkeypatch.setattr(valr_view, "collect", lambda pool, now=None: _view())
     monkeypatch.setattr(research, "pool", Pool())
     monkeypatch.delenv("VALR_DEV_PREVIEW", raising=False)
+    monkeypatch.setenv("VALR_AUTH_MODE", "access")
     with pytest.raises(RuntimeError):
         valr_dashboard.enable_dev_preview("127.0.0.1")  # No explicit opt-in.
     monkeypatch.setenv("VALR_DEV_PREVIEW", "1")

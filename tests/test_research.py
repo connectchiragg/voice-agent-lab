@@ -185,13 +185,16 @@ def test_the_dashboard_needs_a_verified_access_login(monkeypatch):
     monkeypatch.setattr(research, "pool", FakePool())
     client = TestClient(app)  # No lifespan: no speech, LLM or database needed.
     monkeypatch.setattr(valr_dashboard, "verifier", Verifier())
+    monkeypatch.setenv("VALR_AUTH_MODE", "access")  # Cloudflare Access only (app/auth).
     assert client.get("/valr").status_code == 403
     assert client.get("/valr", headers={"Cf-Access-Jwt-Assertion": "bad"}).status_code == 403
     page = client.get("/valr/system", headers={"Cf-Access-Jwt-Assertion": "good"})
     assert page.status_code == 200 and "Coorg &lt;b&gt;" in page.text
     assert "61 s" in page.text and "$0.09" in page.text  # Under System: recent research.
-    moved = client.get("/", headers={"host": "valr.haciensus.com"}, follow_redirects=False)
+    moved = client.get("/", headers={"host": "valr.haciensus.com", "Cf-Access-Jwt-Assertion": "good"},
+                       follow_redirects=False)
     assert moved.status_code == 307 and moved.headers["location"] == "/valr"
-    assert client.get("/").status_code == 200  # Other hosts: the voice page.
+    assert client.get("/", headers={"Cf-Access-Jwt-Assertion": "good"}).status_code == 200  # Voice page.
+    assert client.get("/").status_code == 403  # It too needs the owner (app/auth).
     monkeypatch.setattr(valr_dashboard, "verifier", None)
     assert client.get("/valr", headers={"Cf-Access-Jwt-Assertion": "good"}).status_code == 403

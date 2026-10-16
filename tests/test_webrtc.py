@@ -13,11 +13,21 @@ from aiortc.rtp import RtpPacket
 from fastapi.testclient import TestClient
 
 from app import ice, main, webrtc
+from app.auth import Identity, gate
 from app.webrtc import FRAME_S, Downsampler, LowDelayAudioBuffer, Peer, SpeechTrack
 from tests.test_pipeline import FakeListener, FakeSpeaker, make_engines
 
 RATE = 24000
 FRAME = RATE // 50
+
+
+@pytest.fixture(autouse=True)
+def signed_in(monkeypatch):
+    """The call surfaces need the signed-in owner (app/auth, tested in tests/test_auth.py);
+    these tests are about the call itself."""
+    async def owner(connection):
+        return Identity("owner@example.com", "session")
+    monkeypatch.setattr(gate, "identify", owner)
 
 
 def opus_frames(tone_hz, seconds, amplitude=0.5, rate=48000):

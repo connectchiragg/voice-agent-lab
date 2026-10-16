@@ -109,6 +109,7 @@ THEME_BOOT = ("<script>try{var t=localStorage.getItem('valr-theme');var d=docume
 
 def layout(view: dict[str, Any], email: str, csrf: str, active: str, title: str, body: str,
            items: list[dict[str, Any]], theme: str | None = None) -> str:
+    from app.auth.pages import account_menu  # Here: app.auth.pages imports this module.
     clock = Clock(view.get("zone") or "UTC", datetime.fromisoformat(view["generated_at"]))
     nav = "".join(f'<a href="{href}"{" aria-current=\"page\"" if key == active else ""}>{e(label)}</a>'
                   for key, label, href in NAV)
@@ -122,7 +123,7 @@ def layout(view: dict[str, Any], email: str, csrf: str, active: str, title: str,
 <title>{e(title)} · VALR</title>
 <link rel="icon" href="{ICON}">{THEME_BOOT}{FONTS}
 <link rel="stylesheet" href="{asset('theme.css')}"><link rel="stylesheet" href="{asset('valr.css')}">
-<link rel="stylesheet" href="{asset('valr-app.css')}">
+<link rel="stylesheet" href="{asset('valr-app.css')}"><link rel="stylesheet" href="{asset('valr-auth.css')}">
 <script type="module" src="{asset('valr.js')}"></script>
 <script type="module" src="{asset('valr-app.js')}"></script>
 </head><body class="app page-{e(active)}">
@@ -135,6 +136,7 @@ def layout(view: dict[str, Any], email: str, csrf: str, active: str, title: str,
       {badge(items)}
       <a class="btn small talk-btn" href="/call">{icon('mic', 16)}<span>Talk</span></a>
       <button class="icon-btn" type="button" data-theme-toggle aria-label="Switch light or dark">{icon('theme', 18)}</button>
+      {account_menu(email)}
     </div>
   </div>
 </header>

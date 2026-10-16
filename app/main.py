@@ -15,7 +15,7 @@ from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from app import (access, agent, callbacks, groq_api, interviews, memory, recordings, research,
+from app import (access, agent, auth, callbacks, groq_api, interviews, memory, recordings, research,
                  telegram_bot, telnyx, valr_dashboard, valr_hooks, webrtc)
 from app.valr_ui import routes as valr_routes
 from app.deepgram import AuraSpeaker, DeepgramSettings, FluxListener
@@ -125,7 +125,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(title="Voice Agent Lab", docs_url=None, redoc_url=None, openapi_url=None,
               lifespan=lifespan)
+app.add_middleware(auth.Gate)  # The owner on every route but app/auth/gate.py's public list.
 app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
+app.include_router(auth.router)  # /login, /login/google, /logout, /private
 app.include_router(webrtc.router)
 app.include_router(telnyx.router)
 app.include_router(valr_dashboard.router)
