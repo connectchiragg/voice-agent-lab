@@ -177,8 +177,9 @@ def test_history_marks_cut_offs_and_drops_unanswered_tool_calls():
     assert messages[0]["role"] == "system"
     assert "cut off" in messages[2]["content"]
     # Call "b" never got a result (interrupted mid-tool), so it is not sent back.
-    assert [call["id"] for call in messages[4]["tool_calls"]] == ["a"]
-    assert messages[5] == {"role": "tool", "tool_call_id": "a", "content": "{}"}
+    assert messages[4]["role"] == "system"  # The local time follows the latest user message.
+    assert [call["id"] for call in messages[5]["tool_calls"]] == ["a"]
+    assert messages[6] == {"role": "tool", "tool_call_id": "a", "content": "{}"}
 
 
 def tool_chunk(index, call_id=None, name=None, arguments=None):
@@ -201,8 +202,7 @@ def turn(role, text, **extra):
     return {"role": role, "parts": [{"text": text}], "status": "completed", **extra}
 
 
-def test_earlier_tool_exchanges_are_dropped_and_history_is_windowed(monkeypatch):
-    monkeypatch.setattr(llm, "HISTORY_MESSAGES", 4)
+def test_earlier_tool_exchanges_are_dropped_and_history_is_append_only(monkeypatch):
     history = [turn("user", "u1"), turn("model", "a1"),
                turn("user", "weather?"),
                turn("model", "", tool_calls=[{"id": "old", "name": "get_weather", "arguments": "{}"}]),
@@ -212,19 +212,57 @@ def test_earlier_tool_exchanges_are_dropped_and_history_is_windowed(monkeypatch)
                turn("model", "", tool_calls=[{"id": "new", "name": "get_time", "arguments": "{}"}]),
                turn("tool", "{now}", tool_call_id="new")]
     messages = llm.to_chat_messages(history)
-    assert [(m["role"], m.get("content")) for m in messages[1:]] == [
+    assert [(m["role"], m.get("content")) for m in messages[1:] if m["role"] != "system"] == [
         ("user", "u1"), ("assistant", "a1"), ("user", "weather?"), ("assistant", "It is sunny."),
         ("user", "time?"), ("assistant", ""), ("tool", "{now}")]
     # Earlier filler text attached to a tool call is dropped with the call.
     history[3] = turn("model", "Let me check that.", tool_calls=history[3]["tool_calls"])
     assert "Let me check that." not in [m.get("content") for m in llm.to_chat_messages(history)]
     assert messages[-2]["tool_calls"][0]["id"] == "new"
-    monkeypatch.setattr(llm, "HISTORY_MESSAGES", 2)
-    assert [m.get("content") for m in llm.to_chat_messages(history)[1:3]] == ["weather?", "It is sunny."]
 
 
-def test_system_prompt_carries_local_time_in_twelve_hour_form():
+def test_a_very_long_call_drops_its_oldest_messages_in_chunks(monkeypatch):
+    monkeypatch.setattr(llm, "MAX_CALL_MESSAGES", 6)
+    monkeypatch.setattr(llm, "TRIM_CHUNK", 4)
+    history = [turn("user" if n % 2 == 0 else "model", f"m{n}") for n in range(8)] + [turn("user", "now")]
+    contents = [m["content"] for m in llm.to_chat_messages(history)[1:] if m["role"] != "system"]
+    assert contents == ["m4", "m5", "m6", "m7", "now"]  # 8 > 6: one chunk of 4 dropped.
+    history = history[:-1] + [turn("model", "m8"), turn("user", "next")]
+    contents = [m["content"] for m in llm.to_chat_messages(history)[1:] if m["role"] != "system"]
+    assert contents[:2] == ["m4", "m5"]  # Same start: the cached prefix still holds.
+
+
+def test_the_prefix_is_byte_stable_across_turns_and_the_time_comes_last():
     from datetime import datetime
     from zoneinfo import ZoneInfo
-    prompt = llm.system_prompt(datetime(2026, 10, 12, 20, 9, tzinfo=ZoneInfo("Asia/Kolkata")))
-    assert prompt.endswith("Monday, 12 October 2026, 8:09 PM (Asia/Kolkata).")
+    zone = ZoneInfo("Asia/Kolkata")
+    first = [turn("user", "hi")]
+    second = first + [turn("model", "Hello."), turn("user", "what's on today?")]
+    one = llm.to_chat_messages(first, "Owner context.", datetime(2026, 10, 16, 9, 0, tzinfo=zone))
+    two = llm.to_chat_messages(second, "Owner context.", datetime(2026, 10, 16, 9, 7, tzinfo=zone))
+    # Everything up to and including the previous user message is identical.
+    assert one[:2] == two[:2]
+    assert "local time" not in one[0]["content"].split("last system message")[1]
+    assert two[-1] == {"role": "system", "content": "The user's local time is Friday, 16 October "
+                                                    "2026, 9:07 AM (Asia/Kolkata)."}
+    assert two[-2] == {"role": "user", "content": "what's on today?"}
+
+
+def test_tools_are_identical_across_turns_and_for_speculation():
+    from app import tools
+    assert tools.schemas_for(None) is tools.schemas_for(None)
+    assert tools.schemas_for("tel:+15550100099") == tools.SCHEMAS
+
+
+def test_cached_tokens_are_read_from_groq_usage():
+    usage = SimpleNamespace(prompt_tokens=2000, prompt_tokens_details=SimpleNamespace(cached_tokens=1536))
+    assert llm.cached_tokens(usage) == 1536
+    assert llm.cached_tokens(SimpleNamespace(prompt_tokens=10)) == 0
+    assert llm.cached_tokens(SimpleNamespace(prompt_tokens_details={"cached_tokens": 7})) == 7
+
+
+def test_time_note_in_twelve_hour_form():
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    note = llm.time_note(datetime(2026, 10, 12, 20, 9, tzinfo=ZoneInfo("Asia/Kolkata")))
+    assert note.endswith("Monday, 12 October 2026, 8:09 PM (Asia/Kolkata).")

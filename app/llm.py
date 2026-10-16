@@ -29,7 +29,13 @@ SYSTEM_PROMPT = (
     "calling the tool. Never work out another place's time from time differences yourself, "
     "even if you think you know them: always call get_time."
 )
-HISTORY_MESSAGES = 12  # Earlier turns cost input tokens on every call (Groq: 7,000/min).
+# Groq caches exact prompt prefixes (gpt-oss-120b), and cached tokens do not count toward
+# its rate limits. So within a call the prompt is append-only: tools, then the constant
+# system prompt and the call's fixed context, then the dialogue; the local time goes last,
+# after the latest user message. Only a very long call drops its oldest messages, in
+# chunks, so the prefix changes rarely.
+MAX_CALL_MESSAGES = 80
+TRIM_CHUNK = 40
 CUT_OFF_NOTE = "\n[Your reply was cut off here; the user heard only this much.]"
 DEFAULT_MODEL = "openai/gpt-oss-120b"
 # Hedge for stalled requests: a separate Groq rate-limit bucket, same prompt and tool format.
@@ -60,23 +66,40 @@ class ModelUsed:
 ModelEvent = str | list[ToolCallRequest] | ModelUsed
 
 
-def system_prompt(now: datetime | None = None) -> str:
-    """The prompt plus the current local time, so the model never invents it."""
+def system_prompt() -> str:
+    """Constant for every request, so it is part of the cached prefix."""
+    return (f"{SYSTEM_PROMPT} The user's local date and time are in the last system message; "
+            "never invent them.")
+
+
+def time_note(now: datetime | None = None) -> str:
+    """The volatile part, sent after the latest user message (see MAX_CALL_MESSAGES)."""
     zone = os.getenv("ASSISTANT_TIMEZONE", "Asia/Kolkata")
     now = now or datetime.now(ZoneInfo(zone))
     hour = now.strftime("%I").lstrip("0")
-    return (f"{SYSTEM_PROMPT} The user's local time is {now:%A, %d %B %Y}, "
-            f"{hour}:{now:%M %p} ({zone}).")
+    return f"The user's local time is {now:%A, %d %B %Y}, {hour}:{now:%M %p} ({zone})."
 
 
-def to_chat_messages(history: Sequence[Any], caller_memory: str = "") -> list[dict[str, Any]]:
-    """Stored conversation -> Groq chat messages, kept small for the token budget.
+def window(earlier: list[Any]) -> list[Any]:
+    """Every earlier dialogue message, unless the call is very long: then the oldest go in
+    chunks of TRIM_CHUNK, so the cached prefix changes once per chunk, not every turn."""
+    excess = len(earlier) - MAX_CALL_MESSAGES
+    if excess <= 0:
+        return earlier
+    return earlier[(excess // TRIM_CHUNK + 1) * TRIM_CHUNK:]
 
-    `caller_memory` (see app/memory.py) ends the system prompt for a known caller.
+
+def to_chat_messages(history: Sequence[Any], caller_memory: str = "",
+                     now: datetime | None = None) -> list[dict[str, Any]]:
+    """Stored conversation -> Groq chat messages, laid out for Groq's prefix cache.
+
+    `caller_memory` (the call's fixed context: the owner's profile and briefing, a
+    callback's reason, caller memory) ends the constant system prompt.
 
     - Tool calls and results from earlier turns are left out: the spoken answer
       that followed them already carries the facts.
-    - Only the last HISTORY_MESSAGES dialogue messages before this turn are sent.
+    - Earlier dialogue is append-only within a call (see `window`).
+    - The local time is a short system message right after the latest user message.
     - A tool call is only sent with its result; calls whose results were never
       stored (interrupted mid-tool) are dropped, as the API would reject them.
     """
@@ -86,10 +109,11 @@ def to_chat_messages(history: Sequence[Any], caller_memory: str = "") -> list[di
     # and answer without calling a tool.
     earlier = [turn for turn in history[:current]
                if turn["role"] != "tool" and not turn.get("tool_calls")]
-    turns = earlier[-HISTORY_MESSAGES:] + list(history[current:])
+    turns = window(earlier) + list(history[current:])
     answered = {turn["tool_call_id"] for turn in turns if turn["role"] == "tool"}
     system = system_prompt() + (f"\n\n{caller_memory}" if caller_memory else "")
     messages: list[dict[str, Any]] = [{"role": "system", "content": system}]
+    first_current = len(turns) - (len(history) - current)
     for index, turn in enumerate(turns):
         text = turn["parts"][0]["text"]
         if turn["role"] == "tool":
@@ -97,16 +121,20 @@ def to_chat_messages(history: Sequence[Any], caller_memory: str = "") -> list[di
             continue
         if turn["role"] == "user":
             messages.append({"role": "user", "content": text})
+            if index == first_current:
+                messages.append({"role": "system", "content": time_note(now)})
             continue
         if turn.get("status") == "interrupted":
             text += CUT_OFF_NOTE
         message: dict[str, Any] = {"role": "assistant", "content": text}
-        in_current_turn = index >= len(turns) - (len(history) - current)
-        calls = [call for call in turn.get("tool_calls", []) if call["id"] in answered] if in_current_turn else []
+        calls = [call for call in turn.get("tool_calls", []) if call["id"] in answered] \
+            if index >= first_current else []
         if calls:
             message["tool_calls"] = [{"id": call["id"], "type": "function", "function": {
                 "name": call["name"], "arguments": call["arguments"]}} for call in calls]
         messages.append(message)
+    if not any(m["role"] == "user" for m in messages):
+        messages.append({"role": "system", "content": time_note(now)})
     return messages
 
 
@@ -116,10 +144,13 @@ async def model_events(chunks: AsyncIterator[Any]) -> AsyncIterator[ModelEvent]:
     async for chunk in chunks:
         usage = getattr(getattr(chunk, "x_groq", None), "usage", None)
         if usage is not None:
-            # queue_time is time spent waiting inside Groq before generation began.
-            logger.info("Groq LLM usage: %d input tokens, %d output, queue %.0f ms",
-                        usage.prompt_tokens, usage.completion_tokens, (usage.queue_time or 0) * 1000)
-            groq_api.note_usage(usage.prompt_tokens)
+            # queue_time is time spent waiting inside Groq before generation began. Cached
+            # prompt tokens do not count toward Groq's rate limits.
+            cached = cached_tokens(usage)
+            logger.info("Groq LLM usage: %d input tokens (%d cached, %.0f%%), %d output, queue %.0f ms",
+                        usage.prompt_tokens, cached, 100 * cached / max(usage.prompt_tokens, 1),
+                        usage.completion_tokens, (usage.queue_time or 0) * 1000)
+            groq_api.note_usage(usage.prompt_tokens - cached)
         if not chunk.choices:
             continue
         delta = chunk.choices[0].delta
@@ -133,6 +164,14 @@ async def model_events(chunks: AsyncIterator[Any]) -> AsyncIterator[ModelEvent]:
                 entry["arguments"] += call.function.arguments or ""
     if calls:
         yield [ToolCallRequest(**calls[index]) for index in sorted(calls)]
+
+
+def cached_tokens(usage: Any) -> int:
+    """Groq's prompt_tokens_details.cached_tokens (0 when absent)."""
+    details = getattr(usage, "prompt_tokens_details", None)
+    if isinstance(details, dict):
+        return int(details.get("cached_tokens") or 0)
+    return int(getattr(details, "cached_tokens", 0) or 0)
 
 
 def has_output(chunk: Any) -> bool:
