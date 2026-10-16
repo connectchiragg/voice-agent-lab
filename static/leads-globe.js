@@ -37,10 +37,10 @@ export const DEFAULT_PALETTE = {
   cold: ["#3553a8", "#4f7be6"], cool: ["#23877c", "#2fb3a0"], warm: ["#d9b64c", "#eda233"],
   hot: ["#f0703a", "#e8392b"], closed: ["#5a6170", "#5a6170"],
 };
-export const STAGE_SIZE = { sourced: 3, applied: 3.4, screening: 4.4, interviewing: 5.8, offer: 7.4,
+export const STAGE_SIZE = { sourced: 3, applied: 3.4, screening: 4.4, interviewing: 5.8, final: 6.6, offer: 7.4,
   "closed-won": 5, "closed-lost": 3, ghosted: 3, closed: 3 };
 const STAGE_LABEL = { sourced: "Sourced", applied: "Applied", screening: "Screening", interviewing: "Interviewing",
-  offer: "Offer", "closed-won": "Won", "closed-lost": "Not moving forward", ghosted: "Gone quiet", closed: "Closed" };
+  final: "Final stages", offer: "Offer", "closed-won": "Won", "closed-lost": "Not moving forward", ghosted: "Gone quiet", closed: "Closed" };
 
 // Pure helpers.
 

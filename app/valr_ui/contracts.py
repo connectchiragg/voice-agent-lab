@@ -34,11 +34,11 @@ EMAIL = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
 PHONE = re.compile(r"\+\d[\d\s().-]{7,}\d|\(\d{3}\)\s?\d{3}[-.\s]\d{4}|\b\d{3}[-.\s]\d{3}[-.\s]\d{4}\b"
                    r"|\b\d{5}\s?\d{5}\b")
 STAGES = [("sourced", "Sourced"), ("applied", "Applied"), ("screening", "Screening"),
-          ("interviewing", "Interviewing"), ("offer", "Offer"), ("ghosted", "Gone quiet"), ("closed", "Closed"),
+          ("interviewing", "Interviewing"), ("final", "Final stages"), ("offer", "Offer"), ("ghosted", "Gone quiet"), ("closed", "Closed"),
           ("other", "Other")]
 STAGE_ALIASES = {"new": "sourced", "lead": "sourced", "screen": "screening", "recruiter": "screening",
                  "interview": "interviewing", "onsite": "interviewing", "final": "interviewing",
-                 "offered": "offer", "closed-won": "closed", "closed-lost": "closed", "quiet": "ghosted",
+                 "offered": "offer", "final_round": "final", "near_offer": "final", "closed-won": "closed", "closed-lost": "closed", "quiet": "ghosted",
                  "rejected": "closed", "declined": "closed", "withdrawn": "closed", "archived": "closed"}
 STAGE_LABELS = {"closed-won": "Won", "closed-lost": "Not moving forward", "ghosted": "Gone quiet"}
 # Temperature bands (app/leads.band_of), hottest first, in the owner's words.

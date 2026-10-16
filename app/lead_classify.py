@@ -171,7 +171,9 @@ Reply with JSON only, no prose:
  updates and his own replies,
  "action": "<= 8 words, what he should do, starting with a verb, or \\"\\""}
 stage_hint: sourced = recruiter outreach before he applied; applied = application received;
-screening = recruiter or HR screen; interviewing = interview rounds or assessments; offer;
+screening = recruiter or HR screen; interviewing = interview rounds or assessments; final = near an
+offer (a final round, an offer discussion, references or a background check, compensation talk
+after the interviews); offer;
 closed-won = he accepted; closed-lost = rejected or withdrawn.
 
 <email>

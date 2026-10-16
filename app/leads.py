@@ -27,7 +27,10 @@ depend on the order in which sources arrived:
        quality   performance: 5 x (mean score for the company / 10), else 2.5 (no data)
                  + tone: 5 x (mean of the last 3 inbound email sentiments + 1) / 2, else 2.5
                  + cue: latest explicit cue positive 5, none 2.5, negative 0
-   closed-lost is capped at 10 and ghosted at 24 (always Cold).
+   closed-lost is capped at 10 and ghosted at 24 (always Cold). Hot leads are then placed by
+   stage tier (`hot_tier`): an open offer 95-100, final stages (a final round, an offer talk,
+   references, a background check) 88-94, a later interview round with momentum 80-87, an
+   early active round 75-79; inside a tier the other parts only move a lead within it.
 5. Band (`band_of`): hot >= 75 (an active process, next step soon), warm >= 50 (engaged
    recently), cool >= 25 (applied or sourced, waiting), cold < 25 (quiet or ghosted);
    closed-won and closed-lost are "closed" whatever the score. Status: "expired" (30 quiet
@@ -56,15 +59,30 @@ from typing import Any
 
 from app import company_names
 
-FORWARD = ("sourced", "applied", "screening", "interviewing", "offer")
+FORWARD = ("sourced", "applied", "screening", "interviewing", "final", "offer")
 CLOSED = ("closed-won", "closed-lost")
 STAGES = FORWARD + CLOSED + ("ghosted",)
-STAGE_WEIGHT = {"sourced": 0.2, "applied": 0.3, "screening": 0.55, "interviewing": 0.8,
+STAGE_WEIGHT = {"sourced": 0.2, "applied": 0.3, "screening": 0.55, "interviewing": 0.8, "final": 0.9,
                 "offer": 1.0, "closed-won": 1.0, "closed-lost": 0.0, "ghosted": 0.1}
 # Bands, coldest first: (name, lowest score). Closed leads are their own band.
 BANDS = (("cold", 0), ("cool", 25), ("warm", 50), ("hot", 75))
 BAND_NAMES = tuple(name for name, _ in BANDS) + ("closed",)
 CAPS = {"closed-lost": 10, "ghosted": 24}
+# The Hot tiers, hottest first: (name, lowest, highest). A lead in a tier is placed inside it by
+# recency, momentum and quality; they never lift it into a higher tier. See `hot_tier`.
+TIERS = {"offer": (95, 100), "final": (88, 94), "late": (80, 87), "early": (75, 79)}
+TIER_WHY = {"offer": "an open offer: always the hottest", "final": "near an offer",
+            "late": "a later interview round with momentum", "early": "an early interview round, active"}
+# Near an offer: a final round, an offer conversation, references or a background check.
+NEAR_OFFER = re.compile(r"\b(final (?:round|interview|stage|conversation|discussion|loop|call)|last round|"
+                        r"offer (?:discussion|call|conversation|chat|letter)|verbal offer|references?|reference check|"
+                        r"background (?:check|verification)|bgv)\b", re.I)
+# Compensation and HR talk mean "near an offer" only once he is interviewing (a first recruiter
+# screen also asks for the expected CTC).
+NEAR_OFFER_LATE = re.compile(r"\b(hr (?:round|discussion|interview|call)|ctc|compensation|comp (?:discussion|call)|"
+                             r"salary (?:discussion|negotiation)|negotiat\w*|joining date)\b", re.I)
+LATE_ROUND = re.compile(r"\b((?:round|r|l)\s*[2-9]|second|third|fourth|onsite|on-site|panel|system design|"
+                        r"hiring manager|loop|bar raiser|director|vp|cto|founder)\b", re.I)
 SOON = timedelta(days=7)
 ASK_MAX_AGE = timedelta(days=14)  # An unanswered request older than this: nobody (cooling).
 THEM_MAX_AGE = timedelta(days=21)  # The same as GHOSTED_AFTER.
@@ -421,10 +439,12 @@ def lead_aliases(current: dict[str, Lead], before: dict[str, str], overrides: Ov
 
 def stage_of(touches: list[Touch]) -> str:
     """Forward only; a closing hint closes; after closed-lost, a hint at screening or
-    beyond (a new round, say) re-opens. closed-won stays."""
+    beyond (a new round, say) re-opens. closed-won stays. A touch that talks of a final
+    round, an offer conversation, references or a background check (or, once he is
+    interviewing, of compensation or an HR round) moves the lead to "final"."""
     stage = "sourced"
     for touch in sorted(touches, key=lambda t: t.at):
-        hint = touch.stage_hint
+        hint = near_offer_hint(touch, stage)
         if hint in CLOSED:
             stage = hint
         elif hint in FORWARD:
@@ -434,6 +454,19 @@ def stage_of(touches: list[Touch]) -> str:
             elif stage not in CLOSED and FORWARD.index(hint) > FORWARD.index(stage):
                 stage = hint
     return stage
+
+
+def near_offer_hint(touch: Touch, stage: str) -> str:
+    """The touch's stage hint, raised to "final" when its title or next step says so."""
+    hint = touch.stage_hint
+    if touch.kind not in ("email", "calendar") or hint in CLOSED or hint == "offer" or touch.cue == "negative":
+        return hint
+    text = " ".join((touch.title, touch.next_step, touch.action))
+    if NEAR_OFFER.search(text) and hint in ("", "screening", "interviewing", "final"):
+        return "final"
+    if NEAR_OFFER_LATE.search(text) and stage in ("interviewing", "final") and hint in ("", "interviewing", "final"):
+        return "final"
+    return hint
 
 
 def upcoming(lead: Lead, now: datetime) -> list[Touch]:
@@ -512,11 +545,17 @@ def temperature(lead: Lead, now: datetime) -> tuple[int, dict[str, Any]]:
     raw = recency + stage + frequency + next_part + perf + sentiment + cue
     cap = CAPS.get(lead.stage)
     total = int(round(max(0.0, min(100.0, raw if cap is None else min(raw, cap)))))
+    tier = hot_tier(lead, now, raw, past, soon)
+    if tier:  # Hot: the stage sets the tier; the rest only places the lead inside it.
+        low, high = TIERS[tier]
+        signal = min(1.0, (recency + frequency + next_part + perf + sentiment + cue) / 70)
+        total = low + int(round((high - low) * signal))
     parts = {
         "recency": {"points": round(recency, 1), "max": 30,
                     "why": f"they last moved {days:.0f} days ago (halves every 7 days)" if days is not None else "no touch yet"},
         "stage": {"points": round(stage, 1), "max": 30,
-                  "why": f"stage {lead.stage}" + (" (set by you)" if lead.stage_manual else "")},
+                  "why": f"stage {lead.stage}" + (" (set by you)" if lead.stage_manual else "")
+                  + (f"; Hot tier {TIERS[tier][0]}-{TIERS[tier][1]}: {TIER_WHY[tier]}" if tier else "")},
         "momentum": {"points": round(frequency + next_part, 1), "max": 25,
                      "why": f"{recent} touches in 14 days; {next_why}"},
         "quality": {"points": round(perf + sentiment + cue, 1), "max": 15,
@@ -525,9 +564,32 @@ def temperature(lead: Lead, now: datetime) -> tuple[int, dict[str, Any]]:
                         f"recruiter tone {mean_sentiment:+.1f}" if mean_sentiment is not None else "no recruiter tone",
                         f"latest cue {latest_cue}"]),
                     "performance": round(perf, 1), "sentiment": round(sentiment, 1), "cue": round(cue, 1)},
-        "cap": cap, "total": total,
+        "cap": cap, "tier": {"name": tier, "low": TIERS[tier][0], "high": TIERS[tier][1]} if tier else None,
+        "total": total,
     }
     return total, parts
+
+
+def hot_tier(lead: Lead, now: datetime, raw: float, past: list[Touch], soon: list[Touch]) -> str:
+    """The Hot tier a lead is in, or "" (then its plain score stands, below 75).
+
+    offer: an open offer, always (95-100). final: near an offer (88-94), while their last
+    move is under 14 days old or something is booked. Interviewing counts only when active
+    (an interview within 7 days, or a plain score of 75 or more): "late" after a second round
+    or for a panel, onsite or hiring-manager round (80-87), else "early" (75-79)."""
+    if lead.stage == "offer":
+        return "offer"
+    moved = their_move(past)
+    fresh = moved is not None and now - moved.at < MOMENTUM_WINDOW
+    if lead.stage == "final":
+        return "final" if fresh or soon else ""
+    if lead.stage != "interviewing" or not (raw >= 75 or any(t.at - now <= SOON for t in soon)):
+        return ""
+    rounds = {t.at.date() for t in past if t.kind == "calendar" and t.stage_hint in ("interviewing", "final")}
+    rounds |= {t.at.date() for t in past if t.kind == "evaluation"}
+    text = " ".join(t.title + " " + t.next_step for t in lead.touches if t.kind in ("email", "calendar")
+                    and (t.at > now or now - t.at <= MOMENTUM_WINDOW))
+    return "late" if len(rounds) >= 2 or LATE_ROUND.search(text) else "early"
 
 
 # Ball in court: who owes the next move.

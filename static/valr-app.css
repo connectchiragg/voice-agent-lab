@@ -299,6 +299,7 @@ p { margin: 0.4em 0; }
 :root { --st-sourced: var(--ash); }
 .sw.st-sourced { background: var(--st-sourced); }
 .sw.st-ghosted { background: var(--mute); }
+.sw.st-final { background: var(--st-final, var(--ok)); }
 .temp-num { font-variant-numeric: tabular-nums; font-weight: 500; }
 .temp-dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; vertical-align: 0; }
 .temp-parts { list-style: none; padding: 0; display: grid; gap: 10px; margin: 8px 0 0; }

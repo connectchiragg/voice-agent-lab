@@ -25,8 +25,8 @@ def email(i, days, *, out=False, hint="", sentiment=0.3, cue="none", step="", pe
                  category=category, action_requested=asked, action=action)
 
 
-def meet(i, days, hint="interviewing"):
-    return Touch(f"cal:{i}", "calendar", ago(days), "Acme", "acme.example", [REC], f"Acme round {i}", stage_hint=hint)
+def meet(i, days, hint="interviewing", title=""):
+    return Touch(f"cal:{i}", "calendar", ago(days), "Acme", "acme.example", [REC], title or f"Acme round {i}", stage_hint=hint)
 
 
 def score(i, days, value, cue="none"):
@@ -40,15 +40,27 @@ ARCHETYPES = [
     ("Offer received 3 days ago, awaiting your decision",
      [meet(1, 15), score(1, 15, 8.1, "positive"),
       email(2, 3, hint="offer", sentiment=0.9, cue="positive", category="offer", asked=True, action="decide on the offer")],
-     "hot", 84, "you"),
+     "hot", 99, "you"),
     ("Interviewing, next interview in 3 days",
      [email(1, 9, hint="screening", sentiment=0.5), meet(2, 6), score(2, 6, 7.4, "positive"),
       email(3, 2, hint="interviewing", sentiment=0.8, cue="positive", step="Panel on Tuesday"), meet(4, -3)],
      "hot", 86, "nobody"),
     ("Final round tomorrow after two strong rounds",
      [meet(1, 12), score(1, 12, 8.0, "positive"), meet(2, 5), score(2, 5, 8.4, "positive"),
-      email(3, 1, hint="interviewing", sentiment=0.8, cue="positive"), meet(4, -1)],
-     "hot", 90, "nobody"),
+      email(3, 1, hint="interviewing", sentiment=0.8, cue="positive"), meet(4, -1, title="Acme · Final round")],
+     "hot", 94, "nobody"),
+    ("References requested after the onsite",
+     [meet(1, 9), meet(2, 6, title="Acme onsite"), score(2, 6, 7.8, "positive"),
+      email(3, 2, hint="interviewing", sentiment=0.7, cue="positive", step="Share two references", asked=True,
+            action="share two references")],
+     "hot", 92, "you"),
+    ("Compensation talk with HR booked after the rounds",
+     [meet(1, 10), score(1, 10, 7.0), email(2, 3, hint="interviewing", sentiment=0.6),
+      meet(3, -4, title="Acme HR round: compensation discussion")],
+     "hot", 93, "nobody"),
+    ("First technical round in 2 days",
+     [email(1, 5, hint="screening", sentiment=0.5), meet(2, -2, title="Acme technical interview")],
+     "hot", 78, "nobody"),
     ("Interviewed 2 days ago, waiting for feedback",
      [email(1, 8, hint="screening", sentiment=0.5), meet(2, 2), score(2, 2, 7.5)],
      "warm", 66, "them"),
@@ -60,6 +72,9 @@ ARCHETYPES = [
      [email(1, 4, out=True, hint="applied"),
       email(2, 1, hint="screening", sentiment=0.6, category="scheduling", asked=True, action="share your availability")],
      "warm", 58, "you"),
+    ("Recruiter asks your expected CTC before a first screen",
+     [email(1, 1, hint="screening", sentiment=0.5, category="scheduling", asked=True, action="share your expected CTC")],
+     "warm", 55, "you"),
     ("Recruiter screen booked in 2 days",
      [email(1, 3, hint="screening", sentiment=0.5, category="scheduling", asked=True, action="pick a slot"),
       email(2, 2.5, out=True), meet(3, -2, "screening")],
@@ -97,6 +112,28 @@ def test_archetypes_land_in_their_band(situation, touches, band, score, waiting)
     assert lead.band == band, (situation, lead.temperature, lead.parts)
     assert abs(lead.temperature - score) <= 2, (situation, lead.temperature, lead.parts)
     assert lead.waiting_on == waiting, (situation, lead.waiting_reason)
+
+
+def test_the_hot_tiers_keep_their_order():
+    """offer > final stages > a later round with momentum > an early round, whatever else."""
+    by = {a[0]: leads.build(a[1], NOW)[0] for a in ARCHETYPES}
+    offer = by["Offer received 3 days ago, awaiting your decision"]
+    final = by["Final round tomorrow after two strong rounds"]
+    late = by["Interviewing, next interview in 3 days"]
+    early = by["First technical round in 2 days"]
+    assert offer.temperature > final.temperature > late.temperature > early.temperature >= 75
+    assert [l.parts["tier"]["name"] for l in (offer, final, late, early)] == ["offer", "final", "late", "early"]
+    assert final.stage == "final" and by["References requested after the onsite"].stage == "final"
+    assert by["Recruiter asks your expected CTC before a first screen"].stage == "screening"  # Too early to mean an offer.
+    # A weak, quiet offer still beats the best possible final round; a stale final is not Hot.
+    weak = leads.build([email(1, 12, hint="offer", sentiment=-0.5)], NOW)[0]
+    assert weak.stage == "offer" and 95 <= weak.temperature < 100 and weak.temperature > final.temperature
+    stale = leads.build([meet(1, 18, title="Acme final round")], NOW)[0]
+    assert stale.stage == "final" and stale.band != "hot"
+    for lead in by.values():
+        tier = lead.parts["tier"]
+        if tier:
+            assert tier["low"] <= lead.temperature <= tier["high"]
 
 
 def test_archetypes_spread_across_the_scale():

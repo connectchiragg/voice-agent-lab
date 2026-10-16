@@ -11,10 +11,10 @@ from app.valr_page import Clock, chip, e, link
 from app.valr_ui.home import band_sw, hero
 from app.valr_ui.shell import page_head
 
-STAGE_TONE = {"sourced": "muted", "applied": "muted", "screening": "info", "interviewing": "accent", "offer": "ok",
+STAGE_TONE = {"sourced": "muted", "applied": "muted", "screening": "info", "interviewing": "accent", "final": "accent", "offer": "ok",
               "closed": "muted", "other": "muted"}
 RAW_STAGE = {"sourced": "Sourced", "applied": "Applied", "screening": "Screening", "interviewing": "Interviewing",
-             "offer": "Offer", "closed-won": "Won", "closed-lost": "Not moving forward", "ghosted": "Gone quiet"}
+             "final": "Final stages", "offer": "Offer", "closed-won": "Won", "closed-lost": "Not moving forward", "ghosted": "Gone quiet"}
 KIND = {"email": "Email", "calendar": "Interview", "recording": "Recording", "evaluation": "Scored"}
 BAND_LABEL = {"hot": "Hot", "warm": "Warm", "cool": "Cool", "cold": "Cold", "closed": "Closed"}
 

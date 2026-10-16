@@ -32,7 +32,7 @@ LEAD_OUTCOME = {
     "final": ("Interviewing", "info"), "screening": ("Screening", "info"), "screen": ("Screening", "info"),
     "applied": ("Applied", "muted"),
 }
-LEAD_STAGE = {"interviewing": ("Interviewing", "info"), "offer": ("Offer", "ok"), "screening": ("Screening", "info"),
+LEAD_STAGE = {"interviewing": ("Interviewing", "info"), "final": ("Final stages", "info"), "offer": ("Offer", "ok"), "screening": ("Screening", "info"),
               "applied": ("Applied", "muted"), "closed": ("Closed", "muted")}
 FILLER = {"inc", "ltd", "llc", "pvt", "private", "limited", "software", "technologies", "technology", "labs",
           "ai", "hq", "the", "co", "corp", "company", "india"}
