@@ -393,7 +393,9 @@ anonymised caller hashes, never numbers.
 ## Interview assistant (VALR)
 
 - Private data: `/srv/valr-data` (root:1000, 0750; files 0640) holds `profile.json` and
-  `evaluation.json` from the profile import (never committed). It is mounted read-only
+  `evaluation.json` from the profile import, and `pronounce.json` (the TTS respelling map,
+  `{"Written": "Spoken"}`, read by `app/persona.py` via VALR_PRONOUNCE_PATH, default
+  `/data/pronounce.json`); never committed. It is mounted read-only
   as `/data` into `voice-agent-lab` and `voice-research`
   (`-v /srv/valr-data:/data:ro`; `deploy/research-setup.sh` adds it when the dir exists).
 - `.env`: VALR_OWNER_PHONE, VALR_OWNER_EMAILS, VALR_PROFILE_PATH=/data/profile.json,

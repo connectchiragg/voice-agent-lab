@@ -62,8 +62,9 @@ How a call flows (`app/pipeline.py`, `app/deepgram.py`):
    segment never ends inside a phrase: "a.m." in "at ten a.m. with Priya" is not
    a sentence end (it was, and split every calendar answer in two). Before Aura,
    `speakable()` drops web addresses ("kestrelapp.com" -> "kestrelapp"), writes
-   "a.m." as "AM" (Aura paused after each letter) and applies the respellings in
-   `app/persona.py` ("Brightline" -> "Bright Line"); captions keep the original.
+   "a.m." as "AM" (Aura paused after each letter) and applies a private respelling map
+   (`app/persona.py`, VALR_PRONOUNCE_PATH: "Acmecorp" -> "Acme Corp"); captions keep
+   the original.
 5. Audio goes to the browser as it arrives. Each segment's caption follows its
    audio, with its exact length; the browser reveals the words from where that
    audio started.
