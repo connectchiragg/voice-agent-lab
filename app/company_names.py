@@ -249,8 +249,12 @@ def key(name: str) -> str:
 
 def normalize(name: str) -> str:
     """Tidy casing and suffixes: "PLUGSCALE CONSULTING PRIVATE CONSULTING" -> "Plugscale Consulting";
-    "FourKites, Inc." -> "FourKites"; legal words dropped anywhere, repeated words once."""
-    tokens = [t for t in re.split(r"\s+", (name or "").replace(",", " ").strip()) if t]
+    "FourKites, Inc." -> "FourKites"; "Revantage Global Services India Private Limited" ->
+    "Revantage Global Services"; parentheticals dropped; legal words dropped anywhere; repeated
+    words once."""
+    text = re.sub(r"\([^)]*\)?|\[[^\]]*\]?", " ", name or "")
+    text = re.sub(r"\s+(?:india\s+)?(?:private|pvt\.?)(?:\s+(?:limited|ltd\.?))?\b", " ", text, flags=re.I)
+    tokens = [t for t in re.split(r"\s+", text.replace(",", " ").strip()) if t]
     out, seen = [], set()
     for token in tokens:
         bare = token.lower().strip(".,")
@@ -266,22 +270,54 @@ def normalize(name: str) -> str:
     return text
 
 
+# Trailing words that are never part of a brand when comparing spellings ("FurtherAI engineering",
+# "Razorpay Software", "Aspireapp").
+BRAND_JUNK = frozenset("engineering software app careers jobs hiring team recruiting hr".split())
+
+
+def brand(name: str) -> str:
+    """A name as compared and shown: normalised, parentheticals and meeting words gone, and
+    trailing non-brand words stripped ("SoundHound AI - 15-Min" -> "SoundHound AI",
+    "Guickly (Stealth Startup)" -> "Guickly", "Razorpay Software" -> "Razorpay",
+    "Aspireapp" -> "Aspire")."""
+    text = normalize(tidy(normalize(name)))
+    tokens = text.split()
+    while len(tokens) > 1 and tokens[-1].lower().strip(".,-") in BRAND_JUNK:
+        tokens.pop()
+    if len(tokens) == 1 and tokens[0].lower().endswith("app") and len(tokens[0]) >= 7 and not tokens[0].isupper():
+        tokens = [tokens[0][:-3]]  # A domain artefact: "Aspireapp" -> "Aspire".
+    return " ".join(tokens).strip(" -–|:,.;/&")
+
+
 def canonical(name: str, known: Iterable[str] = ()) -> str:
-    """The spelling to show for `name`: a known name for the same company wins (the longer one when
-    one is the other's prefix, "Chasi" -> "Chasi AI"; else the most common casing, "Fourkites" ->
-    "FourKites"); never a TLD added to a clean name ("Cermati.com" -> "Cermati")."""
-    name = normalize(name)
-    if not name:
-        return ""
-    matches = Counter(normalize(k) for k in known if k and same(k, name) and is_company(k, frozenset()))
-    if not matches:
-        if re.search(r"\.[a-z]{2,4}$", name) and not name.islower():
-            return name  # A brand like "Orvera.ai" with no other spelling known.
-        return name
-    longest = max(len(key(m)) for m in matches)
-    best = [m for m in matches if len(key(m)) == longest]
-    choice = max(best, key=lambda m: (matches[m], not m.isupper(), not m.islower(), -len(m)))
-    return choice if len(key(choice)) >= len(key(name)) else name
+    """The spelling to show for `name`, given the spellings stored for the same company (with
+    repeats: how often each was seen). Every spelling is cleaned first (`brand`). The shorter
+    clean form wins unless the longer one adds a real brand word: "Safe" -> "Safe Security",
+    "Chasi" -> "Chasi AI" only when "Chasi AI" is the most common spelling. Then the most
+    common casing ("Fourkites" -> "FourKites", "Micro1" -> "micro1"). Never a TLD added to a
+    clean name ("Cermati.com" -> "Cermati"), never a parenthetical."""
+    own = brand(name)
+    if not own or not is_company(own, frozenset()):
+        return own
+    counts = Counter(b for b in (brand(k) for k in known if k) if b and same(b, own) and is_company(b, frozenset()))
+    counts[own] += 0
+    by_key: dict[str, Counter] = {}
+    for spelling, n in counts.items():
+        by_key.setdefault(key(spelling).replace(" ", ""), Counter())[spelling] += n
+    totals = {k: sum(c.values()) for k, c in by_key.items()}
+    shortest = min(by_key, key=len)
+    chosen = shortest
+    for k in sorted(by_key, key=len):
+        if k == shortest:
+            continue
+        extra = k[len(shortest):] if k.startswith(shortest) else ""
+        if not extra:
+            continue
+        if extra == "ai" and totals[k] <= totals[chosen]:
+            continue  # "AI" is a brand word only when the longer spelling is the most common.
+        chosen = k
+    spellings = by_key[chosen]
+    return max(spellings, key=lambda m: (spellings[m], not m.isupper(), not m.islower(), -len(m)))
 
 
 def same(a: str, b: str) -> bool:
