@@ -340,6 +340,17 @@ Setup, after Temporal (above):
    ```
 
    The app container never gets it, so the live call path has no Claude client.
+   Background Claude calls go through OpenRouter with this same Anthropic key (BYOK)
+   when `OPENROUTER_API_KEY` is also in `.env.research` (app/llm_gateway.py); the
+   Anthropic key stays as the direct fallback:
+
+   ```sh
+   grep '^OPENROUTER_API_KEY=' .env | ssh ubuntu@<vm-ip> 'umask 077; cat >> ~/voice-agent-lab/.env.research'
+   ```
+
+   Verify with `sudo docker exec -i voice-research python - --runs 1 --only openrouter < scripts/openrouter_smoke.py`
+   (a few cents): every row ok and `is_byok: True`. Roll back to direct with
+   `LLM_GATEWAY=anthropic` in `.env.research` and a restart of `voice-research`.
 2. `cd ~/voice-agent-lab && sh deploy/research-setup.sh` builds the worker image
    and starts `voice-research` with `--env-file .env --env-file .env.research`.
 3. Rebuild and restart the app and `voice-callbacks` too (Updating, below): the
@@ -454,6 +465,8 @@ To roll back, run the same `docker rm -f` and `docker run` with the rollback tag
 | `TEMPORAL_DB_PASSWORD` | set by `deploy/temporal-setup.sh` | Postgres password of the `temporal` role; used only by the setup script |
 | `TELNYX_CONNECTION_ID`, `TELNYX_FROM_NUMBER` | `3071391970178893742`, `+12288888007` | Callback dials: the Call Control app and the caller ID |
 | `ANTHROPIC_API_KEY` | unset | VALR research, in `.env.research`, read only by `voice-research` |
+| `OPENROUTER_API_KEY`, `LLM_GATEWAY` | unset, `openrouter` when the key is set (else `anthropic`) | VALR research: background Claude calls via OpenRouter, pinned to Anthropic and run on our Anthropic key (BYOK, set up under openrouter.ai Integrations with "Never use shared capacity"); the voice LLM stays on Groq direct |
+| `LLM_GATEWAY_FALLBACK`, `LLM_BYOK_GUARD`, `LLM_GATEWAY_TIMEOUT_S` | `1`, `refuse`, `600` | An OpenRouter error retries on Anthropic direct (`0`: fail). A response with `usage.is_byok=false` logs "VALR BYOK ALERT"; `refuse` then skips OpenRouter for the rest of the process, `warn` only logs, `off` ignores. Agent calls time out after 600 s, the inner search, check and classify calls after 60 s |
 | `VALR_JOB_USD`, `VALR_JOBS_PER_CALLER_DAY`, `VALR_JOBS_PER_DAY`, `VALR_MONTH_USD` | `0.25`, `3`, `15`, `20` | VALR cost limits (README, Research callbacks); the app checks them at booking, the worker within each job |
 | `VALR_SEARCHES_PER_RESEARCHER`, `VALR_PAGES_PER_RESEARCHER`, `VALR_PAGE_CHARS`, `VALR_RESULTS_PER_CALL`, `VALR_MAX_ITER`, `VALR_RESEARCHER_MODEL`, `VALR_SYNTH_MODEL` | `3`, `3`, `4000`, `5`, `5`, `claude-haiku-5-5`, `claude-sonnet-5-5` | Per-researcher caps and models (any `Caps` field in app/research_agents.py as `VALR_<NAME>`) |
 | `VALR_HOST`, `VALR_ACCESS_AUD` | `valr.haciensus.com`, unset | The dashboard's hostname, and the AUD tag of its Cloudflare Access application (else `CF_ACCESS_AUD`; neither: the dashboard is closed) |

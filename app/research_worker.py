@@ -2,7 +2,8 @@
 
 Runs ResearchCallbackWorkflow and its activities on task queue `voice-research`, from
 the `worker` image target (Python 3.13 with crewai; the app image stays without it).
-The only process with ANTHROPIC_API_KEY in use: the live call path never calls Claude.
+The only process that calls Claude (through app/llm_gateway.py: OpenRouter BYOK or Anthropic
+direct): the live call path never calls Claude.
 
 Activities:
 
@@ -319,8 +320,10 @@ async def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     for noisy in ("httpx", "crewai", "LiteLLM", "opentelemetry"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
-    if not os.getenv("ANTHROPIC_API_KEY"):
-        sys.exit("ANTHROPIC_API_KEY is not set: VALR research cannot run.")
+    from app import llm_gateway
+    if missing := llm_gateway.required_key_missing():
+        sys.exit(f"{missing}: VALR research cannot run.")
+    llm_gateway.shared()  # Logs the gateway it uses.
     from app.interview_worker import InterviewActivities
     from app.interview_workflow import BlockCallWorkflow, CalendarSyncWorkflow, InterviewSlotWorkflow
     address = os.getenv("TEMPORAL_ADDRESS", "localhost:7233")
