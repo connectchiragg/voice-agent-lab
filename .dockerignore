@@ -3,6 +3,7 @@
 !app/
 !static/
 !requirements.lock
+!docs/phone-recordings.md
 !requirements-worker.lock
 **/__pycache__
 **/*.py[cod]

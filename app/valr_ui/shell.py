@@ -173,6 +173,11 @@ THEME_BOOT = ("<script>try{var t=localStorage.getItem('valr-theme');var d=docume
               "if(!d.dataset.theme&&(t==='light'||t==='dark'))d.dataset.theme=t;}catch(_){}</script>")
 
 
+def pwa_head() -> str:
+    from app.valr_ui import pwa  # The Home Screen app: manifest, iOS metas, icon, valr-pwa.js.
+    return pwa.head()
+
+
 def head(title: str, theme: str | None, csrf: str = "") -> str:
     """The <head> shared by the app, the sign-in pages and the error page (left open)."""
     token = f'<meta name="csrf-token" content="{e(csrf)}">' if csrf else ""
@@ -184,7 +189,7 @@ def head(title: str, theme: str | None, csrf: str = "") -> str:
 <meta name="theme-color" content="#0b0c0f" media="(prefers-color-scheme: dark)">
 <title>{e(title)} · VALR</title>
 <link rel="icon" href="{ICON}">{THEME_BOOT}{FONTS}
-<link rel="stylesheet" href="{asset('valr-ds.css')}">"""
+<link rel="stylesheet" href="{asset('valr-ds.css')}">{pwa_head()}"""
 
 
 def call_button() -> str:

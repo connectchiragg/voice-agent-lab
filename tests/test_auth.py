@@ -438,7 +438,7 @@ def test_every_route_is_public_or_needs_the_owner():
     assert not unclassified, f"Add these to app/auth/gate.py's PUBLIC or OWNER lists: {unclassified}"
     public = sorted(path for path in paths if gate.classify(path) == "public")
     assert public == sorted({"/healthz", "/hooks/fathom", "/hooks/gcal", "/hooks/gmail", "/hooks/granola",
-                             "/hooks/recording-upload",
+                             "/hooks/recording-upload", "/manifest.webmanifest", "/sw.js",
                              "/hooks/telegram", "/login", "/login/google",
                              "/logout", "/oauth/google/callback", "/private", "/static",
                              "/telnyx/webhook", "/ws/telnyx"}), public
@@ -448,9 +448,13 @@ def test_every_route_is_public_or_needs_the_owner():
                  "/valr/api/leads/{lead_id}/override", "/valr/api/recording", "/valr/api/past-interviews",
                  "/valr/interviews/past/{slug}", "/valr/leads", "/valr/api/notetakers/{provider}/connect",
                  "/valr/api/notifications", "/valr/api/notifications/read", "/valr/api/notifications/settings",
-                 "/valr/api/recording/audio", "/valr/api/phone/status", "/valr/api/phone/token"):
+                 "/valr/api/recording/audio", "/valr/api/phone/status", "/valr/api/phone/token",
+                 "/valr/settings/phone-help",
+                 "/valr/api/push", "/valr/api/push/subscribe", "/valr/api/push/unsubscribe", "/valr/api/push/test"):
         assert path in paths and gate.classify(path) == "owner", path
     assert gate.classify("/valrx") is None and gate.classify("/staticx") is None
+    assert gate.classify("/static/icons/apple-touch-icon.png") == "public"  # The Home Screen icons.
+    assert gate.classify("/sw.js.map") is None and gate.classify("/manifest.webmanifest/x") is None
     assert gate.classify("/hooks/gmail") == "public" and gate.classify("/hooks/fathom") == "public"
 
 
