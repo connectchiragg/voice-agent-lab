@@ -2,7 +2,8 @@
 
 Per provider (app/notetakers/<name>.py, contract in app/notetakers/base.py): verify a
 key, list recordings in a date range, get one recording's transcript and summary
-(normalised to the profile importer's meeting shape), and its share / embed links.
+(normalised to the profile importer's meeting shape), and its share link. Fathom
+recordings play inside VALR from Fathom's official download API (app/notetakers/media.py).
 
 The owner connects a provider on the dashboard ("Get set up"): the API key is posted
 to the server, checked with one call, stored Fernet-encrypted (app/notetakers/store.py)
@@ -32,9 +33,7 @@ INFO: dict[str, dict[str, Any]] = {
         "label": "Fathom", "key_label": "Fathom API key",
         "key_help": "In Fathom: Settings → API Access → Generate API key.",
         "gets": "Recordings, transcripts and summaries; new ones arrive by webhook.",
-        "video": "embed", "import": False,
-        "share_hint": "To play recordings inside VALR, set Fathom sharing to \u2018Anyone with the link\u2019.",
-        "share_help": "https://help.fathom.video/en/articles/295616"},
+        "video": "player", "import": False},
     "fireflies": {
         "label": "Fireflies", "key_label": "Fireflies API key",
         "key_help": "In Fireflies: Integrations → Fireflies API → copy the API key.",
@@ -103,13 +102,20 @@ async def status_view(connection: Any) -> dict[str, dict[str, Any]]:
                      "connected_at": _iso((row or {}).get("connected_at")),
                      "last_ok_at": _iso((row or {}).get("last_ok_at")),
                      "can_store": bool(token_key()), "optional": bool(info.get("optional")),
-                     "share_hint": info.get("share_hint", ""), "share_help": info.get("share_help", ""),
                      **{k: info[k] for k in ("key_label", "key_help", "gets", "video", "import")}}
     return out
 
 
 def _iso(moment: datetime | None) -> str | None:
     return moment.astimezone(timezone.utc).isoformat() if moment else None
+
+
+def from_row(row: dict[str, Any]) -> Recording:
+    """A stored row -> Recording (links, company and people; no emails, no transcript)."""
+    return Recording(row["provider"], row["external_id"], row.get("title") or "", _iso(row.get("started_at")),
+                     _iso(row.get("ended_at")), row.get("share_url") or "", "",
+                     company=row.get("company") or "", company_domain=row.get("company_domain") or "",
+                     interviewers=store.names(row), invitee_hashes=store.names(row, "invitee_hashes"))
 
 
 def connected(statuses: dict[str, dict[str, Any]]) -> list[str]:
@@ -175,8 +181,7 @@ async def find_for_event(connection: Any, event: Any, http: httpx.AsyncClient,
     await store.setup(connection)
     row = await store.by_event(connection, event.key)
     if row:
-        return Recording(row["provider"], row["external_id"], row["title"], _iso(row["started_at"]),
-                         _iso(row["ended_at"]), row["share_url"], row["embed_url"])
+        return from_row(row)
     from app.interview_worker import owner_emails
     statuses = statuses or await status_view(connection)
     start, end = base._dt(event.start_utc), base._dt(event.end_utc)
@@ -222,9 +227,34 @@ async def recording_view(connection: Any, recording: Recording, http: httpx.Asyn
         moments.append({"label": moment["label"], "seconds": moment["seconds"],
                         "clock": base.clock(moment["seconds"]), "url": base.safe_link(url)})
     return {"provider": recording.provider, "label": INFO[recording.provider]["label"],
+            "id": f"{recording.provider}:{recording.external_id}",
             "title": recording.title, "start": recording.start,
-            "share_url": base.safe_link(recording.share_url), "embed_url": base.safe_embed(recording.embed_url),
+            "share_url": base.safe_link(recording.share_url),
+            "player": INFO[recording.provider]["video"] == "player",
+            "company": recording.company, "interviewers": recording.interviewers,
             "moments": moments, "note": note}
+
+
+BACKFILL_DAYS = 180
+
+
+async def backfill_details(connection: Any, http: httpx.AsyncClient, days: int = BACKFILL_DAYS,
+                           now: datetime | None = None) -> dict[str, int]:
+    """Company and interviewers for the Fathom recordings VALR already stores (from Fathom's
+    calendar invitees), so past interviews keep them after the calendar forgets the event.
+    Updates existing rows only (nothing new is handed to the evaluation). -> {listed, updated}."""
+    key = await api_key(connection, "fathom")
+    if not key:
+        return {"listed": 0, "updated": 0}
+    now = now or datetime.now(timezone.utc)
+    await store.setup(connection)
+    found = await fathom.list_recordings(key, now - timedelta(days=days), now, http)
+    updated = 0
+    for recording in found:
+        if recording.external_id and await store.set_details(connection, recording.public()):
+            updated += 1
+    logger.info("VALR Fathom details: %d listed, %d updated", len(found), updated)
+    return {"listed": len(found), "updated": updated}
 
 
 async def fetch_meeting(provider: str, external_id: str) -> dict | None:

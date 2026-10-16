@@ -261,14 +261,13 @@ def notetakers_view(states: dict) -> dict:
     from app import notetakers
     return {name: {"label": info["label"], "state": states.get(name, "not_connected"),
                    "account": "", "connected_at": None, "last_ok_at": None, "can_store": True,
-                   "optional": bool(info.get("optional")), "share_hint": info.get("share_hint", ""),
-                   "share_help": info.get("share_help", ""),
+                   "optional": bool(info.get("optional")),
                    **{k: info[k] for k in ("key_label", "key_help", "gets", "video", "import")}}
             for name, info in notetakers.INFO.items()}
 
 
 def sample_recording(found: bool = True) -> dict:
-    """A made-up /valr/api/recording answer: a Fathom embed and key moments."""
+    """A made-up /valr/api/recording answer: a Fathom recording that plays here, and key moments."""
     if not found:
         return {"ok": True, "found": False}
     share = "https://fathom.video/calls/424242"
@@ -278,7 +277,8 @@ def sample_recording(found: bool = True) -> dict:
                (2710, "What questions do you have for us?")]
     return {"ok": True, "found": True, "provider": "fathom", "label": "Fathom",
             "title": "Orbit Labs: Backend Engineer, technical round", "start": None,
-            "share_url": share, "embed_url": "https://fathom.video/embed/sampletoken123",
+            "id": "fathom:424242", "share_url": share, "player": True,
+            "company": "Orbit Labs", "interviewers": ["Rhea Sen", "Tomas Ito"],
             "moments": [{"label": label, "seconds": t, "clock": f"{t // 60}:{t % 60:02d}",
                          "url": f"{share}?timestamp={t}"} for t, label in moments], "note": ""}
 

@@ -302,9 +302,11 @@ def stage(value: Any) -> str:
 
 
 def company_name(value: Any) -> str:
-    """The interviewing company; "" when the importer recorded the notetaker (e.g. "Fathom")."""
+    """The interviewing company; "" when it is not one (app/company_names.py: the notetaker,
+    e.g. "Fathom", a round label or the owner's name)."""
+    from app import company_names
     text = scrub(value or "").strip()
-    return "" if text.lower() in RECORDERS else text
+    return "" if text.lower() in RECORDERS or not company_names.is_company(text) else text
 
 
 def day_label(date: str) -> str:
@@ -534,12 +536,19 @@ def read_json(path: Path) -> dict[str, Any] | None:
 def profile_files() -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
     """(performance, pay target) from the private data dir; None if missing.
 
-    performance.json (VALR_PERFORMANCE_PATH, default /data/performance.json, schema 2 or 3);
+    performance.json (VALR_PERFORMANCE_PATH, default /data/performance.json, schema 2 or 3),
+    with impressions it lacks filled in from VALR_PERFORMANCE_FALLBACK (default
+    /data/performance.json, the read-only copy the live file was seeded from);
     only when it is missing, the old interview_scores.json + evaluation.json, adapted.
     """
     from app.profile.config import settings
     cfg = settings()
-    perf = read_json(Path(os.getenv("VALR_PERFORMANCE_PATH") or "/data/performance.json").expanduser())
+    path = Path(os.getenv("VALR_PERFORMANCE_PATH") or "/data/performance.json").expanduser()
+    perf = read_json(path)
+    fallback = Path(os.getenv("VALR_PERFORMANCE_FALLBACK") or "/data/performance.json").expanduser()
+    if perf and fallback != path:  # The live copy may predate the impressions: fill them in.
+        from app.profile.impressions import merge_missing
+        perf = merge_missing(perf, read_json(fallback))
     if not (perf and isinstance(perf.get("schema_version"), int) and perf["schema_version"] >= 2):
         perf = performance_from_v1(read_json(cfg.scores_path.with_suffix(".json")),
                                    read_json(cfg.evaluation_path))

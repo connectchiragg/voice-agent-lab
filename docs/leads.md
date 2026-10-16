@@ -115,6 +115,11 @@ on the page and in the worker.
   temperature uses it, and the stage part says "(set by you)".
 - **Merge into** folds the lead, with its touchpoints and people, into another lead.
 
+Lead ids come from the company name, so when the company resolver renames a company the
+lead's id changes. Each rebuild maps a vanished id to the lead now holding most of its
+touchpoints (as saved at the last refresh), and the corrections follow it; the worker then
+re-keys `lead_overrides` to the new id before it saves (`leads_store.move_overrides`).
+
 API: `POST /valr/api/leads/<id>/override` {action: dismiss | stage | merge, stage?, into?}.
 It needs the owner, the CSRF token and a same-origin JSON request.
 

@@ -245,104 +245,15 @@ document.addEventListener("submit", async event => {
 });
 if (location.hash.startsWith("#nt-")) openConnect(location.hash.slice(4));
 
-// Past interviews: the recording (embedded when the provider allows it, else a link)
-// and the key moments as timestamp links. Built with DOM calls only; URLs come from
-// the server's allow-list and are checked again here.
-const EMBED_HOSTS = ["fathom.video", "app.fireflies.ai", "share.fireflies.ai"];
-function httpsUrl(url, hosts = null) {
-  try {
-    const parsed = new URL(url);
-    return parsed.protocol === "https:" && (!hosts || hosts.includes(parsed.hostname)) ? parsed.href : "";
-  } catch { return ""; }
-}
-function node(tag, attrs = {}, text = "") {
-  const element = document.createElement(tag);
-  for (const [key, value] of Object.entries(attrs)) element.setAttribute(key, value);
-  if (text) element.textContent = text;
-  return element;
-}
-function renderRecording(body, data) {
-  const out = [];
-  if (!data.found) {
-    out.push(node("p", {class: "muted small"}, "No recording found for this interview in your connected notetakers."));
-    const link = node("a", {class: "btn small", href: "#nt-fathom", "data-connect-open": "fathom"}, "Connect a notetaker");
-    out.push(link);
-    body.replaceChildren(...out);
-    return;
-  }
-  const verb = data.provider === "granola" ? `Open the note in ${data.label}` : `Watch on ${data.label}`;
-  const embed = httpsUrl(data.embed_url, EMBED_HOSTS);
-  if (embed) {
-    const frame = node("div", {class: "player"});
-    frame.append(node("iframe", {src: embed, title: `${data.label} recording: ${data.title || "interview"}`,
-      loading: "lazy", allow: "fullscreen; picture-in-picture", allowfullscreen: "", referrerpolicy: "strict-origin-when-cross-origin"}));
-    out.push(frame);
-    out.push(node("p", {class: "muted small"},
-      "If the player stays blank, the recording's sharing in Fathom isn't \u201cAnyone with the link\u201d; use the link below."));
-  }
-  const share = httpsUrl(data.share_url);
-  if (share) {
-    out.push(node("a", {class: `btn ${embed ? "small" : "primary"} watch`, href: share, target: "_blank",
-      rel: "noopener noreferrer"}, `${verb} ↗`));
-  }
-  if (data.moments?.length) {
-    out.push(node("h4", {class: "sub-title"}, "Key moments"));
-    const list = node("ol", {class: "moments"});
-    for (const moment of data.moments) {
-      const item = node("li");
-      const url = httpsUrl(moment.url);
-      item.append(url ? node("a", {class: "mono", href: url, target: "_blank", rel: "noopener noreferrer"}, moment.clock)
-                      : node("span", {class: "mono"}, moment.clock));
-      item.append(node("span", {}, ` ${moment.label}`));
-      list.append(item);
-    }
-    out.push(list);
-  }
-  if (data.note) out.push(node("p", {class: "muted small"}, data.note));
-  body.replaceChildren(...out);
-}
-async function fetchRecording(body, query) {
-  body.textContent = "Looking for the recording…";
-  try {
-    const response = await fetch(`/valr/api/recording?${query}`, {credentials: "same-origin", cache: "no-store"});
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(typeof data.detail === "string" ? data.detail : `HTTP ${response.status}`);
-    renderRecording(body, data);
-  } catch (error) {
-    body.textContent = `The recording couldn't be loaded: ${error.message}`;
-  }
-}
+// Past interviews: the recording, its player and key moments live in static/valr-player.js
+// (its own module). The drawer asks it to fill the drawer's recording section.
 function loadRecording(dialog) {
   const section = dialog.querySelector("[data-recording-ref]");
   if (!section || section.dataset.loaded) return;
   section.dataset.loaded = "1";
-  fetchRecording(section.querySelector("[data-recording-body]"), `ref=${encodeURIComponent(section.dataset.recordingRef)}`);
+  document.dispatchEvent(new CustomEvent("valr:recording", {detail: {
+    body: section.querySelector("[data-recording-body]"), query: `ref=${encodeURIComponent(section.dataset.recordingRef)}`}}));
 }
-// A past interview's page: the server shows the player; the key moments (or, when nothing is
-// stored yet, the whole recording) come from /valr/api/recording.
-document.querySelectorAll("[data-moments-id]").forEach(async box => {
-  const body = box.querySelector("[data-recording-body]");
-  if (box.hasAttribute("data-full")) {
-    fetchRecording(body, `id=${encodeURIComponent(box.dataset.momentsId)}`);
-    return;
-  }
-  try {
-    const response = await fetch(`/valr/api/recording?id=${encodeURIComponent(box.dataset.momentsId)}`,
-      {credentials: "same-origin", cache: "no-store"});
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok || !data.found || !data.moments?.length) { box.hidden = true; return; }
-    renderRecording(body, {...data, embed_url: "", share_url: ""});
-  } catch { box.hidden = true; }
-});
-document.addEventListener("click", event => {
-  const button = event.target.closest("[data-recording-id]");
-  if (!button) return;
-  const dialog = document.getElementById("recording-dialog");
-  if (!dialog) return;
-  dialog.querySelector("#recording-title").textContent = button.closest(".card-score")?.querySelector("h4")?.firstChild?.textContent ?? "Recording";
-  if (!dialog.open) dialog.showModal();
-  fetchRecording(dialog.querySelector("[data-recording-body]"), `id=${encodeURIComponent(button.dataset.recordingId)}`);
-});
 
 // Prep checklists: each tick is saved on the server (so Home can show it done).
 document.querySelectorAll("input[data-prep-ref]").forEach(box => {

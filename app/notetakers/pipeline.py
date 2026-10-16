@@ -8,7 +8,9 @@ recordings" on the dashboard, an uploaded Granola export) goes through `intake`:
    transcript, an export), is kept encrypted until the evaluation takes it;
 2. it is matched to a calendar event (time window + attendee emails), so a past
    interview on the dashboard can show its recording;
-3. a new recording is handed to the evaluation hook.
+3. a new recording is handed to the evaluation hook;
+4. a new Fathom recording that matched an interview starts its video download in the
+   background (app/notetakers/media.prewarm), so it plays at once when opened.
 
 The hook (the interface the evaluation side implements):
 
@@ -94,4 +96,7 @@ async def intake(connection: Any, recording: Recording, origin: str, hook: Hook 
     if new:
         status = await hand_off(connection, recording.provider, recording.external_id,
                                 recording.meeting, hook)
+        if event:
+            from app.notetakers import media
+            media.prewarm(recording.provider, recording.external_id)
     return {"new": new, "event_key": event_key, "eval": status}

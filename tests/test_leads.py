@@ -143,3 +143,50 @@ def test_overrides_dismiss_stage_and_merge():
     fresh = touches + [Touch("gmail:n3", "email", NOW - timedelta(hours=1), "Nimbus", "nimbus.example", [], thread="t-new")]
     assert "Nimbus" in by_company(leads.build(fresh, NOW, o))  # A new thread starts it again.
     assert leads.Overrides(merges={"a": "b", "b": "a"}).target("a") in ("a", "b")  # No loop.
+
+
+def test_corrections_follow_a_lead_the_resolver_renamed():
+    # Saved under the old name's id; the resolver now names the company differently.
+    def touches(company, lead_id):
+        return [Touch("gmail:r1", "email", NOW - timedelta(days=2), company, "", [], stage_hint="screening", lead_id=lead_id),
+                Touch("gmail:r2", "email", NOW - timedelta(days=1), company, "", [], stage_hint="screening", lead_id=lead_id),
+                Touch("gmail:k1", "email", NOW - timedelta(days=1), "Kestrel", "", [], stage_hint="applied", lead_id=lead_id)]
+    old_id = leads.lead_id_for(leads.company_key("Interview L2"))
+    other = leads.lead_id_for(leads.company_key("Kestrel"))
+    stored = touches("Quillworks", old_id)
+    stored[2].lead_id = other
+    o = leads.Overrides(stages={old_id: "offer"}, names={old_id: "Quillworks Robotics"}, merges={other: old_id})
+    built = leads.build(stored, NOW, o)
+    assert len(built) == 1 and built[0].id != old_id
+    assert built[0].stage == "offer" and built[0].stage_manual and built[0].company == "Quillworks Robotics"
+    assert {t.id for t in built[0].touches} == {"gmail:r1", "gmail:r2", "gmail:k1"}  # The merge followed too.
+    assert o.aliases == {old_id: built[0].id}  # What the worker moves in lead_overrides.
+
+
+def test_a_renamed_merged_lead_stays_merged():
+    target = leads.lead_id_for("vela")
+    source_old = leads.lead_id_for("kite old")
+    stored = [Touch("gmail:v1", "email", NOW - timedelta(days=3), "Vela", "", [], lead_id=target),
+              Touch("gmail:k1", "email", NOW - timedelta(days=2), "Kite Labs", "", [], lead_id=target)]  # Saved under the target.
+    built = leads.build(stored, NOW, leads.Overrides(merges={source_old: target}))
+    assert len(built) == 1 and built[0].id == target
+
+
+def test_move_overrides_rekeys_the_stored_corrections():
+    import asyncio
+    from app import leads_store
+
+    class Cursor:
+        rowcount = 1
+
+    class Connection:
+        def __init__(self):
+            self.calls = []
+
+        async def execute(self, sql, args):
+            self.calls.append((sql.split(" SET ")[1].split(" =")[0], args))
+            return Cursor()
+
+    connection = Connection()
+    assert asyncio.run(leads_store.move_overrides(connection, {"lead-old": "lead-new", "same": "same"})) == 2
+    assert connection.calls == [("lead_id", ("lead-new", "lead-old")), ("value", ("lead-new", "lead-old"))]

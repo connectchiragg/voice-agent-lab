@@ -277,48 +277,25 @@ def expand(raw: RawEvent) -> list[CalEvent]:
 # Interviews and blocks.
 
 def company_domain(event: CalEvent) -> str:
-    """The first non-personal, non-scheduling-tool domain among the organizer and attendees."""
-    for email in [event.organizer] + [attendee.email for attendee in event.attendees]:
-        domain = email.rpartition("@")[2]
-        if domain and domain not in GENERIC_DOMAINS and not domain.endswith(
-                ("calendar.google.com", ".google.com")):
-            return domain
-    return ""
+    """The company's domain among the organizer and attendees (app/company_names.py)."""
+    return _resolved(event).domain
 
 
-TITLE_COMPANY = [
-    re.compile(r"interview (?:with|at|for) (?P<c>[A-Z][\w.&' -]{1,40}?)(?:\s*[-|:(,]|\s+for\b|$)", re.I),
-    re.compile(r"<>\s*(?P<c>[A-Z][\w.&' -]{1,40}?)\s*[|:(,-]", re.I),
-    re.compile(r"\b(?P<c>[A-Z][\w-]*\.(?:ai|io|co|so|dev|tech))\b"),
-    re.compile(r"\)\s*-\s*(?P<c>[A-Z][\w.&' -]{1,30}?)\s+interview", re.I),
-    re.compile(r"-\s*(?P<c>[A-Z][\w.&' -]{1,30}?)\s*$"),
-]
-NOT_COMPANIES = frozenset("me you round r1 r2 r3 interview call meeting min and with "
-                          "screen intro".split())
-
-
-
-def not_company_words() -> frozenset[str]:
-    """Generic title words, plus the owner's own name (VALR_OWNER_NAME / VALR_CANDIDATE_NAME)."""
-    own = {w.lower() for key in ("VALR_OWNER_NAME", "VALR_CANDIDATE_NAME") for w in os.getenv(key, "").split()}
-    return NOT_COMPANIES | own
+def is_company_name(name: str) -> bool:
+    """False for round labels and filler ("L2- Alex", "Round 2", "Interview") or the owner's name."""
+    from app import company_names
+    return company_names.is_company(name)
 
 
 def company_name(event: CalEvent) -> str:
-    """A best guess at the company, from the title, else the attendees' domain."""
-    for pattern in TITLE_COMPANY:
-        match = pattern.search(event.title)
-        if match:
-            name = match.group("c").strip(" -|:,.")
-            name = re.sub(r"\s+(Software )?(Private|Pvt\.?)( Limited| Ltd\.?)?$", "", name, flags=re.I)
-            if len(name) >= 2 and not set(name.lower().split()) <= not_company_words():
-                return name
-    domain = company_domain(event)
-    if domain:
-        label = domain.split(".")
-        core = label[-3] if len(label) >= 3 and label[-2] in ("co", "com") else label[-2] if len(label) >= 2 else label[0]
-        return core.capitalize()
-    return ""
+    """The company (app/company_names.py, the one resolver); "" when none is identified."""
+    return _resolved(event).name
+
+
+def _resolved(event: CalEvent):
+    from app import company_names
+    return company_names.resolve(attendees=[event.organizer] + [a.email for a in event.attendees],
+                                 title=event.title)
 
 
 def is_briefable(event: CalEvent) -> bool:

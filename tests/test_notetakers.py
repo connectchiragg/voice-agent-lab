@@ -33,8 +33,8 @@ FATHOM_ITEM = {
     "recording_id": 4242, "title": "Orbit <> Candidate", "meeting_title": "Orbit Labs: technical round",
     "url": "https://fathom.video/calls/4242", "share_url": "https://fathom.video/share/tokABC123",
     "recording_start_time": "2026-10-16T09:00:00Z", "recording_end_time": "2026-10-16T09:58:00Z",
-    "calendar_invitees": [{"name": "Ana Ruiz", "email": "ana.ruiz@orbit.example"},
-                          {"name": "Me", "email": OWNER}],
+    "calendar_invitees": [{"name": "Ana Ruiz", "email": "ana.ruiz@orbit.example", "is_external": True},
+                          {"name": "Me", "email": OWNER, "is_external": False}],
     "transcript": [{"speaker": {"display_name": "Ana Ruiz"}, "text": "How would you shard a busy Postgres table?",
                     "timestamp": "00:01:35"},
                    {"speaker": {"display_name": "Sam"}, "text": "By tenant, then by time.", "timestamp": "00:01:50"}],
@@ -63,7 +63,10 @@ def test_fathom_lists_with_api_key_header_and_pages_by_cursor():
     assert seen[0].url.params["created_after"] == "2026-10-15T00:00:00Z"
     first = items[0]
     assert first.share_url == "https://fathom.video/calls/4242"
-    assert first.embed_url == "https://fathom.video/embed/tokABC123"
+    assert first.embed_url == ""  # The undocumented iframe is gone; the video plays from the download API.
+    assert first.company == "Orbit Labs" and first.company_domain == "orbit.example"  # The title's spelling.
+    assert first.interviewers == ["Ana Ruiz"] and first.invitee_hashes == [base.email_hash("ana.ruiz@orbit.example")]
+    assert "ana.ruiz@orbit.example" not in json.dumps(first.public())  # Never an address stored.
     assert "ana.ruiz@orbit.example" in first.attendee_emails
     assert "email" not in json.dumps(first.public()) and "@" not in json.dumps(first.public())
 
@@ -93,10 +96,8 @@ def test_fathom_refused_key_and_one_recording_normalised():
     assert all("@" not in p for p in rec.meeting["participants"])
 
 
-def test_fathom_embed_only_for_share_links():
-    assert fathom.embed_url("https://fathom.video/share/abc") == "https://fathom.video/embed/abc"
-    for url in ("https://fathom.video/calls/1", "http://fathom.video/share/abc", "https://evil.example/share/abc"):
-        assert fathom.embed_url(url) == ""
+def test_fathom_timestamp_links_and_no_embed():
+    assert not hasattr(fathom, "embed_url")
     assert fathom.timestamp_url("https://fathom.video/calls/1", 95) == "https://fathom.video/calls/1?timestamp=95"
 
 
@@ -254,11 +255,30 @@ def test_key_moments_from_summary_links_then_questions():
     assert base.clock(95) == "1:35" and base.clock(3725) == "1:02:05"
 
 
-def test_only_allowed_hosts_are_embedded():
-    assert base.safe_embed("https://fathom.video/embed/x") == "https://fathom.video/embed/x"
-    assert base.safe_embed("https://evil.example/embed/x") == ""
-    assert base.safe_embed("javascript:alert(1)") == ""
+def test_only_https_links():
+    assert not hasattr(base, "safe_embed")
     assert base.safe_link("javascript:alert(1)") == ""
+
+
+def test_invitee_details_company_people_and_no_addresses():
+    invitees = [{"name": "Maya Lin", "email": "maya@talent.quillworks.example", "is_external": True},
+                {"name": "Dev Kapoor", "email": "dev@quillworks.example", "is_external": True},
+                {"name": "Pat Friend", "email": "pat@gmail.com", "is_external": True},
+                {"name": "Owner", "email": OWNER, "is_external": False},
+                {"name": "Notetaker", "email": "bot@fathom.video", "is_external": True}]
+    details = base.invitee_details(invitees, {OWNER})
+    assert details["company"] == "Quillworks" and details["company_domain"] in ("quillworks.example", "talent.quillworks.example")
+    assert details["interviewers"] == ["Maya Lin", "Dev Kapoor", "Pat Friend"]
+    assert len(details["invitee_hashes"]) == 3 and "@" not in "".join(details["invitee_hashes"])
+    only_freemail = base.invitee_details([{"name": "Pat", "email": "pat@gmail.com", "is_external": True}], {OWNER})
+    assert only_freemail["company"] == "" and only_freemail["interviewers"] == ["Pat"]
+
+
+@pytest.mark.parametrize("name, ok", [("L2- Sam", False), ("Round 2", False), ("Interview", False),
+                                      ("r3", False), ("Sam Rivera", False), ("Quillworks", True),
+                                      ("Orbit Labs", True), ("", False)])
+def test_round_labels_and_the_owner_are_never_a_company(name, ok):
+    assert base.is_company(name, {"sam", "rivera"}) is ok
 
 
 # ---------- The evaluation hand-off ----------
@@ -267,7 +287,8 @@ class FakeStore:
     """In-memory stand-in for app/notetakers/store.py (same function names)."""
 
     def __init__(self):
-        self.keys, self.recordings, self.events = {}, {}, {}
+        self.keys, self.recordings, self.events, self.media = {}, {}, {}, {}
+        self.clock = lambda: datetime.now(timezone.utc)
 
     def install(self, monkeypatch):
         async def setup(c):
@@ -311,12 +332,33 @@ class FakeStore:
 
         async def recording(c, provider, external_id):
             row = self.recordings.get((provider, external_id))
-            return None if row is None else {"title": row.get("title", ""), "started_at": None, "ended_at": None,
+            return None if row is None else {"provider": provider, "external_id": external_id,
+                                             "title": row.get("title", ""), "started_at": None, "ended_at": None,
                                              "share_url": row.get("share_url", ""),
-                                             "embed_url": row.get("embed_url", "")}
+                                             "embed_url": row.get("embed_url", ""),
+                                             "company": row.get("company", ""),
+                                             "interviewers": json.dumps(row.get("interviewers") or [])}
 
         async def clear_sealed(c, provider, external_id):
             self.recordings[(provider, external_id)]["sealed"] = None
+
+        async def many(c, keys):
+            return {k: {**self.recordings[k], "provider": k[0], "external_id": k[1]}
+                    for k in keys if k in self.recordings}
+
+        async def set_details(c, rec):
+            row = self.recordings.get((rec["provider"], rec["external_id"]))
+            if row is None:
+                return False
+            row.update({k: rec[k] for k in ("company", "company_domain", "interviewers", "invitee_hashes")})
+            return True
+
+        async def get_media(c, provider, external_id):
+            return self.media.get((provider, external_id))
+
+        async def save_media(c, provider, external_id, media):
+            self.media[(provider, external_id)] = {**{k: None for k in store.MEDIA_FIELDS}, **media,
+                                                   "updated_at": self.clock()}
 
         for name, fn in locals().items():
             if name != "self" and callable(fn):
@@ -490,10 +532,12 @@ def test_granola_webhook_fetches_the_named_note_and_fireflies_has_none(client, m
     assert client.post("/hooks/fireflies", content=b"{}", headers=GOOD).status_code in (404, 405)
 
 
-def test_recording_endpoint_returns_embed_and_moments(client, monkeypatch):
+def test_recording_endpoint_returns_player_and_moments(client, monkeypatch):
     async def recording(connection, provider, external_id):
-        return {"title": "Orbit", "started_at": None, "ended_at": None,
-                "share_url": "https://fathom.video/calls/4242", "embed_url": "https://fathom.video/embed/tokABC123"}
+        return {"provider": provider, "external_id": external_id, "title": "Orbit", "started_at": None,
+                "ended_at": None, "share_url": "https://fathom.video/calls/4242",
+                "embed_url": "https://fathom.video/embed/tokABC123", "company": "Orbit",
+                "interviewers": '["Ana Ruiz"]'}
 
     async def get_recording(key, external_id, http, listed=None):
         listed.meeting = fathom.normalize_fathom(FATHOM_ITEM)
@@ -504,7 +548,8 @@ def test_recording_endpoint_returns_embed_and_moments(client, monkeypatch):
     monkeypatch.setenv("FATHOM_API_KEY", FAKE_KEY)
     assert client.get("/valr/api/recording?id=fathom:4242").status_code == 403  # Access login needed.
     data = client.get("/valr/api/recording?id=fathom:4242", headers=GOOD).json()
-    assert data["found"] and data["embed_url"] == "https://fathom.video/embed/tokABC123"
+    assert data["found"] and data["player"] is True and data["id"] == "fathom:4242" and "embed_url" not in data
+    assert data["company"] == "Orbit" and data["interviewers"] == ["Ana Ruiz"]
     assert data["moments"][0] == {"label": "Sharding question", "seconds": 95, "clock": "1:35",
                                   "url": "https://fathom.video/share/tokABC123?timestamp=95"}
     assert FAKE_KEY not in json.dumps(data)
@@ -551,12 +596,15 @@ def test_past_interview_page_plays_or_finds_the_recording(client, monkeypatch):
     async def stored(interview):
         if interview["id"] == "fathom:1000":
             return None
-        return {"provider": "fathom", "share_url": "https://fathom.video/share/x",
-                "embed_url": "https://fathom.video/embed/x", "title": "Interview"}
+        return {"provider": "fathom", "share_url": "https://fathom.video/calls/1001", "title": "Interview"}
 
     monkeypatch.setattr(routes, "load_recording", stored)
     page = client.get("/valr/interviews/past/fathom-1001", headers=GOOD).text
-    assert '<iframe src="https://fathom.video/embed/x"' in page and 'data-moments-id="fathom:1001"' in page
+    assert "<iframe" not in page and "fathom.video/embed" not in page
+    assert 'data-player="fathom:1001"' in page and 'data-moments-id="fathom:1001"' in page
+    assert '<video controls preload="metadata" playsinline' in page
+    assert 'href="https://fathom.video/calls/1001"' in page and "Open in Fathom" in page  # The fallback link.
+    assert "valr-player.js" in page
     missing = client.get("/valr/interviews/past/fathom-1000", headers=GOOD).text
     assert 'data-moments-id="fathom:1000" data-full' in missing  # Asks /valr/api/recording?id=.
 
@@ -576,7 +624,7 @@ def test_store_round_trip_on_postgres():
 
     async def main():
         async with await psycopg.AsyncConnection.connect(os.environ["VALR_TEST_POSTGRES"], autocommit=True) as c:
-            await c.execute("DROP TABLE IF EXISTS notetaker_credentials, notetaker_recordings")
+            await c.execute("DROP TABLE IF EXISTS notetaker_credentials, notetaker_recordings, recording_media")
             await store.setup(c)
             await store.save_key(c, token_key, "fathom", FAKE_KEY, "")
             cursor = await c.execute("SELECT secret FROM notetaker_credentials")
@@ -588,7 +636,9 @@ def test_store_round_trip_on_postgres():
             assert await store.upsert_recording(c, rec.public(), "webhook", "sealed-1") is True
             assert await store.upsert_recording(c, rec.public(), "sync") is False
             await store.set_event(c, "fathom", "4242", "ev-orbit")
-            assert (await store.by_event(c, "ev-orbit"))["embed_url"] == "https://fathom.video/embed/tokABC123"
+            row = await store.by_event(c, "ev-orbit")
+            assert row["company"] == "Orbit" and store.names(row) == ["Ana Ruiz"]
+            assert "orbit.example" not in json.dumps(store.names(row, "invitee_hashes"))
             assert [r["external_id"] for r in await store.pending(c)] == ["4242"]
             await store.set_eval(c, "fathom", "4242", "handed_off")
             await store.upsert_recording(c, rec.public(), "webhook", "sealed-2")
@@ -596,7 +646,10 @@ def test_store_round_trip_on_postgres():
             assert (await cursor.fetchone())[0] is None  # Never re-sealed after the hand-off.
             assert await store.pending(c) == []
             assert await store.delete_key(c, "fathom") is True
-            await c.execute("DROP TABLE notetaker_credentials, notetaker_recordings")
+            await store.save_media(c, "fathom", "4242", {"status": "processing", "download_id": "dl_1"})
+            assert (await store.get_media(c, "fathom", "4242"))["status"] == "processing"
+            assert (await store.many(c, [("fathom", "4242"), ("fathom", "9")])).keys() == {("fathom", "4242")}
+            await c.execute("DROP TABLE notetaker_credentials, notetaker_recordings, recording_media")
     asyncio.run(main())
 
 
@@ -618,6 +671,10 @@ def test_past_interviews_lists_events_and_stored_recordings(client, monkeypatch)
          "ended_at": None, "share_url": "https://fathom.video/calls/4100", "embed_url": "", "event_key": "ev-old",
          "eval_status": "no_hook", "event_title": "Vela: system design", "event_company": "Vela",
          "event_start": now - timedelta(days=20)},
+        {"provider": "fathom", "external_id": "4050", "title": "Interview -L2- Sam", "started_at": now - timedelta(days=25),
+         "ended_at": None, "share_url": "https://fathom.video/calls/4050", "embed_url": "", "event_key": None,
+         "eval_status": "handed_off", "event_title": None, "event_company": "L2- Sam", "event_start": None,
+         "company": "Quillworks", "company_domain": "quillworks.example", "interviewers": '["Maya Lin"]'},
         {"provider": "fireflies", "external_id": "ff1", "title": "Kite intro", "started_at": now - timedelta(days=40),
          "ended_at": None, "share_url": "https://app.fireflies.ai/view/ff1", "embed_url": "", "event_key": None,
          "eval_status": "no_hook", "event_title": None, "event_company": None, "event_start": None}]
@@ -640,17 +697,20 @@ def test_past_interviews_lists_events_and_stored_recordings(client, monkeypatch)
     data = client.get("/valr/api/past-interviews?days=999", headers=GOOD).json()
     assert data["days"] == 180 and windows == [timedelta(days=3)]
     items = data["interviews"]
-    assert [i["title"] for i in items] == ["Orbit Labs: technical round", "Vela: system design", "Kite intro"]
+    assert [i["title"] for i in items] == ["Orbit Labs: technical round", "Vela: system design",
+                                           "Interview -L2- Sam", "Kite intro"]
     first = items[0]
     assert first["ref"] == slot_workflow_id("ev-recent") and first["interviewers"] == ["Ana Ruiz"]
     assert first["recording"]["id"] == "fathom:4242"
-    assert first["recording"]["embed_url"] == "https://fathom.video/embed/tokABC123"  # A share token: embedded.
-    assert items[1]["recording"]["embed_url"] == "" and items[1]["matched"] is True  # No token: deep link only.
-    assert items[2]["matched"] is False and items[2]["ref"] is None
+    assert first["recording"]["player"] is True and "embed_url" not in first["recording"]
+    assert items[1]["matched"] is True
+    # An unmatched recording keeps the company and people Fathom's invitees gave; never "L2- Sam".
+    assert items[2]["company"] == "Quillworks" and items[2]["interviewers"] == ["Maya Lin"]
+    assert items[3]["matched"] is False and items[3]["ref"] is None
     assert "@" not in json.dumps(data)
 
 
-def test_granola_is_optional_and_fathom_shows_the_sharing_hint(client, monkeypatch):
+def test_granola_is_optional_and_fathom_plays_without_a_sharing_hint(client, monkeypatch):
     from app import valr_view
     from tests.valr_sample import notetakers_view, sample_view
 
@@ -667,8 +727,8 @@ def test_granola_is_optional_and_fathom_shows_the_sharing_hint(client, monkeypat
     assert "Done" in step and "Needs attention" not in step
     cards = page.split('id="notetakers"', 1)[1]
     assert "needs a Granola Business or Enterprise plan" in cards and 'data-import="granola"' in cards
-    assert "To play recordings inside VALR, set Fathom sharing to" in cards
-    assert 'href="https://help.fathom.video/en/articles/295616"' in cards
+    assert "Anyone with the link" not in page and "help.fathom.video" not in page  # No longer needed.
+    assert "Plays the recording right here" in cards
 
 
 def test_granola_alone_never_leaves_a_setup_step_open(client, monkeypatch):
@@ -731,3 +791,202 @@ def test_worker_reads_dashboard_keys_for_r1(monkeypatch):
     run(store.save_key(object(), token_key, "fathom", FAKE_KEY, ""))
     assert run(interview_worker.notetaker_keys(object())) == (FAKE_KEY, "env-granola")
     assert fake.keys["fathom"]["secret"] != FAKE_KEY
+
+
+# ---------- Playing recordings: Fathom's download API, cached (app/notetakers/media.py) ----------
+
+SIGNED = "https://streamkit.storage.googleapis.com/fake-bucket/rec.mp4?X-Goog-Signature=fakesig0123"
+
+
+def download(status, **extra):
+    body = {"download_id": "dl_fake1", "recording_id": 4242, "status": status, **extra}
+    return body
+
+
+def video(expires_in=timedelta(hours=24), url=SIGNED, now=None):
+    now = now or datetime.now(timezone.utc)
+    return {"url": url, "content_type": "video/mp4", "file_size_bytes": 84_000_000,
+            "expires_at": (now + expires_in).isoformat().replace("+00:00", "Z")}
+
+
+class FakeFathom:
+    """Answers POST /download and GET /downloads/{id} from a script; counts calls."""
+
+    def __init__(self, *answers):
+        self.answers, self.calls = list(answers), []
+
+    def __call__(self, request):
+        self.calls.append((request.method, request.url.path))
+        assert request.headers["x-api-key"] == FAKE_KEY
+        code, body = self.answers.pop(0)
+        return httpx.Response(code, json=body)
+
+
+@pytest.fixture
+def media_env(monkeypatch):
+    from cryptography.fernet import Fernet
+    from app.notetakers import media
+    fake = FakeStore().install(monkeypatch)
+    token = Fernet.generate_key().decode()
+
+    def resolve(fathom_fake, now=None, refresh=False, key=FAKE_KEY):
+        async def go():
+            async with client_for(fathom_fake) as http:
+                return await media.resolve(object(), "fathom", "4242", http, key, token, now=now, refresh=refresh)
+        return run(go())
+    return fake, resolve
+
+
+def test_media_requests_then_polls_then_reuses_the_cached_url(media_env):
+    fake, resolve = media_env
+    api = FakeFathom((202, download("processing")), (200, download("completed", video=video())))
+    first = resolve(api)
+    assert first == {"status": "processing", "message": "Preparing the video… (first play can take a minute or two)"}
+    assert api.calls == [("POST", "/external/v1/recordings/4242/download")]
+    second = resolve(api)
+    assert second["status"] == "completed" and second["url"] == SIGNED and second["content_type"] == "video/mp4"
+    assert api.calls[-1] == ("GET", "/external/v1/recordings/4242/downloads/dl_fake1")
+    stored = fake.media[("fathom", "4242")]
+    assert stored["status"] == "completed" and SIGNED not in str(stored["url"])  # Sealed at rest.
+    third = resolve(FakeFathom())  # No answers scripted: any call to Fathom would fail.
+    assert third["url"] == SIGNED
+
+
+def test_media_reuses_a_url_only_with_30_minutes_left(media_env):
+    fake, resolve = media_env
+    now = datetime.now(timezone.utc)
+    resolve(FakeFathom((202, download("completed", video=video(timedelta(minutes=31), now=now)))), now=now)
+    assert resolve(FakeFathom(), now=now)["url"] == SIGNED  # 31 min left: reused.
+    later = now + timedelta(minutes=2)  # 29 min left: a fresh download.
+    fresh = SIGNED.replace("fakesig0123", "fakesig4567")
+    api = FakeFathom((202, download("completed", video=video(url=fresh, now=later))))
+    assert resolve(api, now=later)["url"] == fresh and api.calls[0][0] == "POST"
+
+
+def test_media_audio_only_recordings_play_too(media_env):
+    _, resolve = media_env
+    audio = dict(video(url="https://fathom-recording-data.storage.googleapis.com/a/rec.m4a?sig=fake"),
+                 content_type="audio/mp4")
+    got = resolve(FakeFathom((202, download("completed", audio=audio))))
+    assert got["status"] == "completed" and got["content_type"] == "audio/mp4"
+
+
+@pytest.mark.parametrize("code, status, words", [
+    (403, "unavailable", "isn't downloadable for your account"), (404, "unavailable", "can't find"),
+    (422, "unavailable", "no video or audio"), (429, "busy", "Fathom is busy, try again in a minute"),
+    (401, "unavailable", "refused the API key"), (500, "failed", "didn't answer")])
+def test_media_maps_fathom_errors_to_plain_messages(media_env, code, status, words):
+    _, resolve = media_env
+    got = resolve(FakeFathom((code, {"error": "x"})))
+    assert got["status"] == status and words in got["message"] and "url" not in got
+
+
+def test_media_remembers_an_unavailable_recording_but_not_a_rate_limit(media_env):
+    fake, resolve = media_env
+    assert resolve(FakeFathom((403, {})))["status"] == "unavailable"
+    assert resolve(FakeFathom())["status"] == "unavailable"  # Cached: Fathom isn't asked again.
+    fake.media.clear()
+    api = FakeFathom((429, {}), (202, download("processing")))
+    assert resolve(api) == {"status": "busy", "message": "Fathom is busy, try again in a minute."}
+    assert resolve(api)["status"] == "processing"  # A 429 isn't remembered: the next ask goes through.
+
+
+def test_media_refuses_an_unexpected_host_and_a_failed_generation(media_env):
+    _, resolve = media_env
+    odd = resolve(FakeFathom((202, download("completed", video=video(url="https://evil.example/x.mp4")))))
+    assert odd["status"] == "failed" and "url" not in odd
+    failed = resolve(FakeFathom((202, download("failed", failure_reason="generation_timeout"))))
+    assert failed["status"] == "failed" and "took too long" in failed["message"]
+
+
+def test_media_refresh_asks_for_a_new_url_after_a_minute(media_env):
+    fake, resolve = media_env
+    now = datetime.now(timezone.utc)
+    resolve(FakeFathom((202, download("completed", video=video(now=now)))), now=now)
+    assert resolve(FakeFathom(), now=now, refresh=True)["url"] == SIGNED  # Just made: not again.
+    fake.media[("fathom", "4242")]["updated_at"] = now - timedelta(minutes=5)
+    fresh = SIGNED.replace("fakesig0123", "fakesig9999")
+    api = FakeFathom((202, download("completed", video=video(url=fresh, now=now))))
+    assert resolve(api, now=now, refresh=True)["url"] == fresh and api.calls
+
+
+def test_media_without_a_key_or_for_other_providers(media_env):
+    from app.notetakers import media
+    _, resolve = media_env
+    assert resolve(FakeFathom(), key=None)["status"] == "unavailable"
+    assert run(media.resolve(object(), "fireflies", "ff1", None, FAKE_KEY, "k"))["status"] == "unavailable"
+
+
+def test_media_never_logs_the_signed_url_or_the_key(media_env, caplog):
+    import logging
+    fake, resolve = media_env
+    caplog.set_level(logging.DEBUG)
+    api = FakeFathom((202, download("processing")), (200, download("completed", video=video())))
+    resolve(api)
+    resolve(api)
+    resolve(FakeFathom())
+    fake.media[("fathom", "4242")]["updated_at"] -= timedelta(minutes=5)
+    resolve(FakeFathom((202, download("completed", video=video(url="https://evil.example/x.mp4?sig=fakesig0123")))),
+            refresh=True)
+    text = caplog.text
+    assert "unexpected host: evil.example" in text  # The host only.
+    assert "fakesig0123" not in text and SIGNED not in text and FAKE_KEY not in text
+
+
+def test_media_route_is_owner_only_and_returns_the_answer(client, monkeypatch, caplog):
+    import logging
+    from app.auth import gate
+    from app.notetakers import media
+    assert gate.classify("/valr/api/recording/media") == "owner"
+
+    async def resolve(connection, provider, external_id, http, key, token_key, now=None, refresh=False):
+        assert (provider, external_id, key, refresh) == ("fathom", "4242", FAKE_KEY, True)
+        return media.answer("completed", url=SIGNED, expires_at="2026-10-17T09:00:00+00:00", content_type="video/mp4")
+
+    monkeypatch.setattr(media, "resolve", resolve)
+    monkeypatch.setenv("FATHOM_API_KEY", FAKE_KEY)
+    caplog.set_level(logging.DEBUG)
+    assert client.get("/valr/api/recording/media?id=fathom:4242").status_code == 403
+    assert client.get("/valr/api/recording/media?id=fathom:4242",
+                      headers={"Cf-Access-Jwt-Assertion": "guest"}).status_code == 403
+    response = client.get("/valr/api/recording/media?id=fathom:4242&refresh=1", headers=GOOD)
+    assert response.status_code == 200 and response.headers["cache-control"] == "no-store"
+    assert response.json() == {"ok": True, "status": "completed", "url": SIGNED,
+                               "expires_at": "2026-10-17T09:00:00+00:00", "content_type": "video/mp4"}
+    assert response.headers["referrer-policy"] == "no-referrer"
+    for bad in ("zoom:1", "fathom:", "fathom:../x", "nothing"):
+        assert client.get(f"/valr/api/recording/media?id={bad}", headers=GOOD).status_code == 404
+    assert "fakesig0123" not in caplog.text and FAKE_KEY not in caplog.text
+
+
+def test_new_matched_fathom_recording_prewarms_its_download(monkeypatch):
+    from app.notetakers import media
+    FakeStore().install(monkeypatch)
+    warmed = []
+    monkeypatch.setattr(media, "prewarm", lambda provider, external_id: warmed.append((provider, external_id)))
+
+    async def match(recording):
+        return {"key": "ev-orbit", "title": "Orbit", "company": "Orbit", "start": None}
+    run(pipeline.intake(object(), fathom.payload_recording(FATHOM_ITEM), "webhook", hook=lambda *a: "ok", match=match))
+    run(pipeline.intake(object(), fathom.payload_recording(FATHOM_ITEM), "webhook", hook=lambda *a: "ok", match=match))
+    run(pipeline.intake(object(), Recording("fathom", "77", "No interview"), "sync", hook=lambda *a: "ok"))
+    assert warmed == [("fathom", "4242")]  # Once, only when new and matched to an interview.
+
+
+def test_backfill_fills_company_and_people_of_stored_recordings(monkeypatch):
+    fake = FakeStore().install(monkeypatch)
+    fake.recordings[("fathom", "4242")] = {"eval_status": "handed_off", "title": "Orbit"}
+    monkeypatch.setenv("FATHOM_API_KEY", FAKE_KEY)
+    monkeypatch.delenv("VALR_TOKEN_KEY", raising=False)
+
+    def handler(request):
+        return httpx.Response(200, json={"items": [FATHOM_ITEM, dict(FATHOM_ITEM, recording_id=9999)],
+                                         "next_cursor": None})
+
+    async def go():
+        async with client_for(handler) as http:
+            return await notetakers.backfill_details(object(), http)
+    assert run(go()) == {"listed": 2, "updated": 1}  # Only the stored one; nothing new is taken in.
+    row = fake.recordings[("fathom", "4242")]
+    assert row["company"] == "Orbit Labs" and row["interviewers"] == ["Ana Ruiz"]
+    assert ("fathom", "9999") not in fake.recordings
