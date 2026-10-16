@@ -104,7 +104,7 @@ SECOND = ("works", "loop", "forge", "stack", "path", "grid", "field", "base", "m
 
 
 def live_shaped_touches(now: datetime = NOW) -> list[Touch]:
-    """About 107 fictional leads shaped like the owner's real mailbox on 2026-10-16: many
+    """About 115 fictional leads shaped like the owner's real mailbox on 2026-10-16 (70 live): many
     closed (rejections), a lump of fresh applications, a few warm and hot ones, some gone
     quiet and a few expired. Deterministic; every name and domain is made up."""
     d = lambda days: now - timedelta(days=days)  # noqa: E731
@@ -156,7 +156,7 @@ def live_shaped_touches(now: datetime = NOW) -> list[Touch]:
         else:  # expired
             out.append(mail("applied", 31 + i, **ack))
 
-    for kind, count in (("hot", 5), ("warm", 12), ("cool", 30), ("cold", 15), ("closed", 39), ("expired", 6)):
+    for kind, count in (("hot", 5), ("warm", 12), ("cool", 38), ("cold", 15), ("closed", 39), ("expired", 6)):
         for i in range(count):
             lead(kind, i)
     return out

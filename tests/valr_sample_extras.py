@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 
 def sample_leads(now: datetime | None = None, gmail: bool = True, shape: str = "small") -> dict:
     """GET /valr/api/leads for the sample touchpoints, as app/leads_web.collect builds it.
-    shape "live": about 107 leads shaped like the real mailbox (tests/leads_sample.live_shaped_touches)."""
+    shape "live": about 115 leads (70 live) shaped like the real mailbox (tests/leads_sample.live_shaped_touches)."""
     from app import leads
     from tests.leads_sample import live_shaped_touches, sample_touches
     now = now or datetime.now(timezone.utc)
