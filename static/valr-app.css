@@ -230,7 +230,6 @@ p { margin: 0.4em 0; }
 .coach-head { font-size: var(--fs-lg); letter-spacing: -0.03em; margin: 8px 0 12px; max-width: 30ch; }
 .coach-text { font-size: 1.0625rem; line-height: 1.7; max-width: 68ch; }
 .coach-cols { display: grid; gap: 20px; margin-top: 18px; }
-.numbers .tiles { margin-top: 0; }
 
 /* The toast sits above the mobile tabs. */
 .app .toast { bottom: calc(var(--tabs-h) + 12px + env(safe-area-inset-bottom)); }

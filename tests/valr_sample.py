@@ -121,9 +121,11 @@ def _impression(i: int, round_type: str) -> dict:
     ]
     parts = ({"engagement": 7.4, "positive": 6.3, "negative": 1.5, "next_steps": 10.0, "balance": 9.0} if warm else
              {"engagement": 3.1, "positive": 0.0, "negative": 6.3, "next_steps": 1.0, "balance": 5.5})
-    return {"coverage": "transcript", "score": 8.1 if warm else 3.0, "components": parts,
-            "metrics": {"candidate_talk_share": 0.62 if warm else 0.84, "follow_ups": 5 if warm else 0,
-                        "length_vs_slot": 1.0 if warm else 0.7},
+    return {"coverage": "transcript", "score": [0, 3.4, 5.6, 4.1, 6.2, 5.0, 7.4][i], "components": parts,
+            "metrics": {"candidate_talk_share": [0, 0.78, 0.81, 0.74, 0.69, 0.66, 0.63][i], "follow_ups": 5 if warm else 0,
+                        "length_vs_slot": 1.0 if warm else 0.7, "avg_answer_seconds": [0, 118, 104, 96, 84, 72, 66][i],
+                        "warm_acknowledgements": [0, 2, 1, 3, 2, 4, 5][i], "flat_acknowledgements": [0, 6, 7, 4, 5, 3, 2][i],
+                        "follow_up_rate": 0.4 if warm else 0.05},
             "cues": cues, "next_step": "concrete" if warm else "brush_off",
             "leaned_in": "They dug in when you put numbers on the design." if warm else "",
             "disengaged": "" if warm else "They moved on after a long preamble.", "source_hash": f"h{i}"}

@@ -1,93 +1,114 @@
-"""Performance: the coach's words first (valr-eval's performance.json schema 3, mapped by
-app/valr_view.coach_view): where you stand, what's working, what's costing you, this week's
-focus and the salary scripts; then the post-call reports; then the numbers, folded away
-(three tiles, the trend chart, recurring topics, impression by outcome) and the past rounds.
+"""Performance: trends first, then what they mean, then the detail folded away.
 
-The chart markup (#perf-chart, .picker, #perf-data) is the one static/valr.js draws into.
+1. Trends: four to six small charts (app/valr_ui/charts.py), each under a one-line
+   takeaway computed from the interviews (app/valr_ui/trends.py): overall score, skills,
+   how interviewers react, talk balance, where interviews led, score by round type.
+2. Insights, from the coach's read (valr-eval's performance.json schema 3, mapped by
+   app/valr_view.coach_view): where you stand (two sentences), what's working, what's
+   costing you, this week's focus as checkboxes, the salary scripts folded.
+3. Folded: recent interviews, all the numbers in one table, post-call reports.
 """
-from app.company_names import NOT_IDENTIFIED
-import json
+import re
 from typing import Any
 
-from app.valr_page import BADGE, OUTCOME, VERDICT, Clock, badge_chip, chip, e, score, short_day
-from app.valr_ui import attention
+from app.company_names import NOT_IDENTIFIED
+from app.valr_page import OUTCOME, Clock, chip, e, score, short_day
+from app.valr_ui import attention, charts, trends
 from app.valr_ui.shell import page_head
+from app.valr_view import label
+
+SENTENCE = re.compile(r"(?<=[.!?])\s+(?=[A-Z\"“])")
 
 
-def quote_html(q: dict[str, Any] | None) -> str:
-    """A real quote with who said it, where and when."""
+def sentences(text: str, limit: int = 2) -> str:
+    """The first `limit` sentences of the text."""
+    return " ".join(SENTENCE.split((text or "").strip())[:limit])
+
+
+def clip(text: str, limit: int = 140) -> str:
+    text = (text or "").strip()
+    return text if len(text) <= limit else text[:limit].rsplit(" ", 1)[0].rstrip(",;:") + "…"
+
+
+def quote_html(q: dict[str, Any] | None, limit: int = 140) -> str:
+    """A real quote, kept short, with who said it, where and when."""
     if not q:
         return ""
     who = "You" if q["speaker"] == "you" else "Interviewer"
-    where = " · ".join(x for x in (q["company"], short_day(q["date"]) if q["date"] else "", q["at"]) if x)
-    return (f'<blockquote class="cq cq-{e(q["speaker"])}"><p>“{e(q["quote"])}”</p>'
+    where = " · ".join(x for x in (q["company"], short_day(q["date"]) if q["date"] else "") if x)
+    return (f'<blockquote class="cq cq-{e(q["speaker"])}"><p>“{e(clip(q["quote"], limit))}”</p>'
             f'<footer class="mono small">{e(who)}{(" · " + e(where)) if where else ""}</footer></blockquote>')
 
 
-def coach_html(c: dict[str, Any]) -> str:
-    """The coach's read: plain language first; quotes as evidence; scripts without numbers."""
-    working = "".join(f'<li><p class="c-head">{e(w["headline"])}</p><p class="muted">{e(w["detail"])}</p>'
-                      f'{quote_html(w["example"])}</li>' for w in c["working"])
-    costing = "".join(f"""
-<article class="cost">
-  <p class="label">Costing you · {i}</p>
-  <h4>{e(x["headline"])}</h4>
-  {f'<p class="muted">{e(x["plain_meaning"])}</p>' if x["plain_meaning"] else ''}
-  {f'<p><b>Why it matters.</b> {e(x["why_it_matters"])}</p>' if x["why_it_matters"] else ''}
-  {quote_html(x["example"])}
-  {f'<p class="small muted">{e(x["what_happened"])}</p>' if x["what_happened"] else ''}
-  {f'<p><b>Do instead.</b> {e(x["do_instead"])}</p>' if x["do_instead"] else ''}
-  {f'<p class="say"><span class="mono">Say this instead</span>{e(x["model_rephrase"])}</p>' if x["model_rephrase"] else ''}
-</article>""" for i, x in enumerate(c["costing"], 1))
-    drills = "".join(f'<li><span class="f-num mono">0{i}</span><div><p class="f-action">{e(f["drill"])}</p>'
-                     f'<p class="small">{e(f["how"])}</p>'
-                     + (f'<p class="muted small">Done when: {e(f["done_when"])}</p>' if f["done_when"] else "")
-                     + '</div></li>' for i, f in enumerate(c["focus"], 1))
-    iv = c["interviewers"]
-    reacted = ""
-    if iv["leaned_in"] or iv["disengaged"]:
-        reacted = ('<div class="react"><h3 class="h-sm">How interviewers reacted</h3>'
-                   + (f'<p><span class="chip tone-ok">Leaned in</span> {e(iv["leaned_in"])}</p>' if iv["leaned_in"] else "")
-                   + (f'<p><span class="chip tone-bad">Disengaged</span> {e(iv["disengaged"])}</p>' if iv["disengaged"] else "")
-                   + "".join(quote_html(q) for q in iv["examples"]) + "</div>")
-    neg = c["negotiation"]
-    scripts = "".join(f'<li><p class="c-head">{e(x["moment"])}</p><p class="say"><span class="mono">Say</span>{e(x["say"])}</p></li>'
-                      for x in neg["scripts"])
-    negotiation = (f'<details class="neg card" id="salary" open><summary><h3 class="h-sm">Salary conversations: what to say</h3></summary>'
-                   f'<p class="muted">{e(neg["read"])}</p><ul class="scripts">{scripts}</ul>'
-                   '<p class="muted small">Scripts use placeholders on purpose: VALR never writes your numbers here.</p></details>'
-                   if neg["read"] or scripts else "")
-    stale = ('<p class="muted small">This read is from before your latest interview; it refreshes after the next review.</p>'
+def stand_card(c: dict[str, Any]) -> str:
+    stale = ('<p class="muted small">From before your latest interview; it refreshes after the next review.</p>'
              if c["stale"] else "")
-    return f"""
-<section class="coach card" aria-labelledby="coach-title">
-  <p class="label">Your coach</p>
-  <h2 id="coach-title" class="coach-head">Where you stand</h2>
-  <p class="coach-text stand">{e(c["where_you_stand"])}</p>{stale}
-  <div class="coach-cols">
-    {f'<div><h3 class="h-sm">What\'s working</h3><ul class="working">{working}</ul></div>' if working else ''}
-    {f'<div>{reacted}</div>' if reacted else ''}
-  </div>
-</section>
-{f'<section class="costing" aria-labelledby="cost-title"><h2 id="cost-title" class="h-md">What\'s costing you</h2><div class="costs">{costing}</div></section>' if costing else ''}
-{f'<section class="card focus" id="focus" aria-labelledby="focus-title"><h2 id="focus-title" class="card-title">This week\'s focus</h2><ol class="focus-list">{drills}</ol></section>' if drills else ''}
-{negotiation}"""
+    return (f'<article class="card ins ins-stand" id="stand"><h3 class="ins-title">Where you stand</h3>'
+            f'<p class="ins-lead">{e(sentences(c["where_you_stand"]))}</p>{stale}</article>')
 
 
-def focus_block(perf: dict[str, Any]) -> str:
-    """Before the coach's first read: the rubric's focus items."""
-    focus = perf.get("focus_this_week") or []
-    if not focus:
+def working_card(c: dict[str, Any]) -> str:
+    if not c["working"]:
         return ""
-    items = "".join(f'<li><span class="f-num mono">0{i}</span><div><p class="f-action">{e(f["action"])}</p>'
-                    f'<p class="muted small">{e(f["why"])}</p></div></li>' for i, f in enumerate(focus, 1))
-    return f"""
-<section class="coach card" aria-labelledby="coach-title">
-  <p class="label">Your coach</p>
-  <h2 id="coach-title" class="coach-head">Focus this week</h2>
-  <p class="muted small">The coach's full write-up appears here after the next review.</p>
-  <ol class="focus-list">{items}</ol>
-</section>"""
+    items = "".join(f'<li><p class="ins-point">{e(w["headline"])}</p>{quote_html(w["example"], 110)}</li>'
+                    for w in c["working"][:3])
+    return f'<article class="card ins ins-ok" id="working"><h3 class="ins-title">What\'s working</h3><ul class="ins-list">{items}</ul></article>'
+
+
+def costing_cards(c: dict[str, Any]) -> str:
+    out = []
+    for x in c["costing"][:3]:
+        say = x["model_rephrase"] or x["do_instead"]
+        out.append(f"""<article class="card ins ins-cost">
+  <p class="label">Costing you</p>
+  <h4 class="ins-point">{e(x["headline"])}</h4>
+  {f'<p class="small"><b>Why it matters.</b> {e(sentences(x["why_it_matters"], 1))}</p>' if x["why_it_matters"] else ''}
+  {quote_html(x["example"], 120)}
+  {f'<p class="say"><span class="mono">Say instead</span>{e(say)}</p>' if say else ''}
+</article>""")
+    if not out:
+        return ""
+    return (f'<section class="costing" aria-labelledby="cost-title"><h3 id="cost-title" class="ins-title">What\'s costing you</h3>'
+            f'<div class="costs">{"".join(out)}</div></section>')
+
+
+def focus_card(items: list[tuple[str, str]], key: str, note: str = "") -> str:
+    if not items:
+        return ""
+    rows = "".join(f'<li><label><input type="checkbox" data-focus="{e(key)}:{i}">'
+                   f'<span><span class="f-action">{e(head)}</span>{f"<span class=\"small muted\">{e(how)}</span>" if how else ""}</span>'
+                   f'</label></li>' for i, (head, how) in enumerate(items[:3], 1))
+    return (f'<article class="card ins ins-focus" id="focus"><h3 class="ins-title">This week\'s focus</h3>{note}'
+            f'<ul class="focus-checks">{rows}</ul>'
+            f'<p class="small muted">Ticks stay in this browser only.</p></article>')
+
+
+def salary_card(c: dict[str, Any]) -> str:
+    neg = c["negotiation"]
+    if not (neg["read"] or neg["scripts"]):
+        return ""
+    scripts = "".join(f'<li><p class="ins-point">{e(x["moment"])}</p><p class="say"><span class="mono">Say</span>{e(x["say"])}</p></li>'
+                      for x in neg["scripts"])
+    return (f'<details class="card neg fold" id="salary"><summary><h3 class="ins-title">Salary conversations: what to say</h3></summary>'
+            f'{f"<p class=\"muted\">{e(neg["read"])}</p>" if neg["read"] else ""}<ul class="scripts">{scripts}</ul>'
+            '<p class="muted small">Scripts use placeholders on purpose: VALR never writes your numbers here.</p></details>')
+
+
+def insights(perf: dict[str, Any]) -> str:
+    c = perf.get("coach")
+    if c:
+        cards = (stand_card(c) + working_card(c)
+                 + focus_card([(f["drill"], sentences(f["how"], 1)) for f in c["focus"]], str(c.get("generated_at") or "coach")))
+        rest = costing_cards(c) + salary_card(c)
+    else:
+        latest = perf["interviews"][-1] if perf["interviews"] else {}
+        note = (f'<p class="small muted">From your last interview. The coach\'s full read appears here after the next review.</p>')
+        cards = focus_card([(f["action"], "") for f in perf.get("focus_this_week") or []], f"latest:{latest.get('id', '')}", note)
+        rest = ""
+    if not cards and not rest:
+        return ""
+    return (f'<section class="insights" aria-labelledby="ins-title"><h2 id="ins-title" class="h-md">What it means</h2>'
+            f'<div class="ins-grid">{cards}</div>{rest}</section>')
 
 
 def impression_html(imp: dict[str, Any] | None, open_: bool = False) -> str:
@@ -143,81 +164,79 @@ def post_call_html(pc: dict[str, Any] | None, clock: Clock) -> str:
             f'{note}<ul class="kv-rows">{rows}</ul></section>')
 
 
-def impressions_overview(imp: dict[str, Any] | None) -> str:
-    if not imp:
+REPORT_STATUS = {"sent": ("Sent on Telegram", "ok"), "pending_telegram": ("Waiting for Telegram", "warn"),
+                 "queued": ("Queued", "info"), "processing": ("Scoring now", "info"), "failed": ("Failed", "bad")}
+
+
+def pending_note(pc: dict[str, Any] | None) -> str:
+    if not pc or not pc.get("pending"):
         return ""
-    by = imp["by_outcome"]
-    rows = "".join(f'<li><span>{e(OUTCOME[k][0])}</span><span class="num">{score(by[k]["mean"])}'
-                   f'<span class="muted">/10 · {e(by[k]["n"])}</span></span></li>' for k in ("advanced", "rejected", "unknown")
-                   if by[k]["n"])
-    return (f'<div><h3 class="sub-title">Interviewer impression by outcome</h3><ul class="kv-rows">{rows}</ul>'
-            + (f'<p class="muted small">Tracks your rubric score with r = {imp["r_with_score"]:.2f} '
-               f'over {imp["n"]} interviews with transcripts.</p>' if imp["r_with_score"] is not None else "")
-            + (f'<p class="muted small">{e(imp["note"])}</p>' if imp["note"] else "") + "</div>")
+    n = pc["pending"]
+    return (f'<p class="verdict small">{n} post-call report{"s" if n != 1 else ""} pending: '
+            f'<a href="/valr/settings#telegram">connect Telegram</a> and VALR sends {"them" if n != 1 else "it"}.</p>')
 
 
-def page(view: dict[str, Any], clock: Clock) -> str:
-    perf = view["performance"]
-    head = page_head("Performance", 'How your interviews <span class="dim">are going.</span>')
-    if not perf["available"]:
-        return head + ('<div class="empty"><p class="empty-title">Your scores appear after your first recorded interview.</p>'
-                       '<p class="muted">Connect a notetaker; VALR reviews each recording on the same rubric (out of 10) '
-                       'and tells you what is improving and what to practise.</p>'
-                       '<a class="btn small" href="/valr/settings#notetakers">Connect a notetaker</a></div>')
-    overall = perf["series"]["overall"]
-    last = overall["points"][-1]["ma3"] if overall["points"] else None
-    most, risk = perf.get("most_improved"), perf.get("biggest_risk")
-    tiles = f"""
-<div class="tiles">
-  <div class="tile"><p class="label">Overall · last 3 interviews</p><p class="tile-big num">{score(last)}<span class="of">/10</span></p>{badge_chip(overall['badge'])}</div>
-  <div class="tile"><p class="label">Most improved</p><p class="tile-mid">{e(most['label']) if most else '–'}</p>
-    {chip(f"↗ +{most['change']:.1f}", "ok") if most and most.get('change') is not None else '<p class="muted small">Needs 3 interviews on the same skill.</p>' if not most else ''}</div>
-  <div class="tile risk"><p class="label">Watch out for</p><p class="tile-mid">{e(risk['label']) if risk else 'Nothing slipping'}</p>
-    {f'<p class="muted small">Recent average {score(risk["latest"])}/10</p>' if risk else ''}</div>
-</div>"""
-    dim_buttons = "".join(
-        f'<button type="button" class="pick" data-dim="{e(d["key"])}" aria-pressed="false">{e(d["label"])} '
-        f'<span class="pick-badge" aria-hidden="true">{BADGE.get(perf["series"].get(d["key"], {}).get("badge", ""), BADGE["insufficient_data"])[2]}</span></button>'
-        for d in perf["dimensions"] if perf["series"].get(d["key"], {}).get("n"))
-    data = json.dumps({"series": perf["series"],
-                       "dimensions": [{"key": d["key"], "label": d["label"],
-                                       "subs": [{"key": x["key"], "label": x["label"]} for x in d["subs"]
-                                                if perf["series"].get(x["key"], {}).get("n")]}
-                                      for d in perf["dimensions"]]}).replace("<", "\\u003c")
-    weak = "".join(f'<li class="weak"><span class="weak-topic">{e(t["topic"])}</span>{chip(*VERDICT[t["verdict"]])}'
-                   f'<span class="muted small">{t["seen"]} interview{"s" if t["seen"] != 1 else ""}'
-                   f'{(" · " + e(t["last_note"])) if t["last_note"] else ""}</span></li>'
-                   for t in perf.get("recurring_weak_topics") or [])
-    rounds = "".join(f'<li><span>{e(r["round"])}</span><span class="num">{score(r["overall"])}<span class="muted">/10 · {e(r["n"])}</span></span></li>'
-                     for r in perf.get("by_round_type") or [])
-    recent = "".join(
+def post_call_html(pc: dict[str, Any] | None, clock: Clock) -> str:
+    """The latest post-call reports, folded."""
+    if not pc or not pc.get("recent"):
+        return ""
+    rows = "".join(f'<li><span>{e(r["title"] or "Interview")}</span><span>{chip(*REPORT_STATUS.get(r["status"], (r["status"], "muted")))} '
+                   f'<span class="muted small">{clock.when(r["updated_at"]) if r.get("updated_at") else ""}</span></span></li>'
+                   for r in pc["recent"])
+    return (f'<details class="numbers" id="reports"><summary><h2 class="h-md">Post-call reports</h2>'
+            f'<span class="muted small">a short report on Telegram after each recorded interview</span></summary>'
+            f'<ul class="kv-rows">{rows}</ul></details>')
+
+
+def recent_html(perf: dict[str, Any], clock: Clock) -> str:
+    rows = "".join(
         f'<li><a href="/valr/interviews/past/{e(attention.past_slug(iv))}"><span class="cu-when mono num">{e(clock.short_date(iv["date"]) if iv["date"] else "–")}</span>'
         f'<span class="cu-what">{e(iv["company"] or NOT_IDENTIFIED)} <span class="muted small">{e(iv["round"])}</span></span>'
         f'<span class="cu-end"><span class="num">{score(iv["overall"])}</span>{chip(*OUTCOME[iv["outcome"]])}</span></a></li>'
         for iv in list(reversed(perf["interviews"]))[:5])
-    coach = perf.get("coach")
-    trend = f'<p class="trend-text">{e(perf["trend_text"])}</p>' if perf.get("trend_text") else ""
+    return (f'<details class="numbers" id="recent"><summary><h2 class="h-md">Recent interviews</h2>'
+            f'<span class="muted small">the last 5, each with its own page</span></summary>'
+            f'<ul class="cu-list">{rows}</ul><p class="small"><a class="mono" href="/valr/interviews/past">All past interviews →</a></p></details>')
+
+
+def numbers_html(perf: dict[str, Any]) -> str:
+    """Every interview's numbers in one table (oldest last row first: newest on top)."""
+    skills = [k for k in trends.SKILLS if any((iv.get("dimensions") or {}).get(k) is not None for iv in perf["interviews"])]
+    head = ["Date", "Company", "Round", "Overall", *[label(k) for k in skills], "Reaction", "You talked", "Avg answer", "Outcome"]
+    rows = []
+    for iv in reversed(perf["interviews"]):
+        imp = iv.get("impression") or {}
+        cells = [short_day(iv["date"]) if iv["date"] else "–", iv["company"] or NOT_IDENTIFIED, iv["round"], score(iv["overall"]),
+                 *[score((iv.get("dimensions") or {}).get(k)) for k in skills], score(imp.get("score")),
+                 f'{imp["talk_share"] * 100:.0f}%' if imp.get("talk_share") is not None else "–",
+                 f'{imp["answer_seconds"]:.0f} s' if imp.get("answer_seconds") is not None else "–",
+                 OUTCOME[iv["outcome"]][0]]
+        rows.append("<tr>" + "".join(f"<td>{e(c)}</td>" for c in cells) + "</tr>")
+    th = "".join(f'<th scope="col">{e(h)}</th>' for h in head)
+    return (f'<details class="numbers" id="numbers"><summary><h2 class="h-md">All the numbers</h2>'
+            f'<span class="muted small">every interview, scores out of 10</span></summary>'
+            f'<div class="table-scroll"><table class="num-table"><thead><tr>{th}</tr></thead><tbody>{"".join(rows)}</tbody></table></div></details>')
+
+
+def page(view: dict[str, Any], clock: Clock, leads: dict[str, Any] | None = None) -> str:
+    perf = view["performance"]
+    head = page_head("Performance", 'How your interviews <span class="dim">are going.</span>')
+    if not perf["available"]:
+        return head + ('<div class="empty"><p class="empty-title">Your scores appear after your first recorded interview.</p>'
+                       '<p class="muted">Connect a notetaker; VALR reviews each recording, scores it out of 10 '
+                       'and tells you what is improving and what to practise.</p>'
+                       '<a class="btn small" href="/valr/settings#notetakers">Connect a notetaker</a></div>')
+    labels = {k: label(k) for k in trends.SKILLS}
+    t = trends.build(perf["interviews"], labels, leads)
     return f"""{head}
-{coach_html(coach) if coach else focus_block(perf)}
+<section class="trends" aria-labelledby="trends-title">
+  <h2 id="trends-title" class="h-md">Trends</h2>
+  <div class="tc-grid">{charts.all_charts(t)}</div>
+</section>
+{insights(perf)}
+{pending_note(view.get("post_call"))}
+<div class="folds">
+{recent_html(perf, clock)}
+{numbers_html(perf)}
 {post_call_html(view.get("post_call"), clock)}
-<details class="numbers" id="numbers"{'' if coach else ' open'}>
-  <summary><h2 id="numbers-title" class="h-md">The numbers behind this</h2><span class="muted small">scores, trend, recurring topics</span></summary>
-  {tiles}{trend}
-  <div class="chart-box">
-    <div class="chart-head"><h3 class="sub-title">Trend</h3><p class="muted small">Dots are single interviews; the line is the
-      average of the last 3, out of 10. Skills a round didn't test are left out.</p></div>
-    <div class="picker" role="group" aria-label="Choose what to chart"><button type="button" class="pick" data-dim="overall" aria-pressed="true">Overall</button>{dim_buttons}</div>
-    <div class="picker subs" role="group" aria-label="Choose a skill" hidden></div>
-    <div class="chart-wrap"><div id="perf-chart" class="chart" role="img" aria-label="Interview scores over time">
-      <noscript><p class="muted">The chart needs JavaScript; each past interview has its scores.</p></noscript></div></div>
-    <p class="chart-status small" aria-live="polite"></p>
-  </div>
-  <div class="two">
-    {f'<div><h3 class="sub-title">Topics that keep coming up</h3><ul class="weak-list">{weak}</ul></div>' if weak else ''}
-    {f'<div><h3 class="sub-title">By round type</h3><ul class="kv-rows">{rounds}</ul></div>' if rounds else ''}
-    {impressions_overview(perf.get("impressions"))}
-  </div>
-  <script type="application/json" id="perf-data">{data}</script>
-</details>
-<section class="coming"><div class="section-row"><h2 class="h-sm">Recent rounds</h2><a class="mono small" href="/valr/interviews/past">All past interviews →</a></div>
-  <ul class="cu-list">{recent}</ul></section>"""
+</div>"""
