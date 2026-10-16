@@ -68,8 +68,8 @@ class Gateway:
         self.guard = (guard or os.getenv("LLM_BYOK_GUARD", "refuse")).lower()
         if self.guard not in ("refuse", "warn", "off"):
             raise ValueError(f"LLM_BYOK_GUARD must be refuse, warn or off, not {self.guard!r}")
-        # Per request; the Sonnet writer at effort high can take most of a minute.
-        self.timeout = timeout if timeout is not None else float(os.getenv("LLM_GATEWAY_TIMEOUT_S", "120"))
+        # The SDK's default (600 s), as CrewAI had; a client() can set a shorter per-request one.
+        self.timeout = timeout if timeout is not None else float(os.getenv("LLM_GATEWAY_TIMEOUT_S", "600"))
         self.max_retries = max_retries
         self._openrouter, self._direct = openrouter, direct
         self.tripped = False
@@ -94,9 +94,10 @@ class Gateway:
             self._direct = anthropic.Anthropic(timeout=self.timeout, max_retries=self.max_retries)
         return self._direct
 
-    def client(self) -> "GatewayClient":
-        """An object with the Anthropic client's `messages` and `beta.messages` surface."""
-        return GatewayClient(self)
+    def client(self, timeout: float | None = None) -> "GatewayClient":
+        """An object with the Anthropic client's `messages` and `beta.messages` surface;
+        `timeout` (s) applies to each request that does not set its own."""
+        return GatewayClient(self, timeout)
 
     # Routing.
 
@@ -172,26 +173,29 @@ class Gateway:
 
 
 class _Messages:
-    def __init__(self, gateway: Gateway, path: str) -> None:
-        self._gateway, self._path = gateway, path
+    def __init__(self, gateway: Gateway, path: str, timeout: float | None) -> None:
+        self._gateway, self._path, self._timeout = gateway, path, timeout
+
+    def _kwargs(self, kwargs: dict[str, Any]) -> dict[str, Any]:
+        return kwargs if self._timeout is None or "timeout" in kwargs else {**kwargs, "timeout": self._timeout}
 
     def create(self, *args: Any, **kwargs: Any) -> Any:
-        return self._gateway.call(self._path, "create", args, kwargs)
+        return self._gateway.call(self._path, "create", args, self._kwargs(kwargs))
 
     def stream(self, *args: Any, **kwargs: Any) -> Any:
-        return self._gateway.call(self._path, "stream", args, kwargs)
+        return self._gateway.call(self._path, "stream", args, self._kwargs(kwargs))
 
 
 class _Beta:
-    def __init__(self, gateway: Gateway) -> None:
-        self.messages = _Messages(gateway, "beta.messages")
+    def __init__(self, gateway: Gateway, timeout: float | None) -> None:
+        self.messages = _Messages(gateway, "beta.messages", timeout)
 
 
 class GatewayClient:
-    def __init__(self, gateway: Gateway) -> None:
+    def __init__(self, gateway: Gateway, timeout: float | None = None) -> None:
         self.gateway = gateway
-        self.messages = _Messages(gateway, "messages")
-        self.beta = _Beta(gateway)
+        self.messages = _Messages(gateway, "messages", timeout)
+        self.beta = _Beta(gateway, timeout)
 
 
 _shared: Gateway | None = None
