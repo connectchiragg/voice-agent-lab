@@ -10,13 +10,14 @@ token, see app/valr_dashboard.action_owner):
 - `POST /valr/api/notetakers/granola/import` {export}: a Granola note export (JSON).
 - `GET /valr/api/recording?ref=<slot ref>` or `?id=<provider>:<id>`: a past interview's
   recording (embed or link) and its key moments; read when the detail view opens.
+- `GET /valr/api/past-interviews?days=60` (1-180): past interviews, newest first, each with
+  its matched recording (no provider call: what webhooks and syncs stored), plus
+  recordings that matched no calendar event. For the Past Interviews page.
 
 Webhooks (Cloudflare Access bypass needed; each request is signed):
 
 - `POST /hooks/fathom`: Standard Webhooks signature (`webhook-id`, `webhook-timestamp`,
   `webhook-signature`), secret FATHOM_WEBHOOK_SECRET (`whsec_` + base64), 5-minute tolerance.
-- `POST /hooks/fireflies` (webhooks V2): `X-Hub-Signature: sha256=<hex HMAC-SHA256 of
-  the raw body>` with FIREFLIES_WEBHOOK_SECRET; the body names the meeting, which is fetched.
 - `POST /hooks/granola`: Standard Webhooks again, GRANOLA_WEBHOOK_SECRET; the body names
   the note (`note_id`), which is fetched with the stored key.
 """
@@ -32,9 +33,9 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from app import notetakers, research, valr_dashboard
-from app.notetakers import base, fathom, fireflies, granola, pipeline, store
+from app.notetakers import base, fathom, granola, pipeline, store
 from app.notetakers.base import KeyRefused, ProviderError
-from app.notetakers.signatures import verify_hub_signature, verify_standard_webhook
+from app.notetakers.signatures import verify_standard_webhook
 
 logger = logging.getLogger("uvicorn.error")
 router = APIRouter()
@@ -176,12 +177,73 @@ async def recording(request: Request, ref: str = "", id: str = "") -> JSONRespon
     return JSONResponse({"ok": True, "found": True, **view}, headers=NO_CACHE)
 
 
+PAST_CALENDAR = timedelta(days=3)  # calendar_events keeps 3 days of the past (app/calendar_sync.py).
+
+
+def recording_summary(row: dict[str, Any]) -> dict[str, Any]:
+    """A stored recording for listings: its links (embed whenever it has a share token)."""
+    provider = row["provider"]
+    return {"id": f"{provider}:{row['external_id']}", "provider": provider,
+            "label": notetakers.INFO.get(provider, {}).get("label", provider), "title": row["title"],
+            "start": notetakers._iso(row["started_at"]), "end": notetakers._iso(row["ended_at"]),
+            "share_url": base.safe_link(row["share_url"]),
+            "embed_url": base.safe_embed(row["embed_url"]), "evaluation": row["eval_status"]}
+
+
+def past_view(events: list[Any], rows: list[dict[str, Any]], now: datetime) -> list[dict[str, Any]]:
+    """Calendar events that are over, and stored recordings, joined by event key."""
+    from app.interview_types import slot_workflow_id
+    from app.valr_view import scrub
+    by_event = {r["event_key"]: r for r in rows if r.get("event_key")}
+    out, seen = [], set()
+    for event in events:
+        if event.all_day or event.declined or event.status == "cancelled":
+            continue
+        if datetime.fromisoformat(event.end_utc) > now:
+            continue
+        row = by_event.get(event.key)
+        seen.add(event.key)
+        out.append({"ref": slot_workflow_id(event.key), "title": scrub(event.title),
+                    "company": scrub(event.company or ""), "start": notetakers._iso(base._dt(event.start_utc)),
+                    "end": notetakers._iso(base._dt(event.end_utc)),
+                    "interviewers": [scrub(p.name) for p in event.attendees if p.name and not p.is_self][:6],
+                    "recording": recording_summary(row) if row else None})
+    for row in rows:
+        key = row.get("event_key")
+        if key in seen:
+            continue
+        if key:
+            seen.add(key)
+        out.append({"ref": slot_workflow_id(key) if key else None,
+                    "title": scrub(row.get("event_title") or row["title"]),
+                    "company": scrub(row.get("event_company") or ""),
+                    "start": notetakers._iso(row.get("event_start") or row["started_at"]), "end": None,
+                    "interviewers": [], "matched": bool(key), "recording": recording_summary(row)})
+    return sorted(out, key=lambda item: item["start"] or "", reverse=True)
+
+
+@router.get("/valr/api/past-interviews")
+async def past_interviews(request: Request, days: int = 60) -> JSONResponse:
+    await valr_dashboard.viewer(request)
+    from app import calendar_sync
+    days = max(1, min(days, 180))
+    now = datetime.now(timezone.utc)
+    async with pool().connection() as connection:
+        await store.setup(connection)
+        rows = await store.between(connection, now - timedelta(days=days), now)
+        await calendar_sync.setup(connection)
+        events = await calendar_sync.upcoming(connection, now - min(PAST_CALENDAR, timedelta(days=days)), now)
+    items = past_view(events, rows, now)
+    return JSONResponse({"ok": True, "days": days, "generated_at": now.isoformat(), "interviews": items},
+                        headers=NO_CACHE)
+
+
 async def _past_event(connection: Any, ref: str):
     from app import calendar_sync
     from app.interview_types import slot_workflow_id
     now = datetime.now(timezone.utc)
     await calendar_sync.setup(connection)
-    events = await calendar_sync.upcoming(connection, now - timedelta(days=30), now + timedelta(days=1))
+    events = await calendar_sync.upcoming(connection, now - PAST_CALENDAR, now + timedelta(days=1))
     return next((e for e in events if slot_workflow_id(e.key) == ref), None)
 
 
@@ -232,38 +294,6 @@ async def fathom_hook(request: Request) -> dict[str, bool]:
         await pipeline.intake(connection, recording, "webhook",
                               match=lambda r: notetakers.match_event(connection, r))
     logger.info("Fathom webhook: a recording was taken in")
-    return {"ok": True}
-
-
-@router.post("/hooks/fireflies")
-async def fireflies_hook(request: Request) -> dict[str, bool]:
-    secret = os.getenv("FIREFLIES_WEBHOOK_SECRET", "").strip()
-    if not secret:
-        raise HTTPException(503, "Unavailable.")
-    body = await _read_hook(request)
-    if not verify_hub_signature(secret, request.headers.get("x-hub-signature", ""), body):
-        logger.warning("Fireflies webhook refused: bad signature")
-        raise HTTPException(401, "Bad signature.")
-    try:
-        payload = json.loads(body)
-        meeting_id = str(payload.get("meetingId") or payload.get("meeting_id") or "")
-    except (ValueError, AttributeError):
-        raise HTTPException(400, "Expected a JSON object.") from None
-    if not meeting_id or len(meeting_id) > 120:
-        return {"ok": True}
-    async with pool().connection() as connection, notetakers.http_client() as http:
-        key = await notetakers.api_key(connection, "fireflies")
-        if not key:
-            logger.warning("Fireflies webhook: Fireflies is not connected")
-            return {"ok": True}
-        try:
-            recording = await fireflies.get_recording(key, meeting_id, http)
-        except (KeyRefused, ProviderError, httpx.HTTPError) as error:
-            logger.warning("Fireflies webhook: fetch failed: %s", type(error).__name__)
-            raise HTTPException(502, "Fetch failed; retry later.") from None
-        await pipeline.intake(connection, recording, "webhook",
-                              match=lambda r: notetakers.match_event(connection, r))
-    logger.info("Fireflies webhook: a recording was taken in")
     return {"ok": True}
 
 

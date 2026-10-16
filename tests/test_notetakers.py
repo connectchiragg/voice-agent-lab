@@ -225,15 +225,6 @@ def test_standard_webhook_signature():
     assert not routes.verify_standard_webhook("", standard_headers(body), body)
 
 
-def test_hub_signature():
-    body = b'{"meeting_id": "ff1"}'
-    good = hmac.new(b"ff-secret", body, hashlib.sha256).hexdigest()
-    assert routes.verify_hub_signature("ff-secret", f"sha256={good}", body)
-    assert routes.verify_hub_signature("ff-secret", good, body)
-    assert not routes.verify_hub_signature("ff-secret", "sha256=" + "0" * 64, body)
-    assert not routes.verify_hub_signature("", good, body)
-
-
 # ---------- Matching and moments ----------
 
 def test_match_by_time_window_and_attendees():
@@ -313,8 +304,16 @@ class FakeStore:
         async def set_eval(c, provider, external_id, status, detail=""):
             self.recordings[(provider, external_id)]["eval_status"] = status
 
-        async def set_event(c, provider, external_id, event_key):
+        async def set_event(c, provider, external_id, event_key, title="", company="", start=None):
             self.events[event_key] = (provider, external_id)
+            self.recordings[(provider, external_id)].update(event_key=event_key, event_title=title,
+                                                            event_company=company, event_start=start)
+
+        async def recording(c, provider, external_id):
+            row = self.recordings.get((provider, external_id))
+            return None if row is None else {"title": row.get("title", ""), "started_at": None, "ended_at": None,
+                                             "share_url": row.get("share_url", ""),
+                                             "embed_url": row.get("embed_url", "")}
 
         async def clear_sealed(c, provider, external_id):
             self.recordings[(provider, external_id)]["sealed"] = None
@@ -336,7 +335,8 @@ def test_new_recording_is_handed_to_the_hook_once(monkeypatch):
         return "queued"
 
     async def match(recording):
-        return "ev-orbit"
+        return {"key": "ev-orbit", "title": "Orbit Labs: technical round", "company": "Orbit",
+                "start": "2026-10-16T09:00:00+00:00"}
 
     rec = fathom.payload_recording(FATHOM_ITEM)
     first = run(pipeline.intake(object(), rec, "webhook", hook=hook, match=match))
@@ -345,7 +345,7 @@ def test_new_recording_is_handed_to_the_hook_once(monkeypatch):
     assert handed == [("fathom", "4242", True)]
     row = fake.recordings[("fathom", "4242")]
     assert row["eval_status"] == "handed_off" and row["sealed"] is None  # The transcript is dropped once taken.
-    assert fake.events == {"ev-orbit": ("fathom", "4242")}
+    assert fake.events == {"ev-orbit": ("fathom", "4242")} and row["event_company"] == "Orbit"
 
 
 def test_without_a_hook_the_recording_waits_and_a_failing_hook_is_recorded(monkeypatch):
@@ -466,35 +466,26 @@ def test_fathom_webhook_needs_a_valid_signature_and_takes_the_recording_in(clien
     assert ok.status_code == 200 and taken == [("4242", "webhook", True)]
 
 
-def test_fireflies_and_granola_webhooks_fetch_the_named_meeting(client, monkeypatch):
+def test_granola_webhook_fetches_the_named_note_and_fireflies_has_none(client, monkeypatch):
     taken = []
 
     async def intake(connection, recording, origin, hook=None, match=None):
         taken.append((recording.provider, recording.external_id))
         return {"new": True, "event_key": None, "eval": "no_hook"}
 
-    async def get_ff(key, external_id, http, listed=None):
-        assert key == FAKE_KEY
-        return Recording("fireflies", external_id, "x")
-
     async def get_gr(key, external_id, http, listed=None):
+        assert key == FAKE_KEY
         return Recording("granola", external_id, "x")
 
     monkeypatch.setattr(pipeline, "intake", intake)
-    monkeypatch.setattr(fireflies, "get_recording", get_ff)
     monkeypatch.setattr(granola, "get_recording", get_gr)
-    monkeypatch.setenv("FIREFLIES_API_KEY", FAKE_KEY)
     monkeypatch.setenv("GRANOLA_API_KEY", FAKE_KEY)
-    monkeypatch.setenv("FIREFLIES_WEBHOOK_SECRET", "ff-secret")
     monkeypatch.setenv("GRANOLA_WEBHOOK_SECRET", WHSEC)
-    body = json.dumps({"event": "meeting.transcribed", "meeting_id": "ff1"}).encode()
-    sig = "sha256=" + hmac.new(b"ff-secret", body, hashlib.sha256).hexdigest()
-    assert client.post("/hooks/fireflies", content=body, headers={"X-Hub-Signature": "sha256=00"}).status_code == 401
-    assert client.post("/hooks/fireflies", content=body, headers={"X-Hub-Signature": sig}).status_code == 200
     gbody = json.dumps({"event_type": "note.generated", "note_id": "not_abcdefghijklmn"}).encode()
     assert client.post("/hooks/granola", content=gbody).status_code == 401
     assert client.post("/hooks/granola", content=gbody, headers=standard_headers(gbody)).status_code == 200
-    assert taken == [("fireflies", "ff1"), ("granola", "not_abcdefghijklmn")]
+    assert taken == [("granola", "not_abcdefghijklmn")]
+    assert client.post("/hooks/fireflies", content=b"{}").status_code in (404, 405)  # One-time history only.
 
 
 def test_recording_endpoint_returns_embed_and_moments(client, monkeypatch):
@@ -594,3 +585,134 @@ def test_store_round_trip_on_postgres():
             assert await store.delete_key(c, "fathom") is True
             await c.execute("DROP TABLE notetaker_credentials, notetaker_recordings")
     asyncio.run(main())
+
+
+def test_past_interviews_lists_events_and_stored_recordings(client, monkeypatch):
+    from app import calendar_sync
+    from app.interview_types import Person, SlotEvent, slot_workflow_id
+    now = datetime.now(timezone.utc)
+    recent = SlotEvent("ev-recent", "Orbit Labs: technical round", (now - timedelta(hours=30)).isoformat(),
+                       (now - timedelta(hours=29)).isoformat(), company="Orbit",
+                       attendees=[Person("ana.ruiz@orbit.example", "Ana Ruiz"), Person(OWNER, "Me", is_self=True)])
+    future = SlotEvent("ev-future", "Kite: screen", (now + timedelta(hours=3)).isoformat(),
+                       (now + timedelta(hours=4)).isoformat(), company="Kite")
+    rows = [
+        {"provider": "fathom", "external_id": "4242", "title": "Orbit <> Candidate", "started_at": now - timedelta(hours=30),
+         "ended_at": now - timedelta(hours=29), "share_url": "https://fathom.video/calls/4242",
+         "embed_url": "https://fathom.video/embed/tokABC123", "event_key": "ev-recent", "eval_status": "handed_off",
+         "event_title": "Orbit Labs: technical round", "event_company": "Orbit", "event_start": now - timedelta(hours=30)},
+        {"provider": "fathom", "external_id": "4100", "title": "Vela <> Candidate", "started_at": now - timedelta(days=20),
+         "ended_at": None, "share_url": "https://fathom.video/calls/4100", "embed_url": "", "event_key": "ev-old",
+         "eval_status": "no_hook", "event_title": "Vela: system design", "event_company": "Vela",
+         "event_start": now - timedelta(days=20)},
+        {"provider": "fireflies", "external_id": "ff1", "title": "Kite intro", "started_at": now - timedelta(days=40),
+         "ended_at": None, "share_url": "https://app.fireflies.ai/view/ff1", "embed_url": "", "event_key": None,
+         "eval_status": "no_hook", "event_title": None, "event_company": None, "event_start": None}]
+    windows = []
+
+    async def setup(c):
+        return None
+
+    async def upcoming(c, start, end):
+        windows.append(end - start)
+        return [recent, future]
+
+    async def between(c, start, end, limit=200):
+        return rows
+
+    monkeypatch.setattr(calendar_sync, "setup", setup)
+    monkeypatch.setattr(calendar_sync, "upcoming", upcoming)
+    monkeypatch.setattr(store, "between", between)
+    assert client.get("/valr/api/past-interviews").status_code == 403
+    data = client.get("/valr/api/past-interviews?days=999", headers=GOOD).json()
+    assert data["days"] == 180 and windows == [timedelta(days=3)]
+    items = data["interviews"]
+    assert [i["title"] for i in items] == ["Orbit Labs: technical round", "Vela: system design", "Kite intro"]
+    first = items[0]
+    assert first["ref"] == slot_workflow_id("ev-recent") and first["interviewers"] == ["Ana Ruiz"]
+    assert first["recording"]["id"] == "fathom:4242"
+    assert first["recording"]["embed_url"] == "https://fathom.video/embed/tokABC123"  # A share token: embedded.
+    assert items[1]["recording"]["embed_url"] == "" and items[1]["matched"] is True  # No token: deep link only.
+    assert items[2]["matched"] is False and items[2]["ref"] is None
+    assert "@" not in json.dumps(data)
+
+
+def test_granola_is_optional_and_fathom_shows_the_sharing_hint(client, monkeypatch):
+    from app import valr_view
+    from tests.valr_sample import notetakers_view, sample_view
+
+    async def collect(pool, now=None):
+        view = sample_view()
+        view["connections"]["notetakers"] = notetakers_view({"fathom": "connected", "granola": "refused"})
+        return view
+
+    monkeypatch.setattr(valr_view, "collect", collect)
+    page = client.get("/valr", headers=GOOD).text
+    setup = page.split('id="setup"', 1)[1].split('id="notetakers"', 1)[0]
+    assert "Connect a notetaker" in setup and 'data-connect-open="granola"' not in setup
+    step = setup.split("Connect a notetaker", 1)[1].split("</li>", 1)[0]
+    assert "Done" in step and "Needs attention" not in step
+    cards = page.split('id="notetakers"', 1)[1]
+    assert "needs a Granola Business or Enterprise plan" in cards and 'data-import="granola"' in cards
+    assert "To play recordings inside VALR, set Fathom sharing to" in cards
+    assert 'href="https://help.fathom.video/en/articles/295616"' in cards
+
+
+def test_granola_alone_never_leaves_a_setup_step_open(client, monkeypatch):
+    from app import valr_view
+    from tests.valr_sample import notetakers_view, sample_view
+
+    async def collect(pool, now=None):
+        view = sample_view(scenario="empty")
+        view["connections"]["notetakers"] = notetakers_view({})
+        return view
+
+    monkeypatch.setattr(valr_view, "collect", collect)
+    page = client.get("/valr", headers=GOOD).text
+    setup = page.split('id="setup"', 1)[1].split('id="notetakers"', 1)[0]
+    assert "Granola" not in setup and "Optional" in page
+
+
+def test_r1_searches_granola_with_the_stored_key():
+    from app import private_sources
+
+    def handler(request):
+        assert request.headers["authorization"] == f"Bearer {FAKE_KEY}"
+        if request.url.path == "/v1/notes":
+            return httpx.Response(200, json={"notes": [
+                {"id": "not_a", "title": "Orbit Labs debrief", "created_at": "2026-10-10T10:00:00Z"},
+                {"id": "not_b", "title": "Dentist", "created_at": "2026-10-11T10:00:00Z"}], "hasMore": False})
+        return httpx.Response(200, json={"id": "not_a", "summary_text": "They asked about sharding."})
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as http:
+        text, urls = private_sources.granola_search(http, ["Orbit"], FAKE_KEY)
+    assert urls == ["valr://granola/not_a"] and "sharding" in text and "Dentist" not in text
+    assert private_sources.granola_search(None, ["Orbit"], None) == ("", [])
+
+
+def test_r1_fathom_search_prefers_the_stored_key(monkeypatch):
+    from app import private_sources
+    monkeypatch.setenv("FATHOM_API_KEY", "env-key-should-lose")
+    seen = []
+
+    def handler(request):
+        seen.append(request.headers["x-api-key"])
+        return httpx.Response(200, json={"items": []})
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as http:
+        private_sources.fathom_search(http, ["Orbit"], FAKE_KEY)
+    assert seen == [FAKE_KEY]
+
+
+def test_worker_reads_dashboard_keys_for_r1(monkeypatch):
+    from cryptography.fernet import Fernet
+    pytest.importorskip("temporalio")
+    from app import interview_worker
+    fake = FakeStore().install(monkeypatch)
+    token_key = Fernet.generate_key().decode()
+    monkeypatch.setenv("VALR_TOKEN_KEY", token_key)
+    monkeypatch.delenv("FATHOM_API_KEY", raising=False)
+    monkeypatch.setenv("GRANOLA_API_KEY", "env-granola")
+    run(store.save_key(object(), token_key, "fathom", FAKE_KEY, ""))
+    assert run(interview_worker.notetaker_keys(object())) == (FAKE_KEY, "env-granola")
+    assert fake.keys["fathom"]["secret"] != FAKE_KEY

@@ -10,9 +10,12 @@ source that is not configured says so in one line.
   "full"): subject, sender name and domain (never the address), date, and the lines
   that mention the interview's essentials (round, schedule, JD, prep, salary...),
   quoted replies dropped. At most MAX_THREADS threads, EXCERPT_CHARS each.
-- Fathom (FATHOM_API_KEY, the ongoing recordings source): meetings whose title or
-  invitees mention the company or an interviewer: title, date, and the start of
-  Fathom's own summary.
+- Fathom (the key pasted on the dashboard, decrypted by the activity, else
+  FATHOM_API_KEY; the ongoing recordings source): meetings whose title or invitees
+  mention the company or an interviewer: title, date, and the start of Fathom's summary.
+- Granola (the dashboard key, else GRANOLA_API_KEY; notes only): notes of the last 180
+  days whose title mentions the company or an interviewer: title, date, the start of
+  Granola's summary.
 - History: the profile import's one-time Fireflies/Fathom export, as analysed in
   data/evaluation.json (VALR_EVALUATION_PATH): earlier rounds with this company,
   questions asked, weak spots. Fireflies itself is not called.
@@ -22,6 +25,7 @@ import base64
 import json
 import os
 import re
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -138,8 +142,8 @@ def matches(text: str, terms: list[str]) -> bool:
     return any(term and term.lower() in low for term in terms)
 
 
-def fathom_search(http: httpx.Client, terms: list[str]) -> tuple[str, list[str]]:
-    key = os.getenv("FATHOM_API_KEY", "").strip()
+def fathom_search(http: httpx.Client, terms: list[str], key: str | None = None) -> tuple[str, list[str]]:
+    key = (key or os.getenv("FATHOM_API_KEY", "")).strip()
     if not key:
         return "Fathom: not configured.", []
     response = http.get(FATHOM_MEETINGS, params={"include_summary": "true", "limit": 50},
@@ -163,6 +167,44 @@ def fathom_search(http: httpx.Client, terms: list[str]) -> tuple[str, list[str]]
         if len(lines) >= 4:
             break
     return ("Fathom recordings:\n" + "\n".join(lines)) if lines else "Fathom: no matching recordings.", urls
+
+
+GRANOLA_NOTES = "https://public-api.granola.ai/v1/notes"
+GRANOLA_DAYS = 180
+
+
+def granola_search(http: httpx.Client, terms: list[str], key: str | None = None,
+                   now: datetime | None = None) -> tuple[str, list[str]]:
+    """Granola notes about this company or its interviewers (titles matched, then up to 3 read)."""
+    key = (key or os.getenv("GRANOLA_API_KEY", "")).strip()
+    if not key:
+        return "", []  # Optional source: silent when not connected.
+    headers = {"Authorization": f"Bearer {key}", "Accept": "application/json"}
+    since = (now or datetime.now(timezone.utc)) - timedelta(days=GRANOLA_DAYS)
+    params: dict[str, Any] = {"created_after": since.strftime("%Y-%m-%dT%H:%M:%SZ"), "page_size": 30}
+    found: list[dict] = []
+    for _ in range(5):
+        response = http.get(GRANOLA_NOTES, params=params, headers=headers)
+        if response.status_code in (401, 403):
+            return "Granola: the API key was refused.", []
+        response.raise_for_status()
+        data = response.json()
+        found += [n for n in data.get("notes") or data.get("data") or [] if isinstance(n, dict)
+                  and matches(str(n.get("title") or ""), terms)]
+        if len(found) >= 3 or not (data.get("hasMore") and data.get("cursor")):
+            break
+        params["cursor"] = data["cursor"]
+    lines, urls = [], []
+    for note in found[:3]:
+        detail = http.get(f"{GRANOLA_NOTES}/{note.get('id')}", headers=headers)
+        body = detail.json() if detail.status_code == 200 else {}
+        summary = str(body.get("summary_text") or body.get("summary_markdown") or "")
+        summary = re.sub(r"\s+", " ", re.sub(r"[#*_\[\]()]", " ", summary))[:600]
+        url = f"valr://granola/{note.get('id')}"
+        lines.append(f"- {str(note.get('created_at') or '')[:10]} '{str(note.get('title') or '')[:80]}' "
+                     f"[source_url: {url}]: {summary}")
+        urls.append(url)
+    return ("Granola notes:\n" + "\n".join(lines)) if lines else "Granola: no matching notes.", urls
 
 
 def history_path() -> Path:

@@ -1,6 +1,6 @@
 """New recordings -> the per-interview evaluation (owned by the valr-eval work).
 
-Every recording VALR hears of (the Fathom or Fireflies webhook, "Check for new
+Every recording VALR hears of (the Fathom or Granola webhook, a Fireflies history import, "Check for new
 recordings" on the dashboard, an uploaded Granola export) goes through `intake`:
 
 1. its links are stored (`notetaker_recordings`, app/notetakers/store.py); the
@@ -76,16 +76,20 @@ async def hand_off(connection: Any, provider: str, external_id: str, meeting: di
 
 
 async def intake(connection: Any, recording: Recording, origin: str, hook: Hook | None = None,
-                 match: Callable[[Recording], Awaitable[str | None]] | None = None) -> dict[str, Any]:
-    """Store, match and (when new) hand off one recording. -> {new, event_key, eval}."""
+                 match: Callable[[Recording], Awaitable[dict | None]] | None = None) -> dict[str, Any]:
+    """Store, match and (when new) hand off one recording. -> {new, event_key, eval}.
+
+    `match` returns the calendar event as {key, title, company, start}, or None."""
     await store.setup(connection)
     key = os.getenv("VALR_TOKEN_KEY", "").strip()
     sealed = (google_oauth.encrypt(key, json.dumps(recording.meeting))
               if key and recording.meeting else None)
     new = await store.upsert_recording(connection, recording.public(), origin, sealed)
-    event_key = await match(recording) if match else None
-    if event_key:
-        await store.set_event(connection, recording.provider, recording.external_id, event_key)
+    event = await match(recording) if match else None
+    event_key = event["key"] if event else None
+    if event:
+        await store.set_event(connection, recording.provider, recording.external_id, event["key"],
+                              event.get("title", ""), event.get("company", ""), event.get("start"))
     status = "known"
     if new:
         status = await hand_off(connection, recording.provider, recording.external_id,

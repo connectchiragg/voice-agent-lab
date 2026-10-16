@@ -10,8 +10,8 @@
 - Recording: `transcript_url` (app.fireflies.ai/view/...) opens the meeting. `video_url`
   and `audio_url` (Pro and up) are download links that expire after 24 hours, and
   Fireflies documents no embed player or timestamp parameter, so the dashboard links out.
-- Webhook (V2, configured in the Fireflies dashboard): `X-Hub-Signature: sha256=<hex>`;
-  the payload names the meeting only, which is then fetched.
+- No webhook: the owner no longer records with Fireflies, so it is a one-time history
+  source ("Check for new recordings" imports the past meetings once connected).
 """
 from datetime import datetime
 from typing import Any
@@ -24,7 +24,7 @@ from app.profile.recordings import normalize_fireflies
 NAME = "fireflies"
 API = "https://api.fireflies.ai/graphql"
 PAGE = 50
-MAX_PAGES = 10
+MAX_PAGES = 20
 
 VERIFY = "query { user { name } }"
 LIST = """

@@ -6,7 +6,8 @@
   returned by the API, rendered on the page or logged.
 - `notetaker_recordings`: one row per recording VALR has heard of (webhook, a "check
   now" sync, or an uploaded export): title, times, the share and embed links, the
-  calendar event it matched, and the evaluation hand-off status. `sealed` holds the
+  calendar event it matched (its key, title, company and start are copied here, because
+  calendar_events keeps only 3 days of the past), and the evaluation hand-off status. `sealed` holds the
   normalised meeting (transcript included) as Fernet ciphertext only until the
   evaluation took it; `clear_sealed` drops it.
 """
@@ -42,12 +43,16 @@ CREATE TABLE IF NOT EXISTS notetaker_recordings (
     sealed        text,                     -- Fernet ciphertext of the normalised meeting
     PRIMARY KEY (provider, external_id)
 );
+ALTER TABLE notetaker_recordings ADD COLUMN IF NOT EXISTS event_title text;
+ALTER TABLE notetaker_recordings ADD COLUMN IF NOT EXISTS event_company text;
+ALTER TABLE notetaker_recordings ADD COLUMN IF NOT EXISTS event_start timestamptz;
 CREATE INDEX IF NOT EXISTS notetaker_recordings_by_start ON notetaker_recordings (started_at);
 CREATE INDEX IF NOT EXISTS notetaker_recordings_by_event ON notetaker_recordings (event_key);
 """
 
 FIELDS = ("provider", "external_id", "title", "started_at", "ended_at", "share_url", "embed_url",
-          "event_key", "origin", "received_at", "eval_status", "eval_detail")
+          "event_key", "origin", "received_at", "eval_status", "eval_detail", "event_title",
+          "event_company", "event_start")
 
 
 async def setup(connection: Any) -> None:
@@ -140,10 +145,21 @@ async def set_eval(connection: Any, provider: str, external_id: str, status: str
         "WHERE provider = %s AND external_id = %s", (status, detail[:300], provider, external_id))
 
 
-async def set_event(connection: Any, provider: str, external_id: str, event_key: str) -> None:
+async def set_event(connection: Any, provider: str, external_id: str, event_key: str, title: str = "",
+                    company: str = "", start: Any = None) -> None:
     await connection.execute(
-        "UPDATE notetaker_recordings SET event_key = %s WHERE provider = %s AND external_id = %s",
-        (event_key, provider, external_id))
+        "UPDATE notetaker_recordings SET event_key = %s, event_title = %s, event_company = %s, "
+        "event_start = %s WHERE provider = %s AND external_id = %s",
+        (event_key, title[:300], company[:120], _dt(start), provider, external_id))
+
+
+async def between(connection: Any, start: datetime, end: datetime, limit: int = 200) -> list[dict[str, Any]]:
+    """Recordings that started (or whose event started) in [start, end), newest first."""
+    cursor = await connection.execute(
+        f"SELECT {', '.join(FIELDS)} FROM notetaker_recordings "
+        "WHERE COALESCE(event_start, started_at) >= %s AND COALESCE(event_start, started_at) < %s "
+        "ORDER BY COALESCE(event_start, started_at) DESC LIMIT %s", (start, end, limit))
+    return [dict(zip(FIELDS, row)) for row in await cursor.fetchall()]
 
 
 async def recording(connection: Any, provider: str, external_id: str) -> dict[str, Any] | None:

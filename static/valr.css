@@ -273,3 +273,4 @@ ul, ol { margin: 0; }
 .moments li { display: flex; gap: 10px; align-items: baseline; }
 .moments .mono { flex: none; min-width: 4.5ch; }
 .card-badges { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.nt-hint { color: var(--ash); }

@@ -13,7 +13,9 @@
   be embedded from share links; the player is `https://fathom.video/embed/<token>` for a
   share link `https://fathom.video/share/<token>` (format seen on Iframely, not in
   Fathom's docs). It is expected to play only while the recording's share setting is
-  "Anyone with the link"; the dashboard always shows the deep link as well.
+  "Anyone with the link". The owner approved embedding (2026-10-16; the dashboard is
+  behind Cloudflare Access): every recording with a share token is embedded, with the
+  deep link under it; one without a share token gets the "Watch on Fathom" link only.
 - Webhook: Standard Webhooks signature; the payload is the same Meeting object.
 """
 from datetime import datetime
@@ -41,6 +43,12 @@ def embed_url(share_url: str) -> str:
     if parts.scheme == "https" and parts.hostname == "fathom.video" and len(path) == 3 and path[1] == "share":
         return f"https://fathom.video/embed/{path[2]}"
     return ""
+
+
+def share_link(embed: str) -> str:
+    """https://fathom.video/embed/<token> -> https://fathom.video/share/<token>."""
+    return embed.replace("https://fathom.video/embed/", "https://fathom.video/share/", 1) \
+        if embed.startswith("https://fathom.video/embed/") else ""
 
 
 def timestamp_url(share_url: str, seconds: int) -> str:

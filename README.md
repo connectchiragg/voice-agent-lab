@@ -727,16 +727,19 @@ the profile importer's meeting shape, its share and embed links). The owner conn
 on the dashboard ("Get set up"): the key is posted to the server, checked with one call,
 stored Fernet-encrypted (VALR_TOKEN_KEY) and never shown again; an environment key
 (FATHOM_API_KEY...) still works. New recordings arrive by webhook (`/hooks/fathom`,
-`/hooks/fireflies`, `/hooks/granola`, all signed; Access bypasses in docs/deploy.md) or
-"Check for new recordings", are matched to a calendar event (time window + attendee
+`/hooks/granola`, both signed; Access bypasses in docs/deploy.md) or "Check for new
+recordings" (Fireflies, no longer used, is a one-time history import), are matched to a calendar event (time window + attendee
 emails) and handed to the per-interview evaluation through VALR_EVAL_HOOK
 (`app/notetakers/pipeline.py` documents the interface; without one they wait, listed by
 `python -m app.notetakers pending`). Granola keeps no audio: notes only, by API key
 (Business plan and up) or an uploaded export. A past interview's detail view (and each
-scorecard's "Watch recording") shows the Fathom recording embedded
-(`fathom.video/embed/<token>`, which needs the share setting "Anyone with the link"),
-always with a "Watch on Fathom" deep link and key moments as `?timestamp=` links; Fireflies
-documents no embed or timestamp links, so it links out.
+scorecard's "Watch recording") shows a "Watch on Fathom" deep link and key moments as
+`?timestamp=` links; the recording is embedded (`fathom.video/embed/<token>`) only when its
+share link opens without a login (checked, cached 12 h), so a private recording never
+shows a broken player. Fireflies documents no embed or timestamp links, so it links out.
+R1 (interview research) reads the stored Fathom and Granola keys. `GET
+/valr/api/past-interviews?days=60` lists past interviews with their matched recordings
+(for the Past Interviews page).
 
 **Context push (optional).** A Mac-side job (not built) may POST per-interview email
 context to `/valr/context` (JSON {event_key?, company?, subject?, summary?, excerpt?, notes?},
