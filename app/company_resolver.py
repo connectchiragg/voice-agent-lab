@@ -18,8 +18,8 @@ reviews the evidence, then one web search when it is still unclear. Cached, capp
 Cache: `company_resolutions`, keyed by an evidence fingerprint (company domains + normalised
 title + sender), so each entity resolves once; new evidence is a new fingerprint. Cost: every
 model call is recorded in research_spend (job "companies-<date>"), counts toward the research
-month cap (VALR_MONTH_USD), and at most VALR_COMPANY_LLM_PER_DAY resolutions (default 100) run
-per day; over either cap the rules' best answer is used and nothing is cached. The owner's
+month cap (VALR_MONTH_USD), and at most VALR_COMPANY_LLM_PER_DAY resolutions (default 500) run
+per day (the one-time repair has no daily cap: the month cap and --max-model-calls, default 500); over either cap the rules' best answer is used and nothing is cached. The owner's
 "Set company" (`company_overrides`, and lead renames in lead_overrides) always wins.
 """
 from __future__ import annotations
@@ -38,7 +38,7 @@ from app import company_names as names
 
 logger = logging.getLogger("valr")
 MODEL = "claude-haiku-5-5"
-RESOLVER_VERSION = 3  # Bump when the rules change: cached answers from older rules are ignored.
+RESOLVER_VERSION = 4  # Bump when the rules change: cached answers from older rules are ignored.
 CONFIDENT = 0.7      # Below this (or needs_web) one web search follows.
 SHOW = 0.5           # Below this after research: "Company not identified".
 MAX_TOKENS = 300
@@ -169,10 +169,18 @@ HOW = {"attendees": "attendee domain {domain}", "sender": "Gmail sender domain {
        "stated": "named by the source", "lead": "a lead with the same people"}
 
 
+FINAL_SOURCES = ("attendees", "sender", "stated")  # Rules may give a final name only from these.
+
+
 def rules(ev: Evidence, owner_emails: set[str] = frozenset(), leads: Any = (),
-          agencies: Any = ()) -> tuple[Decision, bool, list[dict[str, str]]]:
-    """(the rules' answer, confident?, candidates with reasons for the model). Confident only
-    when one company domain names it and nothing (the current name, the title) disagrees."""
+          agencies: Any = (), known: Any = (), everyone: Any = ()) -> tuple[Decision, bool, list[dict[str, str]]]:
+    """(the rules' answer, confident?, candidates with reasons for the model).
+
+    The rules alone may answer only from a company domain (an attendee's or the sender's, not
+    an agency's or free mail), the existing plausible name, or an exact match with a company
+    name already known (`known`). Title, ATS and lead guesses are only candidates for the model.
+    A person's name (this touch's people, or anyone's two-word name in `everyone`) is never a
+    company. Confident only when one company domain names it and nothing disagrees."""
     found = names.resolve(attendees=ev.all_emails() + [f"x@{d}" for d in ev.domains], sender_email=ev.sender_email,
                           sender_name=ev.sender_name, title=ev.title, stated=ev.stated, leads=leads,
                           owner_emails=owner_emails, agencies=agencies)
@@ -194,20 +202,32 @@ def rules(ev: Evidence, owner_emails: set[str] = frozenset(), leads: Any = (),
     if names.domain_of(ev.sender_email) and names.is_ats(names.domain_of(ev.sender_email)):
         ats = names.from_ats(ev.sender_name, ev.title)
         candidates.append({"name": ats or "-", "reason": "sender is an ATS/scheduler (a recruiter's tool)"})
-    decision = Decision(found.name, found.domain, 0.0, "rules" if found.name else "none",
-                        HOW.get(found.source, "").format(domain=found.domain), agency=found.agency)
+    people = [n for n, _ in ev.people if n] + ([ev.sender_name] if ev.sender_name else [])
+    candidates = [c for c in candidates if not names.is_person(c["name"], people, everyone)]
+    known_keys = {names.key(k): k for k in known if k}
+    name = found.name
+    if name and names.is_person(name, people, everyone):
+        name = ""
+    if name and found.source not in FINAL_SOURCES and names.key(name) not in known_keys:
+        name = ""  # A weak guess (title, ATS, lead): a candidate for the model, never the answer.
+    if not name and found.name:
+        found.conflict = found.conflict or "weak"
+    decision = Decision(name, found.domain if name else "", 0.0, "rules" if name else "none",
+                        HOW.get(found.source, "").format(domain=found.domain) if name else "", agency=found.agency)
     domains = [d for d in ev.company_domains(agencies) if names.from_domain(d)]
-    confident = (found.source in ("attendees", "sender") and len(domains) == 1 and not found.conflict
+    confident = (bool(name) and found.source in ("attendees", "sender") and len(domains) == 1 and not found.conflict
                  and (not titled or names.same(titled, found.name)) and (not spoken or names.same(spoken, found.name)))
-    decision.confidence = 0.9 if confident else (0.4 if found.name else 0.0)
+    decision.confidence = 0.9 if confident else (0.4 if name else 0.0)
     return decision, confident, candidates
 
 
-def enforce(company: str, owner_emails: set[str] = frozenset(), agencies: Any = ()) -> str:
+def enforce(company: str, owner_emails: set[str] = frozenset(), agencies: Any = (), people: Any = (),
+            everyone: Any = ()) -> str:
     """The model's answer, kept only if it is a company by the rules: never the owner's name,
-    a round label, a tool, an ATS, free mail, or a known agency / platform."""
+    a person's name, a round label, a tool, an ATS, free mail, a fragment, or an agency."""
     company = names.clean((company or "").strip()[:80]) or ""
-    if not company or not names.is_company(company) or names.is_agency_name(company, agencies):
+    if not company or not names.is_company(company) or names.is_agency_name(company, agencies) \
+            or names.is_person(company, people, everyone):
         return ""
     domain_like = names.domain_of("x@" + company) if "." in company and " " not in company else ""
     if domain_like and (domain_like in names.FREEMAIL or names.is_ats(domain_like)):
@@ -276,7 +296,7 @@ def research(ev: Evidence, candidates: list[dict[str, str]], first: dict, client
 
 
 def per_day() -> int:
-    return int(os.getenv("VALR_COMPANY_LLM_PER_DAY", "100"))
+    return int(os.getenv("VALR_COMPANY_LLM_PER_DAY", "500"))
 
 
 # Storage.
@@ -348,6 +368,10 @@ class Resolver:
     month_ok: Callable[[Any], Any] | None = None
     owner_emails: set[str] = field(default_factory=set)
     agencies: set[str] = field(default_factory=set)  # learned agency domains (2+ companies)
+    known: set[str] = field(default_factory=set)     # company names already trusted (exact matches)
+    everyone: set[str] = field(default_factory=set)  # every person's name seen in the data
+    daily_cap: bool = True                           # False for the one-time repair (month cap only)
+    max_calls: int | None = None                     # A hard ceiling for this pass
     candidate: str = ""
     job_id: str = ""
     calls: int = 0
@@ -358,13 +382,16 @@ class Resolver:
     usd: float = 0.0
     spend: list[dict[str, Any]] = field(default_factory=list)
 
+    _people: list[str] = field(default_factory=list)
+
     async def resolve(self, connection: Any, ev: Evidence, entity_id: str = "", leads: Any = ()) -> Decision:
+        self._people = [n for n, _ in ev.people if n] + ([ev.sender_name] if ev.sender_name else [])
         if entity_id:
             manual = await override(connection, entity_id)
             if manual:
                 self._skip(ev, "override")
                 return Decision(manual, "", 1.0, "override", "set by you")
-        first, confident, candidates = rules(ev, self.owner_emails, leads, self.agencies)
+        first, confident, candidates = rules(ev, self.owner_emails, leads, self.agencies, self.known, self.everyone)
         if confident:
             self._skip(ev, "rules_confident")
             return first
@@ -376,7 +403,10 @@ class Resolver:
         if self.client is None:
             self._skip(ev, "per_run_cap" if self.calls else "no_model_client")
             return first  # The rules' best guess, not cached.
-        if await today_count(connection) >= per_day():
+        if self.max_calls is not None and self.calls >= self.max_calls:
+            self._skip(ev, "max_model_calls")
+            return first
+        if self.daily_cap and await today_count(connection) >= per_day():
             self._skip(ev, "daily_cap")
             return first
         if not await self._month_ok(connection):
@@ -412,7 +442,8 @@ class Resolver:
             self.trace.append(f"{ev.kind}: {reason}")
 
     def _decision(self, answer: dict[str, Any], source: str, citation: str) -> Decision:
-        company = enforce(str(answer.get("company") or ""), self.owner_emails, self.agencies)
+        company = enforce(str(answer.get("company") or ""), self.owner_emails, self.agencies, self._people,
+                          self.everyone)
         confidence = float(answer.get("confidence") or 0)
         if confidence < SHOW:
             company = ""
