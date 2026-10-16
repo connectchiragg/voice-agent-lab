@@ -633,7 +633,9 @@ VALR_BRIEFING_DIAL=0 keeps everything but never dials; VALR_BRIEFINGS=0 turns th
 
 **The Telegram heads-up** (owner's design, 2026-10-16) replaces the automatic dial: 30
 minutes before each block, VALR messages the owner's Telegram chat with the interviews'
-calendar titles and times (IST) and a one- or two-line teaser of the brief, with three
+calendar titles and times (IST) and a one- or two-line teaser from public research only
+(the company researcher's summary, else the round's; never the brief, the email/recording
+part or pay; nothing usable leaves just the title and time), with three
 buttons: **📞 Call me now** (an on-demand briefing call, at once; research first if a brief
 is not current, within five minutes), **⏰ In 10 min** (the same, dialled ten minutes later,
 offered only while that is still five minutes before the interview), **Skip**. No reply,

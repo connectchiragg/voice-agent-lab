@@ -318,18 +318,34 @@ def test_heads_up_text_and_teaser():
     now = datetime(2026, 10, 16, 10, 0, tzinfo=timezone.utc)
     events = [make_event(now + timedelta(minutes=30)),
               make_event(now + timedelta(minutes=90), "ev2", "Round 2 <tech>", "Bolt")]
-    spoken = {"ev1": "Kestrel builds payroll software. You meet Riya, their CTO. She likes trade-offs.",
-              "ev2": ""}
-    text = telegram_api.heads_up_text(events, spoken, now)
+    teasers = {"ev1": "Kestrel builds payroll software. It raised a Series B in May.", "ev2": ""}
+    text = telegram_api.heads_up_text(events, teasers, {"ev1"}, now)
     assert "<b>Kestrel screening call</b> at 4:00 PM IST, in 30 min." in text
     assert "<b>Bolt: Round 2 &lt;tech&gt;</b> at 5:00 PM IST." in text
     assert "Part of your briefing is ready." in text
-    assert "<i>Kestrel builds payroll software. You meet Riya, their CTO.</i>" in text
-    assert "She likes" not in text and text.endswith("No reply means no call.")
+    assert "<i>Kestrel builds payroll software. It raised a Series B in May.</i>" in text
+    assert text.endswith("No reply means no call.")
+    bare = telegram_api.heads_up_text(events[:1], {}, set(), now)
+    assert "<i>" not in bare and "still being prepared" in bare
     assert len(telegram_api.teaser("word " * 200)) <= telegram_api.TEASER_CHARS
     keys = [b["callback_data"] for b in telegram_api.keyboard(BLOCK)[0]]
     assert keys == [f"c:{BLOCK}", f"l:{BLOCK}", f"s:{BLOCK}"]
     assert all(len(k.encode()) <= 64 for k in keys)
+
+
+def test_teaser_is_public_research_only():
+    private = {"ok": True, "findings": {"summary": "The recruiter emailed that the panel is Riya."}}
+    company = {"ok": True, "findings": {"summary": "Kestrel builds payroll software. Pay is 40 LPA. "
+                                                   "Mail jobs@kestrel.example or +91 98123 45678."}}
+    round_ = {"ok": True, "findings": {"summary": "Screens are 30 minutes on past projects."}}
+    slot = {"parts": {"private": private, "company": company, "round": round_},
+            "spoken": "Riya from your inbox thread is on the panel."}
+    assert telegram_api.public_teaser(slot) == "Kestrel builds payroll software."
+    assert telegram_api.public_teaser({"parts": {"private": private, "round": round_}}) == \
+        "Screens are 30 minutes on past projects."
+    assert telegram_api.public_teaser({"parts": {"round": round_}}, company) == "Kestrel builds payroll software."
+    assert telegram_api.public_teaser({"parts": {"private": private}, "spoken": "secret"}) == ""
+    assert telegram_api.public_teaser({"parts": {"company": {"ok": False, "findings": {"summary": "x"}}}}) == ""
 
 
 def test_auto_dial_is_off_unless_asked(monkeypatch):
@@ -365,7 +381,12 @@ def test_heads_up_activity_sends_and_records(monkeypatch):
         return {"ev1": make_event(start)}
 
     async def load_slots(connection, keys):
-        return [{"key": "ev1", "status": "done", "spoken": "Kestrel builds payroll software."}]
+        return [{"key": "ev1", "status": "done", "company_key": "kestrel",
+                 "spoken": "Riya from your inbox thread is on the panel.",
+                 "parts": {"private": {"ok": True, "findings": {"summary": "From email: Riya."}}}}]
+
+    async def company(connection, key):
+        return {"ok": True, "findings": {"summary": "Kestrel builds payroll software."}}
 
     async def record(connection, block_id, message_id):
         recorded.append((block_id, message_id))
@@ -376,6 +397,7 @@ def test_heads_up_activity_sends_and_records(monkeypatch):
                                 (calendar_sync, "setup", none), (telegram_api, "owner_chat", owner_chat),
                                 (calendar_sync, "snapshots", snapshots),
                                 (interview_store, "load_slots", load_slots),
+                                (interview_store, "company", company),
                                 (telegram_api, "record_heads_up", record)):
         monkeypatch.setattr(module, name, value)
     activities = interview_worker.InterviewActivities(client=None, http=object())
@@ -384,6 +406,7 @@ def test_heads_up_activity_sends_and_records(monkeypatch):
     method, payload = bot.calls[0]
     assert method == "sendMessage" and payload["chat_id"] == OWNER
     assert "Kestrel builds payroll software." in payload["text"]
+    assert "Riya" not in payload["text"] and "inbox" not in payload["text"]
 
     async def no_owner(connection):
         return None
