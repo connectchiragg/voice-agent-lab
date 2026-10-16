@@ -12,6 +12,9 @@ Activities:
 - `research_synthesize`: the spoken answer and notes, plus the claim check.
 - `research_finish`: saves the result and the job's duration to `research_jobs`.
 
+Background task: the post-call report loop (app/post_call.py; VALR_POST_CALL=0 turns it
+off): queued recordings -> scores, interviewer cues and a Telegram report.
+
 The callback itself is the existing CallbackWorkflow, on the callback worker's queue.
 """
 import asyncio
@@ -346,7 +349,13 @@ async def main() -> None:
         await ensure_sweep(client)
     else:
         logger.info("VALR interview briefings are off (VALR_BRIEFINGS=0 or no calendar source)")
-    await worker.run()
+    from app import post_call
+    reports = asyncio.create_task(post_call.loop(connect)) if post_call.enabled() else None
+    try:
+        await worker.run()
+    finally:
+        if reports:
+            reports.cancel()
 
 
 USAGE = ('usage: python -m app.research_worker [test "<topic>" | sync | blocks | '
