@@ -244,6 +244,13 @@ class Peer:
 
     def start(self) -> None:
         self.spawn(self.supervise())
+        self.spawn(self.close_when_finished())
+
+    async def close_when_finished(self) -> None:
+        """The assistant said goodbye: close once it has played (the page then ends)."""
+        if self.call is not None:
+            await self.call.finished()
+            await self.close("the assistant ended the call")
 
     def tune_receivers(self) -> None:
         """After the remote description: low-delay buffering for the microphone."""

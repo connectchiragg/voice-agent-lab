@@ -27,7 +27,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request
 
 from app import calendar_sync, callbacks, interview_store, interviews, research, telegram_api
-from app.interview_types import SlotEvent, briefable, group_blocks
+from app.interview_types import SlotEvent, briefable, event_noun, group_blocks
 from app.interview_workflow import BlockCallWorkflow
 from app.telegram_api import LATER, MIN_LEFT, Bot, clock, e, keyboard, outcome_line
 
@@ -310,8 +310,10 @@ def interview_label(events: list[SlotEvent]) -> str:
     first = datetime.fromisoformat(events[0].start_utc).astimezone(telegram_api.zone())
     when = first.strftime("%I:%M %p").lstrip("0")
     if len(events) == 1:
-        return f"your {when} interview with {names[0]}"
-    return f"your {when} interviews: {', then '.join(names)}"
+        return f"your {when} {event_noun(events[0].title)} with {names[0]}"
+    nouns = {event_noun(event.title) for event in events}
+    noun = "interviews" if nouns == {"interview"} else "meetings"
+    return f"your {when} {noun}: {', then '.join(names)}"
 
 
 async def save(block_id: str, outcome: str, at: datetime | None = None,

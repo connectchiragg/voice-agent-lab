@@ -336,3 +336,21 @@ def test_speakable_drops_markdown_and_extra_space():
     assert speakable("**Sure**,  here's `one`:\n# Tip") == "Sure, here's one: Tip"
     assert speakable(" * ") == ""
     assert np.frombuffer(deepgram.to_linear16(np.array([0.0, 1.0], np.float32)), "<i2").tolist() == [0, 32767]
+
+
+def test_speakable_never_reads_web_addresses():
+    assert speakable("Kestrel at kestrelapp.com raised a lot.") == "Kestrel at kestrelapp raised a lot."
+    assert speakable("See https://x.io/a?b=1 for more.") == "See for more."
+    assert speakable("Kestrel at kestrelapp dot com, yes.") == "Kestrel at kestrelapp, yes."
+
+
+def test_speakable_writes_am_pm_the_way_aura_reads_them_well():
+    assert speakable("At eleven thirty a.m. with Priya, and four p.m.") == (
+        "At eleven thirty AM with Priya, and four PM.")
+    assert speakable("It ends at 5 p.m. Then lunch.") == "It ends at 5 PM. Then lunch."
+
+
+def test_speakable_respells_names_for_the_voice_only():
+    from app import persona
+    assert speakable("Your Brightline interview, with VALR.") == (
+        f"Your Bright Line interview, with {persona.SPOKEN_NAME}.")

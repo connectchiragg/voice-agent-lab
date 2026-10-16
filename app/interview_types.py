@@ -208,3 +208,16 @@ def brief_is_current(event: SlotEvent, slot: dict, owners: set[str] | frozenset[
     from dataclasses import replace
     stored = (slot.get("parts") or {}).get("_fingerprint")
     return stored == fingerprint(replace(event, start_utc=researched_start), owners)
+
+
+# Calendar events that are not interviews ("Post offer connect", "HR sync") must not be
+# called interviews on the phone.
+NOT_INTERVIEW = re.compile(r"post[- ]?offer|\boffer\b|\bconnect\b|catch[- ]?up|\bsync\b|"
+                           r"onboarding|consult|coffee chat|\bmeeting\b|\bdiscussion\b", re.I)
+INTERVIEW = re.compile(r"interview|round|screen|technical|coding|system design|"
+                       r"problem solving|assignment|\bR\d\b", re.I)
+
+
+def event_noun(title: str) -> str:
+    """ "interview", or "meeting" for an event whose title says it is something else."""
+    return "meeting" if NOT_INTERVIEW.search(title) and not INTERVIEW.search(title) else "interview"

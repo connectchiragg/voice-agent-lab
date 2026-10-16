@@ -89,6 +89,10 @@ INPUT_BATCH_S = 0.08  # Deepgram recommends 80 ms chunks for Flux.
 CHUNK_S = 0.1  # Reply audio per media message.
 LEAD_S = 1.0  # Most reply audio sent but not yet heard; `clear` drops it on barge-in.
 TICK_S = 0.02
+# An outbound call's greeting waits for the callee's pickup "Hello?" (see callee_settled).
+PICKUP_WAIT_S = 1.0  # Silence this long after the stream starts: greet.
+PICKUP_QUIET_S = 0.5  # After they spoke: this much quiet, then greet.
+PICKUP_LIMIT_S = 2.5
 SIGNATURE_TOLERANCE_S = 300
 CONNECT_TIMEOUT_S = 10  # From answering to the media stream's `start`.
 GOODBYE = "We've reached the time limit for this call. Thanks for calling, goodbye!"
@@ -426,6 +430,7 @@ class PhoneSession:
         self.wake = asyncio.Event()
         self.greeted = asyncio.Event()  # The greeting finished or was interrupted.
         self.words_heard = False  # Flux transcribed something.
+        self.heard_loud: float | None = None  # Clock time of the caller's last loud frame.
         self.frames = self.loud_frames = 0  # Caller frames during the decode check.
 
     # Pipeline -> Telnyx.
@@ -490,7 +495,10 @@ class PhoneSession:
             return
         if len(samples):
             self.frames += 1
-            self.loud_frames += float(np.sqrt(np.mean(np.square(samples)))) > LOUD_RMS
+            loud = float(np.sqrt(np.mean(np.square(samples)))) > LOUD_RMS
+            self.loud_frames += loud
+            if loud:
+                self.heard_loud = self.clock()
         samples = resample(samples, self.inbound.sample_rate, self.codec.sample_rate)
         self.pending.append(samples)
         self.pending_count += len(samples)
@@ -528,6 +536,20 @@ class PhoneSession:
                            "(no words from Flux %.0f s after the greeting; %d of %d frames loud)",
                            self.inbound.name, self.inbound.byte_order or "n/a", wait_s,
                            self.loud_frames, self.frames)
+
+    async def callee_settled(self, first_s: float = PICKUP_WAIT_S, quiet_s: float = PICKUP_QUIET_S,
+                             limit_s: float = PICKUP_LIMIT_S) -> None:
+        """Before greeting someone we called: people say "Hello?" as they pick up, and
+        that cut the greeting before its purpose was heard (QA, 2026-10-16). Wait until
+        they have spoken and paused for `quiet_s`, or `first_s` passes in silence, at
+        most `limit_s` in all."""
+        started = self.clock()
+        while (now := self.clock()) - started < limit_s:
+            if self.heard_loud is None and now - started >= first_s:
+                return
+            if self.heard_loud is not None and now - self.heard_loud >= quiet_s:
+                return
+            await asyncio.sleep(TICK_S)
 
     async def say_goodbye(self) -> None:
         """Cut any reply, stop listening, speak the goodbye and wait until it has played."""
@@ -802,12 +824,19 @@ async def media_stream(socket: WebSocket, token: str = "") -> None:
                                        caller_id=pending.caller_key)
         logger.info("Phone call connected (%s caller)",
                     "identified" if pending.caller_key else "anonymous")
+        reader = asyncio.create_task(read_stream(socket, session))
+        tasks.append(reader)
+        if pending.callback is not None:  # We called them: let their "Hello?" pass first.
+            await session.callee_settled()
         session.call.greet()  # The assistant speaks first; barge-in can cut it.
         time_limit = asyncio.create_task(end_at_time_limit(session, board.settings.max_call_s))
-        reader = asyncio.create_task(read_stream(socket, session))
+        finished = asyncio.create_task(session.call.finished())  # A goodbye was said.
         tasks += [asyncio.create_task(session.pump()), asyncio.create_task(session.check_decoding()),
-                  time_limit, reader]
-        await asyncio.wait((reader, time_limit), return_when=asyncio.FIRST_COMPLETED)
+                  time_limit, finished]
+        await asyncio.wait((reader, time_limit, finished), return_when=asyncio.FIRST_COMPLETED)
+        if finished.done():
+            await session.drained()
+            logger.info("The assistant ended the call; hanging up")
         if reader.done():
             reader.result()  # Raises what ended the stream, if anything did.
             hang_up_after = False  # `stop`: the call has already ended.

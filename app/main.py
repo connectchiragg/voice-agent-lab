@@ -38,6 +38,7 @@ def load_engines(sample_rate: int | None = None) -> Engines | None:
         logger.warning("DEEPGRAM_API_KEY is not set; calls are refused.")
         return None
     settings = DeepgramSettings.from_env()
+    phone = sample_rate is not None
     if sample_rate is not None:
         settings = replace(settings, input_sample_rate=sample_rate, output_sample_rate=sample_rate)
     logger.info("Deepgram %s: Flux eot %.2f, eager %s, timeout %d ms; voice %s", settings.host,
@@ -66,7 +67,10 @@ def load_engines(sample_rate: int | None = None) -> Engines | None:
                                                      interviews.call_ended(conversation_id)),
                    greeting=callbacks.greeting, record_greeting=agent.record_greeting,
                    backchannel=backchannel_from_env(),
-                   awaiting_answer=awaiting_answer)
+                   awaiting_answer=awaiting_answer, record_turn=agent.record_turn,
+                   # Phone calls only: "Still there?" after 20 s of silence, goodbye at 45 s.
+                   idle_prompt_s=float(os.getenv("IDLE_PROMPT_S", "20")) if phone else None,
+                   idle_end_s=float(os.getenv("IDLE_END_S", "45")) if phone else None)
 
 
 def awaiting_answer(conversation_id: str) -> bool:
@@ -161,6 +165,7 @@ async def voice(socket: WebSocket) -> None:
     engines: Engines | None = getattr(socket.app.state, "engines", None)
     send_lock = asyncio.Lock()
     call: Call | None = None
+    ending: asyncio.Task[None] | None = None
 
     async def send(data: dict[str, object] | bytes) -> None:
         async with send_lock:  # The reply task and this loop both send.
@@ -186,6 +191,7 @@ async def voice(socket: WebSocket) -> None:
             return
         await send({"type": "ready", "sample_rate": engines.output_sample_rate,
                     "encoding": "pcm_f32le"})
+        ending = asyncio.create_task(close_when_finished(call, socket))
         while True:
             frame = await socket.receive()
             if frame["type"] == "websocket.disconnect":
@@ -208,9 +214,22 @@ async def voice(socket: WebSocket) -> None:
         except (RuntimeError, WebSocketDisconnect):
             pass
     finally:
+        if ending is not None:
+            ending.cancel()
         if call is not None:
             await call.close()
         try:
             await socket.close()
         except (RuntimeError, WebSocketDisconnect):
             pass  # Already closed by the browser.
+
+
+async def close_when_finished(call: Call, socket: WebSocket) -> None:
+    """The assistant said goodbye (end_call, or the caller's goodbye): close the call
+    once the goodbye has played; the page ends the call when the socket closes."""
+    await call.finished()
+    logger.info("The assistant ended the call")
+    try:
+        await socket.close()
+    except (RuntimeError, WebSocketDisconnect):
+        pass

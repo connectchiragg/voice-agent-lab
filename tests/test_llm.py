@@ -64,6 +64,8 @@ def models(monkeypatch):
     monkeypatch.setenv("FIRST_TOKEN_DEADLINE_MS", "50")
     monkeypatch.setattr(llm, "hedge_stats", llm.HedgeStats())
     monkeypatch.setattr(groq_api, "last_rate_limited", None)
+    monkeypatch.setattr(groq_api, "recent_requests", __import__("collections").deque())
+    monkeypatch.setattr(llm, "recent_first_tokens_ms", __import__("collections").deque(maxlen=20))
 
 
 async def collect(client, **options):
@@ -282,3 +284,24 @@ def test_a_fetched_brief_stays_in_the_conversation_append_only():
     # Other tools' results still drop after their turn.
     history[1]["tool_calls"][0]["name"] = "get_weather"
     assert all(m["role"] != "tool" for m in llm.to_chat_messages(history))
+
+
+def test_the_hedge_deadline_follows_the_primarys_recent_first_tokens(monkeypatch):
+    monkeypatch.setenv("FIRST_TOKEN_DEADLINE_MS", "900")
+    assert llm.first_token_deadline_s() == 0.9  # Too few samples: the floor.
+    llm.recent_first_tokens_ms.extend([600, 650, 700, 750, 800, 900, 930, 1000])
+    assert llm.first_token_deadline_s() == pytest.approx((900 + llm.HEDGE_MARGIN_MS) / 1000)  # p75 of eight.
+    llm.recent_first_tokens_ms.extend([5000] * 20)
+    assert llm.first_token_deadline_s() == llm.HEDGE_MAX_MS / 1000
+
+
+def test_a_winning_primary_teaches_the_deadline():
+    asyncio.run(collect(Client(big=[Stream(["Hello"])])))
+    assert len(llm.recent_first_tokens_ms) == 1
+
+
+def test_no_slow_hedge_near_the_rate_limit(monkeypatch):
+    monkeypatch.setattr(groq_api, "last_rate_limited", time.monotonic())
+    client = Client(big=[Stream(["Hi"], delay=0.2)], small=[Stream(["no"])])
+    assert asyncio.run(collect(client)) == [ModelUsed("big"), "Hi"]
+    assert client.models == ["big"]  # Waited for the primary: the 20b's quota is kept.
