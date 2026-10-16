@@ -49,11 +49,11 @@ QUIET_AFTER = timedelta(days=14)
 LOCK = 7_202_610_31
 
 IMMEDIATE = ("offer", "interview", "reply_needed", "take_home")
-DIGEST = ("rejection", "new_lead", "reply", "stage", "waiting", "quiet")
+DIGEST = ("rejection", "new_lead", "reply", "update", "stage", "waiting", "quiet")
 KINDS = IMMEDIATE + DIGEST
 LABELS = {"offer": "Offer", "interview": "Interview invite", "reply_needed": "Asked for something",
           "take_home": "Take-home", "rejection": "Not moving forward", "new_lead": "New lead",
-          "reply": "Reply", "stage": "Stage change", "waiting": "Your move", "quiet": "Gone quiet"}
+          "reply": "Reply", "update": "Update", "stage": "Stage change", "waiting": "Your move", "quiet": "Gone quiet"}
 RANK = {"immediate": 2, "digest": 1}
 
 SCHEMA = """
@@ -175,8 +175,10 @@ def email_kind(category: str, action_requested: bool | None, stage_hint: str, ne
         return "take_home"
     if action_requested:
         return "reply_needed"
-    if category == "application_update" and (AUTO_RECEIPT.search(text) or stage_hint in ("", "applied")):
-        return None  # "We received your application": the lead updates silently.
+    if category == "application_update":
+        # "We received your application": the lead updates silently. Any other update from a
+        # company is still worth a dot (the owner: "any emails should show red dot").
+        return None if AUTO_RECEIPT.search(text) else "update"
     if new_thread and category in ("recruiter_outreach", "other"):
         return "new_lead"
     return "reply"
@@ -197,7 +199,7 @@ def email_title(kind: str, company: str, action: str = "") -> str:
     return {"offer": f"{who} sent an offer", "interview": f"{who} wants to schedule an interview",
             "reply_needed": f"{who} asked you to {plain_action(action)}" if action else f"{who} asked you for something",
             "take_home": f"{who} sent a take-home", "rejection": f"{who}: not moving forward",
-            "new_lead": f"New: {who} reached out", "reply": f"{who} replied"}[kind]
+            "new_lead": f"New: {who} reached out", "reply": f"{who} replied", "update": f"{who} sent an update"}[kind]
 
 
 def plain_action(action: str) -> str:
@@ -245,7 +247,7 @@ def telegram_text(note: dict[str, Any]) -> str:
 
 DIGEST_PHRASE = {"rejection": "said no", "new_lead": "is new", "reply": "replied", "waiting": "is waiting on you",
                  "quiet": "has been quiet for 14 days", "offer": "sent an offer", "interview": "wants an interview",
-                 "reply_needed": "asked you for something", "take_home": "sent a take-home"}
+                 "reply_needed": "asked you for something", "take_home": "sent a take-home", "update": "sent an update"}
 
 
 def digest_line(note: dict[str, Any]) -> str:
@@ -411,6 +413,19 @@ class Store:
                 "UPDATE notifications SET read_at = %s WHERE read_at IS NULL AND id = ANY(%s)", (now, ids))
         return int(getattr(cursor, "rowcount", 0) or 0)
 
+    async def unread_by_lead(self, since: datetime) -> dict[str, int]:
+        """Unread notifications that came from an email, per lead (the red dots on Leads)."""
+        cursor = await self.c.execute(
+            "SELECT lead_id, count(*) FROM notifications WHERE read_at IS NULL AND created_at >= %s "
+            "AND lead_id IS NOT NULL AND source_id LIKE 'gmail:%%' GROUP BY lead_id", (since,))
+        return {str(r[0]): int(r[1]) for r in await cursor.fetchall()}
+
+    async def mark_lead_read(self, lead_id: str, now: datetime) -> int:
+        """Opening a lead's card reads everything about it (its emails included)."""
+        cursor = await self.c.execute(
+            "UPDATE notifications SET read_at = %s WHERE read_at IS NULL AND lead_id = %s", (now, lead_id))
+        return int(getattr(cursor, "rowcount", 0) or 0)
+
     async def purge(self, before: datetime) -> None:
         await self.c.execute("DELETE FROM notifications WHERE created_at < %s", (before,))
 
@@ -463,6 +478,8 @@ async def add(store: Any, note: dict[str, Any], now: datetime) -> int | None:
                     fields["tg_state"] = "pending"
                 await store.update(earlier["id"], read_at=None, **fields)
                 return earlier["id"]
+            if earlier.get("read_at") is not None:
+                await store.update(earlier["id"], read_at=None)  # A new email: the dot comes back.
             return None
     return await store.insert(note)
 
@@ -613,7 +630,8 @@ def view(note: dict[str, Any], now: datetime) -> dict[str, Any]:
             "company": name_of(note.get("company") or ""), "link": note.get("link") or "/valr/leads",
             "gmail_url": note.get("gmail_url") if str(note.get("gmail_url") or "").startswith("https://") else "",
             "created_at": created.astimezone(timezone.utc).isoformat(),
-            "day": day_label(created, now), "read": note.get("read_at") is not None}
+            "day": day_label(created, now), "read": note.get("read_at") is not None,
+            "lead_id": note.get("lead_id") or "", "email": str(note.get("source_id") or "").startswith("gmail:")}
 
 
 def day_label(moment: datetime, now: datetime) -> str:

@@ -152,7 +152,7 @@ VERDICT = {"improved": ("Improved", "ok"), "same": ("No change yet", "warn"), "w
            "mixed": ("Mixed", "info")}
 
 
-OUTCOME = {"advanced": ("Advanced", "ok"), "rejected": ("Not advanced", "bad"), "unknown": ("Outcome unknown", "muted")}
+OUTCOME = {"advanced": ("Advanced", "ok"), "rejected": ("Didn't move on", "bad"), "unknown": ("Awaiting result", "muted")}
 
 
 def badge_chip(badge: str) -> str:
@@ -180,20 +180,21 @@ def telegram_line(tg: dict[str, Any], clock: Clock) -> str:
 
 
 FONTS = ('<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>'
-         '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=Space+Grotesk:wght@400;500;600&display=swap">')
+         '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1'
+         '&family=Inter:wght@400;500;600;700&display=swap">')
 
 
-ICON = ("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' "
-        "fill='%2305070c'/%3E%3Ccircle cx='16' cy='16' r='5' fill='%233b82ff'/%3E%3C/svg%3E")
+ICON = ("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' "
+        "fill='%230b0c0f'/%3E%3Ccircle cx='16' cy='16' r='8' fill='none' stroke='%238b8cfb' stroke-width='2'/%3E"
+        "%3Ccircle cx='16' cy='16' r='3' fill='%23ffffff'/%3E%3C/svg%3E")
 
 
 def error_page(message: str) -> str:
     """When the data store is down: a page, not a JSON error."""
-    return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex">
-<title>VALR · Interview copilot</title><link rel="icon" href="{ICON}">{FONTS}
-<link rel="stylesheet" href="/static/theme.css"><link rel="stylesheet" href="/static/valr.css"></head><body>
-<main class="wrap"><section class="hero solo"><div class="hero-copy">{eyebrow("!!", "Temporarily unavailable")}
-<h1>VALR can't read its data <span class="dim">right now<span class="accent">.</span></span></h1>
-<p class="lede">{e(message)} Calls and research keep running in the background. Try again in a minute.</p>
-<div class="actions"><a class="btn primary" href="/valr">Try again</a></div></div></section></main></body></html>"""
+    from app.valr_ui.shell import head
+    return f"""{head("Interview copilot", None)}</head><body class="app solo-page">
+<main class="solo"><section class="solo-card">
+<p class="brand"><span class="brand-mark" aria-hidden="true"></span><span class="brand-word">valr</span></p>
+<h1 class="solo-title">VALR can't read its data right now</h1>
+<p class="solo-text">{e(message)} Calls and research keep running in the background. Try again in a minute.</p>
+<a class="btn primary" href="/valr">Try again</a></section></main></body></html>"""

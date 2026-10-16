@@ -1,5 +1,5 @@
 """Local preview of the VALR app with fictional data: the call page (/call) and every
-app page (/valr, /valr/interviews, /valr/leads, /valr/performance, /valr/settings, ...).
+app page (/valr, /valr/interviews, /valr/leads, /valr/progress, /valr/settings, ...).
 
     VALR_DEV_PREVIEW=1 python scripts/preview_ui.py        # http://127.0.0.1:8090/valr
     .../valr?scenario=empty                                 # first run: nothing connected, no data
@@ -136,6 +136,43 @@ def main() -> None:
 
     notes = {"read": set(), "switches": {"immediate": True, "digest": True, "quiet": True}}
 
+    def preview_items():
+        """Fictional notifications, tied to the sample leads by company (so the Leads dots match)."""
+        from datetime import datetime, timedelta, timezone
+        from app import notifications
+        now = datetime.now(timezone.utc)
+        leads_by_name = {r["company"]: r["id"] for r in contracts.leads(sample_leads(gmail=True, shape="live"))["leads"]}
+        raw = [(1, "reply_needed", "immediate", "Fableworks asked you to share your availability", "Fableworks", 0.2, True),
+               (2, "offer", "immediate", "Arcworks sent an offer", "Arcworks", 2, True),
+               (3, "stage", "digest", "Glintworks moved to Interviewing", "Glintworks", 5, False),
+               (4, "update", "digest", "Larkworks sent an update", "Larkworks", 6, True),
+               (5, "reply", "digest", "Pikeworks replied", "Pikeworks", 7, True),
+               (6, "rejection", "digest", "Tessel: not moving forward", "Tessel", 30, True),
+               (7, "new_lead", "digest", "New: Quillworks reached out", "Quillworks", 60, True)]
+        return [{"id": i, "kind": k, "label": notifications.LABELS.get(k, "Update"), "importance": imp, "title": t,
+                 "body": "", "company": c, "lead_id": leads_by_name.get(c, ""), "email": mail,
+                 "link": f"/valr/leads?lead={leads_by_name[c]}#lead" if c in leads_by_name else "/valr/leads",
+                 "gmail_url": "https://mail.google.com/mail/#all/x" if mail else "",
+                 "created_at": (now - timedelta(hours=h)).isoformat(),
+                 "day": "Today" if h < 12 else "Yesterday" if h < 40 else "Earlier", "read": i in notes["read"]}
+                for i, k, imp, t, c, h, mail in raw]
+
+    async def load_notes():
+        if scenario.get() == "empty" or not options.get().get("extras", True):
+            return {"items": [], "unread": 0, "leads": {}}
+        items = [i for i in preview_items() if not i["read"]]
+        by_lead = {}
+        for i in items:
+            if i["email"] and i["lead_id"]:
+                by_lead[i["lead_id"]] = by_lead.get(i["lead_id"], 0) + 1
+        return {"items": items, "unread": len(items), "leads": by_lead}
+
+    async def mark_lead_read(lead_id):
+        notes["read"] |= {i["id"] for i in preview_items() if i["lead_id"] == lead_id}
+
+    routes.load_notes = load_notes
+    routes.mark_lead_read = mark_lead_read
+
     async def preview_notify(request, path):
         """Fictional notifications, alert switches and phone-recording status (nothing stored)."""
         import json
@@ -144,22 +181,15 @@ def main() -> None:
         if not valr_dashboard.is_preview_request(request):
             return JSONResponse({"detail": "Preview only."}, status_code=403)
         now = datetime.now(timezone.utc)
-        raw = [(1, "reply_needed", "immediate", "Fableworks asked you to share your availability", "Fableworks", 0.2),
-               (2, "offer", "immediate", "Arcworks sent an offer", "Arcworks", 2),
-               (3, "stage", "digest", "Glintworks moved to Interviewing", "Glintworks", 5),
-               (4, "reply", "digest", "Juniper replied", "Juniper", 6),
-               (5, "interview", "immediate", "Juniper wants to schedule an interview", "Juniper", 7),
-               (6, "rejection", "digest", "Tessel: not moving forward", "Tessel", 30),
-               (7, "new_lead", "digest", "New: Quillworks reached out", "Quillworks", 60)]
-        items = [{"id": i, "kind": k, "label": k.replace("_", " ").capitalize(), "importance": imp, "title": t,
-                  "body": "", "company": c, "link": "/valr/leads", "gmail_url": "https://mail.google.com/mail/#all/x",
-                  "created_at": (now - timedelta(hours=h)).isoformat(),
-                  "day": "Today" if h < 12 else "Yesterday" if h < 40 else "Earlier", "read": i in notes["read"]}
-                 for i, k, imp, t, c, h in raw]
+        items = preview_items()
         if request.method == "POST":
             body = json.loads(await request.body() or b"{}")
             if path.endswith("/read"):
-                notes["read"] |= {i["id"] for i in items} if body.get("all") else set(body.get("ids") or [])
+                if body.get("lead"):
+                    await mark_lead_read(body["lead"])
+                else:
+                    notes["read"] |= {i["id"] for i in items} if body.get("all") else set(body.get("ids") or [])
+                items = preview_items()
             elif path.endswith("/settings"):
                 notes["switches"].update({k: v for k, v in body.items() if k in notes["switches"]})
             elif path == "/valr/api/phone/token":

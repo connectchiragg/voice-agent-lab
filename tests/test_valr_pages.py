@@ -21,6 +21,7 @@ from tests.valr_sample import sample_view
 from tests.valr_sample_extras import sample_leads, sample_recording_row
 
 ROOT = Path(__file__).resolve().parent.parent
+REAL_LOAD_NOTES, REAL_MARK_LEAD_READ = routes.load_notes, routes.mark_lead_read
 OWNER = "owner@example.com"
 GOOD = {"Cf-Access-Jwt-Assertion": "owner"}
 
@@ -44,7 +45,8 @@ class Pool:
 @pytest.fixture
 def client(monkeypatch):
     from app.main import app
-    box = {"view": lambda: sample_view(extras=True), "leads": lambda: contracts.leads(sample_leads())}
+    box = {"view": lambda: sample_view(extras=True), "leads": lambda: contracts.leads(sample_leads()),
+           "notes": [], "read": []}
 
     async def collect(pool, now=None):
         return box["view"]()
@@ -64,6 +66,19 @@ def client(monkeypatch):
     async def setup(connection):
         return None
 
+    async def load_notes():  # The unread notifications (app/notifications.py's view shape).
+        items = [n for n in box["notes"] if n["id"] not in box["read"]]
+        by_lead = {}
+        for n in items:
+            if n.get("email") and n.get("lead_id"):
+                by_lead[n["lead_id"]] = by_lead.get(n["lead_id"], 0) + 1
+        return {"items": items, "unread": len(items), "leads": by_lead}
+
+    async def mark_lead_read(lead_id):
+        box["read"] += [n["id"] for n in box["notes"] if n.get("lead_id") == lead_id]
+
+    monkeypatch.setattr(routes, "load_notes", load_notes)
+    monkeypatch.setattr(routes, "mark_lead_read", mark_lead_read)
     monkeypatch.setattr(valr_view, "collect", collect)
     monkeypatch.setattr(routes, "load_leads", load_leads)
     monkeypatch.setattr(routes, "load_recording", load_recording)
@@ -91,19 +106,25 @@ def pages(client) -> list[str]:
     return ["/valr", "/valr/interviews", f"/valr/interviews/{ref_of(client)}", "/valr/interviews/past",
             "/valr/interviews/past/fathom-1006", "/valr/interviews/past/fathom-1000", "/valr/leads",
             f"/valr/leads?stage=offer&q=x&lead={lead_id('Orbit Labs')}", "/valr/leads?status=expired",
-            "/valr/performance", "/valr/settings", "/valr/system"]
+            "/valr/progress", "/valr/settings", "/login"]
 
 
 # Routes and auth.
 
 def test_every_page_needs_a_verified_access_login(client):
     for path in pages(client):
+        if path == "/login":
+            continue
         assert client.get(path).status_code == 403, path
         assert client.get(path, headers={"Cf-Access-Jwt-Assertion": "forged"}).status_code == 403, path
         page = client.get(path, headers=GOOD)
         assert page.status_code == 200, path
         assert page.headers["cache-control"] == "no-store" and page.headers["x-frame-options"] == "DENY"
         assert 'name="csrf-token"' in page.text and 'aria-current="page"' in page.text
+    for old, new in (("/valr/system", "/valr/settings#advanced"), ("/valr/performance", "/valr/progress")):
+        assert client.get(old).status_code == 403
+        moved = client.get(old, headers=GOOD, follow_redirects=False)
+        assert moved.status_code == 301 and moved.headers["location"] == new
     for path in ("/valr/interviews/slot-gone", "/valr/interviews/past/nope"):
         assert client.get(path).status_code == 403
         assert client.get(path, headers=GOOD).status_code == 404
@@ -111,12 +132,15 @@ def test_every_page_needs_a_verified_access_login(client):
 
 def test_navigation_and_deep_links(client):
     home = client.get("/valr", headers=GOOD).text
-    for href in ("/valr/interviews", "/valr/leads", "/valr/performance", "/valr/settings", "/valr/system", "/call"):
+    for href in ("/valr/interviews", "/valr/leads", "/valr/progress", "/valr/settings", "/call"):
         assert f'href="{href}"' in home, href
     assert f'href="/valr/interviews/{ref_of(client)}"' in home  # The next interview, one tap.
     assert 'data-theme="light"' in client.get("/valr?theme=light", headers=GOOD).text
     assert "data-theme=" not in client.get("/valr?theme=<x>", headers=GOOD).text.split("<head>")[0]
-    assert re.search(r'/static/valr-app\.css\?v=[0-9a-f]{10}', home)  # Cache-busted assets.
+    assert re.search(r'/static/valr-ds\.css\?v=[0-9a-f]{10}', home)  # Cache-busted assets.
+    assert home.count('data-action="callnow"') == 1  # One call action on the page: "Call me".
+    for gone in ("Talk in the browser", "Call VALR", "Times in IST", "only you can see this", OWNER):
+        assert gone not in home, gone
 
 
 def test_a_database_outage_is_a_page_on_every_route(client):
@@ -169,17 +193,20 @@ def test_home_hits_you_with_right_now(client):
     leads = contracts.leads(sample_leads())
     live = leads["leads"]
     assert all(r["stage"] != "closed" and r["status"] != "expired" for r in live)
-    assert 'data-globe' in page and 'id="leads-data"' in page and f"{len(live)} live leads" in page
     c = leads["counts"]
     assert c["live"] == len(live) == sum(c[b] for b in ("hot", "warm", "cool", "cold"))
-    import re
+    assert 'data-globe' in page and 'id="leads-data"' in page and f"Pipeline · {c['live']} active" in page
     words = " ".join(re.sub(r"<[^>]+>", " ", page).split())
-    for b in leads["bands"]:  # The legend: "Hot 1 · Warm 3 ...", the same numbers as the Leads chips.
+    for b in leads["bands"]:  # The globe's legend: "Hot 1 · Warm 3 ...", the same numbers as Leads.
         assert f'{b["label"]} {b["count"]}' in words
     assert "/static/leads-globe.js" in page and "/static/valr-globe-lite.js" in page  # 3D, lite fallback.
-    for text in ("Next interview", "Juniper", "Next Telegram heads-up", "To do", "Read your Juniper briefing",
-                 "Reconnect Google tomorrow", "Call me now", "Coming up"):
-        assert text in page, text
+    # The first five seconds: the next interview (company, round, time, countdown, briefing), then Your move.
+    order = [page.index(x) for x in ("Next interview", "Juniper", "System design", "data-countdown", "Open briefing",
+                                     "Your move", 'id="leads-raw"', "Coming up")]
+    assert order == sorted(order)
+    assert "Reminder on Telegram at" in page or "Briefing call at" in page
+    for gone in ("Status", "All good", "Nothing is broken", "Next Telegram heads-up", "To do", "live leads"):
+        assert gone not in words, gone
     data = json.loads(page.split('id="leads-data">', 1)[1].split("</script>", 1)[0])
     assert len(data["leads"]) == len(leads["leads"]) and {s["key"] for s in data["stages"]} >= {"offer", "interviewing"}
     raw = json.loads(page.split('id="leads-raw">', 1)[1].split("</script>", 1)[0])
@@ -201,16 +228,17 @@ def test_home_shows_prep_ticks_from_the_server(client):
         return v
     client.box["view"] = view
     page = html.unescape(client.get("/valr", headers=GOOD).text)
-    assert "prep: 1 of 2 done" in page
+    assert "Prep: 1 of 2 done" in page
     detail = client.get(f"/valr/interviews/{ref_of(client)}", headers=GOOD).text
-    assert detail.count(" checked>") == 1 and 'data-prep-ref="' in detail and "ticks are saved" in detail
+    assert detail.count(" checked>") == 1 and 'data-prep-ref="' in detail and "1 of 2 done" in detail
+    assert "ticks are saved" not in detail and "browser only" not in detail  # Saved on the server, said nowhere.
     def all_done():
         v = view()
         attention.next_slot(v)[1]["prep_done"].append(prep_item("Ask for their band before a number"))
         return v
     client.box["view"] = all_done
     page = html.unescape(client.get("/valr", headers=GOOD).text)
-    assert "prep: all 2 done" in page and 'class="todo done"' in page
+    assert "Prep: all 2 done" in page and 'class="prep-meter is-done"' in page
 
 
 def test_interview_detail_is_written_for_reading(client, monkeypatch):
@@ -227,10 +255,15 @@ def test_interview_detail_is_written_for_reading(client, monkeypatch):
     client.box["view"] = view
     page = html.unescape(client.get(f"/valr/interviews/{ref_of(client)}", headers=GOOD).text)
     assert "your last round with them stalled on sizing at quillworks.com." in page.lower()
-    assert "What VALR says on the call" in page  # The script, folded away.
+    assert "What VALR says on the call" not in page and 'data-hear="briefing-script"' in page  # Heard, not printed.
     assert "Your measured turns" not in page and "Size the system before drawing boxes" in page
     assert "No reliable India pay data found" in page and "180–215" not in page
-    assert "More research" in page and "Calendar title:" in page
+    assert "More research" in page and "Calendar title" not in page
+    for noise in ("Researched", "sensitive", "from your inbox", "All research notes", "India figures only",
+                  "Where this comes from", "Last updated", "Briefing ready in"):
+        assert noise not in page, noise
+    for action in ('data-action="refresh"', 'data-sheet="fix-company"', 'id="fix-company"'):
+        assert action in page, action  # The ⋯ menu: refresh, fix company, hear the briefing.
 
 
 def test_past_interview_recording_and_impression(client):
@@ -243,8 +276,12 @@ def test_past_interview_recording_and_impression(client):
     assert '<video controls preload="metadata" playsinline' in player and "fathom.video/embed" not in player
     assert "How the interviewer reacted" in player and "They dug in when you put numbers on the design." in player
     assert "How did you keep the queue from growing" in player  # A cue with its quote.
-    assert player.index("Leaned in") < player.index("Impression score")  # Narrative first, numbers folded.
-    assert '<details class="card fold" id="scores">' in player
+    # "Next time" first, then the reaction, the recording, question by question, the skills tested.
+    order = [player.index(x) for x in ('id="next"', 'id="impression"', 'id="recording"', 'id="feedback"', 'id="scores"')]
+    assert order == sorted(order)
+    for gone in ("Impression score", "Positive signals", "Warning signs", "n/a", "Scores", "how we know",
+                 "of the scheduled time", "Pay conversations"):
+        assert gone not in player, gone
     assert "Question by question" in page and "Next time" in page
     unknown = client.get("/valr/interviews/past/fathom-1000", headers=GOOD).text
     assert "data-full" in unknown and "<iframe" not in unknown  # Not stored: ask the notetaker.
@@ -263,21 +300,21 @@ def test_old_anchor_links_resolve_to_the_new_pages(client):
     assert "#past-([A-Za-z0-9-]+)" in script and "/valr/interviews/past/${past[1]}" in script
 
 
-def test_performance_trends_first_then_insights_then_folds(client):
-    page = html.unescape(client.get("/valr/performance", headers=GOOD).text)
+def test_progress_trends_first_then_insights(client):
+    page = html.unescape(client.get("/valr/progress", headers=GOOD).text)
     order = [page.index(x) for x in ('id="trends-title"', 'id="chart-overall"', 'id="chart-skills"', 'id="chart-reactions"',
                                      'id="chart-talk"', 'id="chart-funnel"', "What it means", "Where you stand",
                                      "What's working", "This week's focus", "What's costing you",
-                                     "Salary conversations", "Recent interviews", "All the numbers", "Post-call reports")]
+                                     "Salary conversations")]
     assert order == sorted(order)
     assert page.count('<figure class="tc') >= 5 and page.count('<table class="sr-only">') >= 5
-    assert '<details class="card neg fold" id="salary">' in page  # The scripts start folded.
-    assert '<details class="numbers" id="numbers">' in page and '<details class="numbers" id="recent">' in page
+    assert '<details class="fold card" id="salary">' in page  # The scripts start folded.
+    assert 'download="valr-progress.csv"' in page and "All the numbers" not in page  # The table is a CSV in ⋯.
     assert page.count('type="checkbox" data-focus=') == 3
     assert "You give ground too fast when challenged" in page and "Say instead" in page
-    assert "1 post-call report pending" in page
+    assert "Post-call reports" not in page  # Delivery lives in Settings › Advanced.
     text = re.sub(r"<script.*?</script>|<[^>]+>", " ", page, flags=re.S)
-    for jargon in ("r =", "r=", "rubric", "schema", "stddev", "Correlation"):
+    for jargon in ("r =", "r=", "rubric", "schema", "stddev", "Correlation", "placeholders on purpose", "browser only"):
         assert jargon not in text, jargon
     plain = client.box["view"]
 
@@ -286,7 +323,7 @@ def test_performance_trends_first_then_insights_then_folds(client):
         v["performance"]["coach"] = None
         return v
     client.box["view"] = no_coach
-    page = html.unescape(client.get("/valr/performance", headers=GOOD).text)
+    page = html.unescape(client.get("/valr/progress", headers=GOOD).text)
     assert "This week's focus" in page and "The coach's full read appears here" in page and "Where you stand" not in page
     client.box["view"] = plain
 
@@ -299,11 +336,13 @@ def test_leads_filters_live_in_the_url(client):
     expired = client.get("/valr/leads?status=expired", headers=GOOD).text
     assert "Harbor" in expired and expired.count("data-lead-row=") == 1
     chosen = html.unescape(client.get(f"/valr/leads?lead={lead_id('Orbit Labs')}", headers=GOOD).text)
-    assert 'id="lead"' in chosen and "lena@orbitlabs.example" in chosen and "Why this temperature" in chosen
-    assert "Check Gmail now" in chosen and "Gmail: live" in chosen
+    assert 'id="lead"' in chosen and "lena@orbitlabs.example" in chosen and "Why this temperature" not in chosen
+    assert "data-leads-sync" in chosen and "Check email now" in chosen  # In ⋯, not on show.
+    for gone in ("Gmail: live", "last checked", "Check Gmail now", "/100", "Recency", "Nobody's move", "Role unknown"):
+        assert gone not in chosen, gone
     client.box["leads"] = lambda: contracts.leads(None)
-    assert "The lead tracker isn" in client.get("/valr/leads", headers=GOOD).text
-    assert "Leads appear here once" in client.get("/valr", headers=GOOD).text
+    assert "Connect Google and VALR will find your job emails." in html.unescape(client.get("/valr/leads", headers=GOOD).text)
+    assert "Connect Google and VALR will find your job emails." in html.unescape(client.get("/valr", headers=GOOD).text)
 
 
 def test_lead_corrections_are_on_the_lead_card(client):
@@ -313,6 +352,7 @@ def test_lead_corrections_are_on_the_lead_card(client):
     for control in ('data-fix="stage"', 'data-fix="merge"', 'data-fix="dismiss"', "data-fix-stage", "data-fix-into"):
         assert control in page, control
     assert '<option value="closed-lost">' in page and f'<option value="{juniper}">' not in page  # Not into itself.
+    assert 'data-sheet="lead-fix"' in page and 'id="lead-fix"' in page and "data-merge-search" in page  # In ⋯.
     script = (ROOT / "static/valr-app.js").read_text(encoding="utf-8")
     assert "/valr/api/leads/${encodeURIComponent(id)}/override" in script and "X-CSRF-Token" in script
 
@@ -321,10 +361,13 @@ def test_settings_reflect_reality(client):
     page = html.unescape(client.get("/valr/settings", headers=GOOD).text)
     assert "Connected as @sample_owner" in page and 'data-action="tgtest"' in page
     assert "Fathom" in page and "Optional" in page  # Granola: optional, never a to-do.
-    assert 'id="setup"' in page and "Get set up" in page  # The checklist moved here.
+    assert 'id="setup"' not in page  # Every step is done in this sample: no checklist, no count.
+    assert "of 4 essentials" not in page and 'id="advanced"' in page
     assert 'data-connect="fathom"' in page and 'type="password"' in page  # The connect form, empty.
     assert 'data-action="reach" data-mode="telegram" aria-pressed="true"' in page
     assert 'data-action="reach" data-mode="call" aria-pressed="false"' in page and "The default (Telegram heads-up)" in page
+    for gone in ("Live updates", "How VALR checks it", "while the app is in testing", "Plays the recording right here"):
+        assert gone not in re.sub(r'<p class="small nt-video">.*?</p>', "", page), gone
 
 
 def test_reach_mode_is_an_owner_csrf_post_stored_server_side(client, monkeypatch):
@@ -585,7 +628,7 @@ def test_a_deep_link_start_links_and_keeps_the_username(monkeypatch):
 
 FIXTURES = ["tests/valr_sample.py", "tests/valr_sample_extras.py", "tests/test_valr_pages.py",
             "scripts/preview_ui.py", *(str(p.relative_to(ROOT)) for p in (ROOT / "app/valr_ui").glob("*.py")),
-            "static/valr-app.js", "static/valr-app.css", "static/valr-globe-lite.js", "tests/leads_sample.py"]
+            "static/valr-app.js", "static/valr-ds.css", "static/valr-notify.js", "static/valr-globe-lite.js", "tests/leads_sample.py"]
 
 
 # Built from parts so this file doesn't contain what it forbids: a real phone number and a real name.
@@ -624,43 +667,45 @@ def test_no_owner_name_in_the_code_only_in_settings(monkeypatch):
 
 
 def test_leads_bands_closed_and_waiting_agree_everywhere(client):
-    import re
     client.box["leads"] = lambda: contracts.leads(sample_leads(shape="live"))
     leads = contracts.leads(sample_leads(shape="live"))
     c = leads["counts"]
     assert (c["live"], c["closed"], c["expired"]) == (70, 39, 6)
     words = lambda page: " ".join(re.sub(r"<[^>]+>", " ", html.unescape(page)).split())  # noqa: E731
     home, page = (words(client.get(path, headers=GOOD).text) for path in ("/valr", "/valr/leads"))
-    assert f"{c['live']} live leads" in home and f"{c['live']} live leads" in page
-    assert f"{c['waiting_on_you']} waiting on you" in home and f"Waiting on you {c['waiting_on_you']}" in page
+    them = sum(1 for r in leads["leads"] if r["waiting_on"] == "them")
+    assert f"Pipeline · {c['live']} active" in home and f"{c['waiting_on_you']} companies waiting on you" in home
+    assert f"Your move {c['waiting_on_you']}" in page and f"Waiting on them {them}" in page and f"All {c['live']}" in page
     for b in ("Hot", "Warm", "Cool", "Cold"):
-        assert f"{b} {c[b.lower()]}" in home and f"{b} {c[b.lower()]}" in page
-    assert f"Live {c['live']}" in page and f"Closed {c['closed']}" in page and f"Expired {c['expired']}" in page
+        assert f"{b} {c[b.lower()]}" in home
     rows = lambda text: text.count("data-lead-row=")  # noqa: E731
-    assert rows(client.get("/valr/leads", headers=GOOD).text) == c["live"]
+    assert rows(client.get("/valr/leads", headers=GOOD).text) == c["waiting_on_you"]  # Default tab: Your move.
+    assert rows(client.get("/valr/leads?tab=them", headers=GOOD).text) == them
+    assert rows(client.get("/valr/leads?tab=all", headers=GOOD).text) == c["live"]
+    assert rows(client.get("/valr/leads?tab=all&closed=1", headers=GOOD).text) == c["live"] + c["closed"] + c["expired"]
     assert rows(client.get("/valr/leads?band=hot", headers=GOOD).text) == c["hot"]
-    closed = client.get("/valr/leads?band=closed", headers=GOOD).text
-    assert rows(closed) == c["closed"] and "data-globe-closed checked" in closed
     assert rows(client.get("/valr/leads?waiting=you", headers=GOOD).text) == c["waiting_on_you"]
-    # Sorted by temperature, each row with its band pill.
-    temps = [int(t) for t in re.findall(r'class="band-pill b-\w+">.*?<span class="num">(\d+)</span>', client.get("/valr/leads", headers=GOOD).text)]
-    assert temps == sorted(temps, reverse=True) and len(temps) == c["live"]
-    # Home's to-dos: the reason line and the Gmail thread.
+    # Sorted by temperature; the band is a word, never the 0-100 number.
+    listing = client.get("/valr/leads?tab=all", headers=GOOD).text
+    bands = re.findall(r'class="band-pill b-(\w+)">', listing)
+    order = {"hot": 0, "warm": 1, "cool": 2, "cold": 3}
+    assert len(bands) == c["live"] and [order[b] for b in bands] == sorted(order[b] for b in bands)
+    assert not re.search(r'band-pill[^>]*>.*?<span class="num">\d+', listing)
+    # Home's Your move: the ask in plain words, with the thread.
     you = next(r for r in leads["leads"] if r["waiting_on"] == "you")
-    assert you["waiting_reason"] in home
+    from app.valr_ui import wording
+    assert wording.ask_line(you["waiting_reason"]) in home
 
-
-# Past interviews filled in: company, interviewers and outcome (app/valr_ui/past.py).
 
 def test_past_list_takes_outcome_and_people_from_leads_and_recordings(client):
     page = html.unescape(client.get("/valr/interviews/past", headers=GOOD).text)
     juniper = page.split("/valr/interviews/past/fathom-1003", 1)[1].split("</li>", 1)[0]
-    assert "Interviewing" in juniper and "Outcome unknown" not in juniper  # Lead matched by the invitees' domain.
+    assert "Interviewing" in juniper and "Awaiting result" not in juniper  # Lead matched by the invitees' domain.
     assert "with Asha Rao" in juniper
     nimbus = page.split("/valr/interviews/past/fathom-1006", 1)[1].split("</li>", 1)[0]
     assert "Screening" in nimbus  # Lead matched by name.
     tessel = page.split("/valr/interviews/past/fathom-1005", 1)[1].split("</li>", 1)[0]
-    assert "Not advanced" in tessel  # The scorecard's own outcome wins over the lead's stage.
+    assert "Didn't move on" in tessel  # The scorecard's own outcome wins over the lead's stage.
 
 
 def test_enrich_never_uses_a_round_label_or_the_owner_as_company():
@@ -709,3 +754,166 @@ def test_missing_impressions_come_from_the_read_only_copy(tmp_path, monkeypatch)
     assert "impression" not in by_id["fathom:3"] and perf["coach"] == {"where_you_stand": "Steady."}
     shown = valr_view.performance(perf)["interviews"][0]["impression"]
     assert shown and shown["leaned_in"] == "Numbers."
+
+
+# System copy never reaches the page (the PM spec's P0 list), in any scenario.
+
+BANNED = ["live", "Live updates", "last checked", "updated", "Scheduled", "Researching", "how we know",
+          "Nothing is broken", "only you can see this", "n/a = not tested", "in this browser only",
+          "Needs attention", "offer positive", "next positive", "Times in IST", "Outcome unknown", "Not advanced"]
+
+
+def visible_text(page: str) -> str:
+    """What a reader sees: no scripts, styles, templates, tags or attribute values."""
+    page = re.sub(r"<(script|style|template)\b.*?</\1>", " ", page, flags=re.S)
+    return " ".join(html.unescape(re.sub(r"<[^>]+>", " ", page)).split())
+
+
+def test_no_system_strings_on_any_page(client):
+    client.box["leads"] = lambda: contracts.leads(sample_leads(shape="live"))
+    juniper = lead_id("Juniper Robotics")
+    paths = pages(client) + ["/valr/leads?tab=all&closed=1", f"/valr/leads?lead={juniper}", "/valr/leads?tab=them"]
+    for scenario in ("full", "empty", "error"):
+        client.box["view"] = (lambda sc=scenario: sample_view(extras=sc == "full", scenario=sc))
+        for path in paths:
+            response = client.get(path, headers=GOOD)
+            if response.status_code != 200:
+                continue
+            text = visible_text(response.text)
+            for banned in BANNED:
+                assert not re.search(rf"\b{re.escape(banned)}\b", text, flags=re.I), (scenario, path, banned)
+            assert not re.search(r"\b(?:Hot|Warm|Cool|Cold) \d{1,3}\b(?! ·)", text.split("Pipeline")[0]), (scenario, path)
+
+
+# Notifications: red dots until opened, Home's "New" strip, one count everywhere.
+
+def note(i, kind, title, company, lead="", email=True, hours=1):
+    at = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+    return {"id": i, "kind": kind, "label": kind.capitalize(), "importance": "digest", "title": title, "body": "",
+            "company": company, "link": f"/valr/leads?lead={lead}#lead" if lead else "/valr/leads",
+            "gmail_url": "https://mail.google.com/mail/#all/t1" if email else "", "created_at": at, "day": "Today",
+            "read": False, "lead_id": lead, "email": email}
+
+
+def unread_count(page: str) -> str:
+    return page.split("data-notif-count>", 1)[1].split("<", 1)[0]
+
+
+def test_unread_items_show_red_dots_and_the_counts_agree(client):
+    orbit, kite = lead_id("Orbit Labs"), lead_id("Kite")
+    client.box["notes"] = [note(1, "offer", "Orbit Labs sent an offer", "Orbit Labs", orbit),
+                           note(2, "update", "Kite sent an update", "Kite", kite, hours=3),
+                           note(3, "stage", "Juniper moved to Interviewing", "Juniper", email=False, hours=5)]
+    home = client.get("/valr", headers=GOOD).text
+    strip = home.split("data-notif-strip", 1)[1].split("</section>", 1)[0]
+    assert strip.count('class="notif-item unread') == 3 and "Orbit Labs sent an offer" in strip and "h ago" in strip
+    assert strip.index("Orbit Labs sent an offer") < strip.index("Kite sent an update")  # Newest first.
+    assert 'data-notif-show' in strip  # "See all" opens the bell's panel.
+    assert home.index("data-notif-strip") < home.index("Next interview")  # Above the right-now essentials.
+    # One number: the bell's badge and the strip's count; the Leads nav dot when an email is unread.
+    counts = re.findall(r"data-notif-count>(\d*)<", home)
+    assert counts == ["3", "3"] and 'class="notif-bell has-unread"' in home
+    assert "data-lead-dot" in home
+    leads = client.get("/valr/leads?tab=all", headers=GOOD).text
+    orbit_row = leads.split(f'data-lead-row="{orbit}"', 1)[1].split("</tr>", 1)[0]
+    kite_row = leads.split(f'data-lead-row="{kite}"', 1)[1].split("</tr>", 1)[0]
+    assert "data-unread-lead" in orbit_row and "data-unread-lead" in kite_row
+    assert leads.count("data-unread-lead") == 2  # Only leads with an unread email.
+
+
+def test_opening_a_lead_clears_its_email_dots(client):
+    orbit, kite = lead_id("Orbit Labs"), lead_id("Kite")
+    client.box["notes"] = [note(1, "offer", "Orbit Labs sent an offer", "Orbit Labs", orbit),
+                           note(2, "update", "Kite sent an update", "Kite", kite)]
+    opened = client.get(f"/valr/leads?lead={orbit}", headers=GOOD).text
+    assert unread_count(opened) == "1"  # Read by opening its card, before the page drew the counts.
+    row = opened.split(f'data-lead-row="{orbit}"', 1)[1].split("</tr>", 1)[0]
+    assert "data-unread-lead" not in row and 'id="lead"' in opened
+    home = client.get("/valr", headers=GOOD).text
+    assert "Orbit Labs sent an offer" not in home.split("data-notif-strip", 1)[1].split("</section>", 1)[0]
+    assert "data-lead-dot" in home  # Kite's email is still unread.
+    client.get(f"/valr/leads?lead={kite}", headers=GOOD)
+    home = client.get("/valr", headers=GOOD).text
+    assert "data-lead-dot" not in home and unread_count(home) == ""
+
+
+def test_the_strip_says_all_caught_up_when_nothing_is_unread(client):
+    client.box["notes"] = []
+    home = html.unescape(client.get("/valr", headers=GOOD).text)
+    assert 'class="notif-strip is-clear"' in home and "You're all caught up." in home
+    assert unread_count(home) == "" and "has-unread" not in home and "data-lead-dot" not in home
+
+
+class NoteStore:
+    """notifications.Store in memory, for the real load_notes and the real read API."""
+    rows: list = []
+
+    def __init__(self, connection):
+        pass
+
+    async def setup(self):
+        return None
+
+    async def listing(self, unread_only, since, limit=100):
+        rows = [r for r in self.rows if not (unread_only and r["read_at"])]
+        return sorted(rows, key=lambda r: r["created_at"], reverse=True)[:limit]
+
+    async def unread_count(self, since):
+        return sum(1 for r in self.rows if not r["read_at"])
+
+    async def unread_by_lead(self, since):
+        out = {}
+        for r in self.rows:
+            if not r["read_at"] and r["lead_id"] and r["source_id"].startswith("gmail:"):
+                out[r["lead_id"]] = out.get(r["lead_id"], 0) + 1
+        return out
+
+    async def mark_read(self, ids, now):
+        hit = [r for r in self.rows if not r["read_at"] and (ids is None or r["id"] in ids)]
+        for r in hit:
+            r["read_at"] = now
+        return len(hit)
+
+    async def switches(self):
+        from app import notifications
+        return notifications.Switches.from_row(None)
+
+    async def mark_lead_read(self, lead_id, now):
+        hit = [r for r in self.rows if not r["read_at"] and r["lead_id"] == lead_id]
+        for r in hit:
+            r["read_at"] = now
+        return len(hit)
+
+
+def test_clicking_an_item_reads_it_on_the_server(client, monkeypatch):
+    from app import notifications
+    orbit = lead_id("Orbit Labs")
+    now = datetime.now(timezone.utc)
+    base = {"importance": "digest", "body": "", "gmail_url": "", "thread_id": "t1", "action": "", "interview_at": None,
+            "tg_state": "sent", "tg_sent_at": None, "read_at": None}
+    NoteStore.rows = [{**base, "id": 7, "source_id": "gmail:m7", "kind": "reply", "title": "Orbit Labs replied",
+                       "company": "Orbit Labs", "link": f"/valr/leads?lead={orbit}", "lead_id": orbit,
+                       "created_at": now - timedelta(minutes=30)},
+                      {**base, "id": 8, "source_id": f"stage:{orbit}:offer", "kind": "stage", "title": "Orbit Labs moved to Offer",
+                       "company": "Orbit Labs", "link": f"/valr/leads?lead={orbit}", "lead_id": orbit,
+                       "created_at": now - timedelta(minutes=10)}]
+    monkeypatch.setattr(notifications, "Store", NoteStore)
+    monkeypatch.setattr(routes, "load_notes", REAL_LOAD_NOTES)
+    monkeypatch.setattr(routes, "mark_lead_read", REAL_MARK_LEAD_READ)
+    home = client.get("/valr", headers=GOOD).text
+    assert unread_count(home) == "2" and 'data-notif-item="7"' in home and "data-lead-dot" in home
+    csrf = home.split('name="csrf-token" content="', 1)[1].split('"', 1)[0]
+    headers = {**GOOD, "Content-Type": "application/json", "X-CSRF-Token": csrf}
+    # Showing the panel reads nothing; the bell's API lists both, still unread.
+    listed = client.get("/valr/api/notifications", headers=GOOD).json()
+    assert listed["unread"] == 2 and all(not i["read"] for i in listed["items"])
+    assert {i["lead_id"] for i in listed["items"]} == {orbit} and [i["email"] for i in listed["items"]] == [False, True]
+    done = client.post("/valr/api/notifications/read", content=json.dumps({"ids": [7]}), headers=headers).json()
+    assert done["unread"] == 1
+    home = client.get("/valr", headers=GOOD).text
+    assert 'data-notif-item="7"' not in home and unread_count(home) == "1"
+    assert "data-lead-dot" not in home  # Its email is read; the stage change has no email dot.
+    assert client.post("/valr/api/notifications/read", content=json.dumps({"lead": orbit}), headers=headers).json()["unread"] == 0
+    assert client.post("/valr/api/notifications/read", content=json.dumps({"lead": "../x"}), headers=headers).status_code == 400
+    script = (ROOT / "static/valr-notify.js").read_text(encoding="utf-8")
+    assert "[data-notif-item]" in script and "/valr/api/notifications/read" in script  # Clicks read; opening doesn't.

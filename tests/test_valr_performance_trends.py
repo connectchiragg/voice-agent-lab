@@ -159,11 +159,13 @@ def test_page_renders_sample_data_without_jargon_or_pay_figures():
     view = sample_view()
     page = performance.page(view, CLOCK)
     text = re.sub(r"<[^>]+>", " ", page)
-    assert text.index("Trends") < text.index("What it means") < text.index("Recent interviews") < text.index("All the numbers")
+    assert text.index("Trends") < text.index("What it means")
+    assert "Download all the numbers" in text and 'download="valr-progress.csv"' in page  # The table: a CSV in ⋯.
     for jargon in ("r =", "rubric", "schema", "stddev", "Correlation"):
         assert jargon not in text
     assert not re.search(r"\b\d+\s?(LPA|lakhs?|k\b)|\$\d", text)
-    assert page.count('href="/valr/interviews/past/') == 5 and 'href="/valr/interviews/past">All past' in page
+    for legend in ("Last 8 interviews per skill", "acknowledgements, last", "Average score out of 10 ·", "No word yet:"):
+        assert legend not in text, legend  # Charts carry no methodology notes.
 
 
 def test_where_you_stand_is_two_sentences_at_most():
@@ -178,6 +180,7 @@ def test_low_data_and_empty_pages():
     view = sample_view()
     view["performance"]["interviews"] = view["performance"]["interviews"][:2]
     page = performance.page(view, CLOCK)
-    assert "Needs 3+ interviews to show a trend." in page and 'id="chart-overall"' in page
+    assert "Trends appear after 3 recorded interviews. You have 2." in page and 'id="chart-overall"' not in page
+    assert "Size the system out loud" in page or "<ol" in page  # The latest "Next time" meanwhile.
     empty = sample_view(scenario="empty")
-    assert "Your scores appear after your first recorded interview." in performance.page(empty, CLOCK)
+    assert "Your progress appears after your first recorded interview." in performance.page(empty, CLOCK)

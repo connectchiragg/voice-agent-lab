@@ -3,7 +3,7 @@
 - `GET /valr/api/notifications[?unread=1]`: {ok, unread, items: [{id, kind, label, importance,
   title, body, company, link, gmail_url, created_at, day, read}], switches}. The last 30 days,
   newest first. The bell polls it every 60 s.
-- `POST /valr/api/notifications/read` {ids: [..]} or {all: true}: marks them read (CSRF, same
+- `POST /valr/api/notifications/read` {ids: [..]}, {lead: "<lead id>"} or {all: true}: marks them read (CSRF, same
   origin, JSON: app/valr_dashboard.action_owner). The page marks an item read when it is
   clicked, not when the list opens.
 - `POST /valr/api/notifications/settings` {immediate?, digest?, quiet?}: the Telegram switches
@@ -48,6 +48,7 @@ async def listing(request: Request, unread: int = 0) -> JSONResponse:
 class ReadRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     ids: list[int] = Field(default_factory=list, max_length=500)
+    lead: str = Field(default="", max_length=64, pattern=r"^[\w-]*$")
     all: bool = False
 
 
@@ -58,13 +59,16 @@ async def mark_read(request: Request) -> JSONResponse:
         body = ReadRequest.model_validate_json(await request.body())
     except ValidationError:
         raise HTTPException(400, 'Expected {"ids": [..]} or {"all": true}.') from None
-    if not body.all and not body.ids:
-        raise HTTPException(400, 'Expected {"ids": [..]} or {"all": true}.')
+    if not body.all and not body.ids and not body.lead:
+        raise HTTPException(400, 'Expected {"ids": [..]}, {"lead": ".."} or {"all": true}.')
     now = datetime.now(timezone.utc)
     async with pool().connection() as connection:
         store = notifications.Store(connection)
         await store.setup()
-        changed = await store.mark_read(None if body.all else body.ids, now)
+        if body.lead and not body.all:
+            changed = await store.mark_lead_read(body.lead, now)
+        else:
+            changed = await store.mark_read(None if body.all else body.ids, now)
         count = await store.unread_count(now - notifications.KEEP_FOR)
     return JSONResponse({"ok": True, "marked": changed, "unread": count}, headers=NO_CACHE)
 

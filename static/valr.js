@@ -136,10 +136,11 @@ document.addEventListener("click", async event => {
     location.reload();
     return;
   }
-  const label = button.textContent;
+  const label = button.innerHTML;  // Icons included.
   button.setAttribute("aria-busy", "true");
   button.disabled = true;
-  button.textContent = BUSY[action];
+  const words = button.querySelector(".split-label, span:not(.sr-only)") || button;
+  if (BUSY[action]) words.textContent = BUSY[action];
   try {
     let result;
     if (action === "sync") {
@@ -179,7 +180,7 @@ document.addEventListener("click", async event => {
   } finally {
     button.removeAttribute("aria-busy");
     button.disabled = false;
-    button.textContent = label;
+    button.innerHTML = label;
   }
 });
 
@@ -312,7 +313,7 @@ check();
 setInterval(check, 60000);
 document.addEventListener("visibilitychange", () => { if (!document.hidden) check(); });
 
-// This week's focus (Performance): the ticks stay in this browser only.
+// This week's focus (Progress): ticks are remembered on this device.
 for (const box of document.querySelectorAll("input[data-focus]")) {
   const key = `valr-focus:${box.dataset.focus}`;
   try { box.checked = localStorage.getItem(key) === "1"; } catch {}

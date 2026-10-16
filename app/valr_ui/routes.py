@@ -2,39 +2,76 @@
 login (app/valr_dashboard.viewer, the same check as /valr/api/state); the actions stay
 POST-only, owner-only and CSRF-checked in app/valr_dashboard.py.
 
-    /valr                          Home: the leads globe and "right now"
+    /valr                          Home: what's new, "right now" and the leads globe
     /valr/interviews               upcoming, by day
     /valr/interviews/<slot ref>    one upcoming interview
     /valr/interviews/past          past interviews
     /valr/interviews/past/<id>     one past interview: recording, impression, feedback
-    /valr/leads                    globe, filters (?stage=&q=) and list (?lead=<id> opens one)
-    /valr/performance              trends, then what they mean, then the numbers (folded)
-    /valr/settings                 connections, calls, limits
-    /valr/system                   health, costs, recent research (tucked away)
+    /valr/leads                    tabs, filters (?tab=&stage=&q=) and list (?lead=<id> opens one and
+                                   reads its notifications)
+    /valr/progress                 trends, then what they mean (/valr/performance redirects here)
+    /valr/settings                 connections, reminders, Advanced (/valr/system redirects here)
+
+Every page carries the notification bell; its unread count, Home's "New" strip and the
+Leads dots all come from one load_notes() call, so they always agree.
 
 `?theme=light|dark` pins the theme for one view (screenshots); otherwise the toggle's choice
 or the system's.
 """
 import importlib
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 
 from app import research, valr_dashboard, valr_page
-from app.valr_ui import (attention, contracts, home, interviews, leads, past, performance, settings, shell,
-                         system)
+from app.valr_ui import attention, contracts, home, interviews, leads, past, performance, settings, shell
 
 logger = logging.getLogger("uvicorn.error")
 router = APIRouter()
 # The leads branch's loader, "module:function" -> async fn(pool) -> its /valr/api/leads JSON.
 LEADS_SOURCE = "app.leads_web:collect"
 TITLES = {"home": "Home", "interviews": "Interviews", "interview": "Interview", "past": "Past interviews",
-          "past_one": "Past interview", "leads": "Leads", "performance": "Performance",
-          "settings": "Settings", "system": "System"}
-NAV_OF = {"interview": "interviews", "past": "interviews", "past_one": "interviews", "system": "settings"}
+          "past_one": "Past interview", "leads": "Leads", "progress": "Progress", "settings": "Settings"}
+NAV_OF = {"interview": "interviews", "past": "interviews", "past_one": "interviews"}
+NO_NOTES = {"items": [], "unread": 0, "leads": {}}
+
+
+async def load_notes() -> dict[str, Any]:
+    """The unread notifications (app/notifications.py): {"items" (newest first, the API's
+    shape), "unread", "leads": {lead id: unread emails}}. Empty when Postgres can't say."""
+    if research.pool is None:
+        return NO_NOTES
+    try:
+        from app import notifications
+        now = datetime.now(timezone.utc)
+        since = now - notifications.KEEP_FOR
+        async with research.pool.connection() as connection:
+            store = notifications.Store(connection)
+            await store.setup()
+            rows = await store.listing(True, since, limit=40)
+            count = await store.unread_count(since)
+            by_lead = await store.unread_by_lead(since) if hasattr(store, "unread_by_lead") else {}
+        return {"items": [notifications.view(r, now) for r in rows], "unread": count, "leads": by_lead}
+    except Exception as error:  # noqa: BLE001 - the page renders without the dots.
+        logger.warning("VALR notifications unavailable: %s", type(error).__name__)
+        return NO_NOTES
+
+
+async def mark_lead_read(lead_id: str) -> None:
+    """Opening a lead's card reads its notifications (its email dots clear)."""
+    if research.pool is None or not lead_id:
+        return
+    try:
+        from app import notifications
+        async with research.pool.connection() as connection:
+            store = notifications.Store(connection)
+            await store.setup()
+            await store.mark_lead_read(lead_id, datetime.now(timezone.utc))
+    except Exception as error:  # noqa: BLE001
+        logger.warning("VALR notifications not marked read: %s", type(error).__name__)
 
 
 async def load_leads() -> dict[str, Any]:
@@ -129,8 +166,8 @@ async def load_recording(interview: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def not_found(what: str, back: str, label: str) -> str:
-    return (shell.page_head("Not found", e_(what), crumb=f"{back}|{label}")
-            + '<div class="empty"><p class="muted">It may have been moved or cancelled on your calendar.</p></div>')
+    return (shell.page_head(e_(what), crumb=f"{back}|{label}")
+            + shell.empty_state("calendar", "It may have been moved or cancelled on your calendar."))
 
 
 def e_(text: str) -> str:
@@ -148,11 +185,15 @@ async def render(request: Request, name: str, **params: str) -> HTMLResponse:
                             headers=valr_dashboard.NO_CACHE)
     clock = valr_page.Clock(view.get("zone") or "UTC", datetime.fromisoformat(view["generated_at"]))
     items = attention.items(view)
+    query = request.query_params
+    selected = query.get("lead", "")[:64] if name == "leads" else ""
+    if selected:
+        await mark_lead_read(selected)
+    notes = await load_notes()
     status = 200
     title = TITLES[name]
-    query = request.query_params
     if name == "home":
-        body = home.page(view, clock, items, await load_leads())
+        body = home.page(view, clock, items, await load_leads(), notes)
     elif name == "interviews":
         body = interviews.upcoming_page(await with_slot_names(view), clock)
     elif name == "interview":
@@ -178,16 +219,16 @@ async def render(request: Request, name: str, **params: str) -> HTMLResponse:
             body, status = not_found("That interview isn't in your history.", "/valr/interviews/past", "Past interviews"), 404
     elif name == "leads":
         body = leads.page(view, clock, await load_leads(), query.get("stage", "")[:20],
-                          query.get("q", "")[:80], query.get("lead", "")[:64], query.get("status", "")[:10],
-                          band=query.get("band", "")[:10], waiting=query.get("waiting", "")[:10])
-    elif name == "performance":
+                          query.get("q", "")[:80], selected, query.get("status", "")[:10],
+                          band=query.get("band", "")[:10], waiting=query.get("waiting", "")[:10],
+                          tab=query.get("tab", "")[:6], closed=query.get("closed") == "1", unread=notes["leads"])
+    elif name == "progress":
         body = performance.page(view, clock, await load_leads())
-    elif name == "settings":
-        body = settings.page(view, clock, items)
     else:
-        body = system.page(view, clock, items)
+        body = settings.page(view, clock, items)
     html = shell.layout(view, email, valr_dashboard.csrf_token(email), NAV_OF.get(name, name), title, body,
-                        items, theme=query.get("theme"))
+                        theme=query.get("theme"), bell=shell.bell(notes, items, clock),
+                        lead_dot=bool(notes["leads"]))
     return HTMLResponse(html, status_code=status, headers=valr_dashboard.NO_CACHE)
 
 
@@ -216,9 +257,15 @@ async def leads_page(request: Request) -> HTMLResponse:
     return await render(request, "leads")
 
 
-@router.get("/valr/performance", response_class=HTMLResponse)
-async def performance_page(request: Request) -> HTMLResponse:
-    return await render(request, "performance")
+@router.get("/valr/progress", response_class=HTMLResponse)
+async def progress_page(request: Request) -> HTMLResponse:
+    return await render(request, "progress")
+
+
+@router.get("/valr/performance")
+async def performance_page(request: Request) -> RedirectResponse:
+    await valr_dashboard.viewer(request)
+    return RedirectResponse("/valr/progress", status_code=301)
 
 
 @router.get("/valr/settings", response_class=HTMLResponse)
@@ -226,6 +273,7 @@ async def settings_page(request: Request) -> HTMLResponse:
     return await render(request, "settings")
 
 
-@router.get("/valr/system", response_class=HTMLResponse)
-async def system_page(request: Request) -> HTMLResponse:
-    return await render(request, "system")
+@router.get("/valr/system")
+async def system_page(request: Request) -> RedirectResponse:
+    await valr_dashboard.viewer(request)
+    return RedirectResponse("/valr/settings#advanced", status_code=301)

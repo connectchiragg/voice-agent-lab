@@ -127,11 +127,12 @@ test("at least 90% of the front-facing dots get a label (70 leads, desktop panel
   assert.ok(worst >= 0.9, `worst share ${worst.toFixed(2)}`);
 });
 
-test("the tooltip: company · band · score · stage · last touch", () => {
+test("the tooltip: company · band · stage · last touch, never the 0-100 score", () => {
   const l = lead("Acme", 82, "interviewing", { last_touch_at: "2026-10-13T08:00:00Z" });
-  assert.equal(tipText(l, NOW), "Acme · Hot · 82 · Interviewing · 3 days ago");
+  assert.equal(tipText(l, NOW), "Acme · Hot · Interviewing · 3 days ago");
   assert.equal(tipText({ ...l, stage: "closed-lost", status: "closed", last_touch_at: null }, NOW),
-    "Acme · Closed · 82 · Not moving forward · no touch yet");
+    "Acme · Closed · Not moving forward · no touch yet");
+  assert.ok(!/\d/.test(tipText({ ...l, last_touch_at: null }, NOW)), "no number in the tooltip");
 });
 
 test("layout is deterministic and handles one or no lead", () => {
@@ -165,5 +166,5 @@ function dE(a, b) { return Math.hypot(...a.map((v, i) => v - b[i])); }
 test("final stages sit between interviewing and an offer in size", () => {
   const r = (stage) => nodeRadius({ stage });
   assert.ok(r("interviewing") < r("final") && r("final") < r("offer"));
-  assert.equal(tipText({ company: "Acme", temperature: 92, stage: "final" }, NOW), "Acme · Hot · 92 · Final stages · no touch yet");
+  assert.equal(tipText({ company: "Acme", temperature: 92, stage: "final" }, NOW), "Acme · Hot · Final stages · no touch yet");
 });
