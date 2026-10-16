@@ -249,3 +249,34 @@ def test_a_database_outage_is_a_page_not_a_traceback(client, monkeypatch):
     response = client.get("/valr", headers=GOOD)
     assert response.status_code == 503 and "can't read its data" in response.text
     assert "connection refused" not in response.text
+
+
+def test_performance_reads_schema_2_and_falls_back_only_when_missing(tmp_path, monkeypatch):
+    from datetime import datetime, timezone
+    from tests.valr_sample import performance_file
+    data = performance_file(datetime(2026, 10, 16, tzinfo=timezone.utc))
+    path = tmp_path / "performance.json"
+    path.write_text(json.dumps(data))
+    monkeypatch.setenv("VALR_PERFORMANCE_PATH", str(path))
+    monkeypatch.setenv("VALR_SCORES_PATH", str(tmp_path / "interview_scores.csv"))
+    monkeypatch.setenv("VALR_EVALUATION_PATH", str(tmp_path / "evaluation.json"))
+    monkeypatch.setenv("VALR_PROFILE_PATH", str(tmp_path / "profile.json"))
+    perf, target = valr_view.profile_files()
+    view = valr_view.performance(perf)
+    assert target is None and len(view["interviews"]) == 7 and view["available"]
+    assert [d["label"] for d in view["dimensions"]][:2] == ["Technical", "Communication"]
+    assert view["most_improved"]["label"] == "Answer first"
+    assert view["biggest_risk"]["label"] == "Pushback & curveballs"
+    assert [f["action"] for f in view["focus_this_week"]] == data["interviews"][-1]["do_next_time"]
+    assert view["interviews"][0]["dimensions"]["negotiation"] is not None  # A screen tests pay talk.
+    assert view["interviews"][1]["dimensions"]["negotiation"] is None  # Not exercised: n/a, not 0.
+    assert view["series"]["communication.clarity"]["n"] == 7
+    # The old 1-5 files are used only when performance.json is missing.
+    (tmp_path / "interview_scores.json").write_text(json.dumps({"rows": [
+        {"date": f"2026-0{m}-01", "company": "A", "dimension": "structure", "score": 3} for m in (7, 8, 9)]}))
+    assert valr_view.profile_files()[0]["schema_version"] == 2
+    path.unlink()
+    old, _ = valr_view.profile_files()
+    assert valr_view.performance(old)["interviews"][0]["dimensions"] == {"communication": 6.0}
+    (tmp_path / "interview_scores.json").unlink()
+    assert valr_view.performance(valr_view.profile_files()[0])["available"] is False
