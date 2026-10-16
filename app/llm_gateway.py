@@ -56,7 +56,7 @@ class Gateway:
 
     def __init__(self, mode: str | None = None, openrouter_key: str | None = None,
                  fallback: bool | None = None, guard: str | None = None,
-                 openrouter: Any = None, direct: Any = None, timeout: float = 60,
+                 openrouter: Any = None, direct: Any = None, timeout: float | None = None,
                  max_retries: int = 2) -> None:
         self.openrouter_key = openrouter_key if openrouter_key is not None else os.getenv("OPENROUTER_API_KEY", "")
         self.mode = (mode or os.getenv("LLM_GATEWAY") or ("openrouter" if self.openrouter_key else "anthropic")).lower()
@@ -68,7 +68,9 @@ class Gateway:
         self.guard = (guard or os.getenv("LLM_BYOK_GUARD", "refuse")).lower()
         if self.guard not in ("refuse", "warn", "off"):
             raise ValueError(f"LLM_BYOK_GUARD must be refuse, warn or off, not {self.guard!r}")
-        self.timeout, self.max_retries = timeout, max_retries
+        # Per request; the Sonnet writer at effort high can take most of a minute.
+        self.timeout = timeout if timeout is not None else float(os.getenv("LLM_GATEWAY_TIMEOUT_S", "120"))
+        self.max_retries = max_retries
         self._openrouter, self._direct = openrouter, direct
         self.tripped = False
         self.stats: Counter[str] = Counter()
