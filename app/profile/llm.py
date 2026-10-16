@@ -53,21 +53,24 @@ class AnthropicJsonLLM:
 
     def __init__(self, client=None, ledger: Ledger | None = None):
         if client is None:
-            import anthropic
-            client = anthropic.Anthropic()
+            from app import llm_gateway  # OpenRouter (BYOK) or Anthropic direct, per LLM_GATEWAY
+            client = llm_gateway.shared().client()
         self.client = client
         self.ledger = ledger or Ledger()
 
     def json(self, *, model: str, system: str, user: str, schema: dict, max_tokens: int,
              effort: str) -> dict:
+        # output_config and fallbacks go in extra_body: the worker's anthropic 0.73 (pinned by
+        # crewai) has neither argument.
         kwargs = dict(model=model, max_tokens=max_tokens, system=system,
                       messages=[{"role": "user", "content": user}],
-                      output_config={"effort": effort,
-                                     "format": {"type": "json_schema", "schema": schema}})
+                      extra_body={"output_config": {"effort": effort,
+                                                    "format": {"type": "json_schema", "schema": schema}}})
         if model.startswith("claude-sonnet-5-5"):
-            # Server-side fallback on a safety-classifier refusal (Claude API only).
-            response = self.client.beta.messages.create(
-                **kwargs, betas=["server-side-fallback-2026-07-01"], fallbacks="default")
+            # Server-side fallback on a safety-classifier refusal (Claude API only; the
+            # OpenRouter gateway drops it).
+            kwargs["extra_body"]["fallbacks"] = "default"
+            response = self.client.beta.messages.create(**kwargs, betas=["server-side-fallback-2026-07-01"])
         else:
             response = self.client.messages.create(**kwargs)
         usage = response.usage
