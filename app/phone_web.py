@@ -4,10 +4,14 @@
   the iOS Shortcut cannot sign in with Google). `Authorization: Bearer <upload token>`,
   compared in constant time with the stored SHA-256 (VALR_UPLOAD_TOKEN is the first seed).
   multipart/form-data: `file` (m4a, mp3, wav or aac, at most VALR_PHONE_MAX_MB, 100) and the
-  optional `title`, `name` (the other party) and `recorded_at` (ISO 8601). The audio is
+  optional `title`, `name` (the other party), `recorded_at` (ISO 8601) and `filename` (else the
+  file part's own name: its date and time, and a contact name, are hints; digits are never
+  kept). A file VALR already has answers 200 {ok, duplicate: true, id} and is not stored or
+  processed again, so the batch Shortcut can re-send safely. Success also carries
+  `"result": "ok"` (text), which a Shortcut's If can compare reliably. The audio is
   checked by its first bytes, streamed in 1 MB pieces, each encrypted (VALR_TOKEN_KEY), into
   Postgres; the answer is {ok, id} at once and the research worker transcribes it.
-  Per IP (CF-Connecting-IP): at most VALR_UPLOAD_PER_HOUR (20) requests an hour, good or bad.
+  Per IP (CF-Connecting-IP): at most VALR_UPLOAD_PER_HOUR (60) requests an hour, good or bad.
   401 for a missing or wrong token, 413 too large, 415 not audio, 429 too many.
 - `GET /valr/api/recording/audio?id=phone:<id>` (owner): the decrypted audio, with Range
   support, for the past-interview player. Gone (410) once the audio was deleted.
@@ -17,6 +21,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import time
 from collections import deque
@@ -24,7 +29,7 @@ from datetime import datetime, timezone
 from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Request, Response
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from app import phone_recordings as phone
@@ -62,7 +67,7 @@ limiter = RateLimit()
 
 def per_hour() -> int:
     import os
-    return max(1, int(os.getenv("VALR_UPLOAD_PER_HOUR", "20")))
+    return max(1, int(os.getenv("VALR_UPLOAD_PER_HOUR", "60")))  # The batch Shortcut sends several at once.
 
 
 def client_ip(request: Request) -> str:
@@ -111,8 +116,12 @@ async def recording_upload(request: Request) -> JSONResponse:
         await run(phone.drop_upload, upload_id)
         logger.warning("Recording upload failed: %s", type(error).__name__)
         raise HTTPException(400, "The upload did not finish. Try again.") from None
+    if result.get("duplicate"):
+        logger.info("Recording upload was a duplicate (%s, %.1f MB)", result["kind"], result["size"] / 1048576)
+        return JSONResponse({"ok": True, "result": "ok", "duplicate": True, "id": f"{phone.PROVIDER}:{result['duplicate']}",
+                             "message": "Already received. Nothing new to do."}, headers=NO_CACHE)
     logger.info("Recording upload received (%s, %.1f MB)", result["kind"], result["size"] / 1048576)
-    return JSONResponse({"ok": True, "id": f"{phone.PROVIDER}:{upload_id}",
+    return JSONResponse({"ok": True, "result": "ok", "duplicate": False, "id": f"{phone.PROVIDER}:{upload_id}",
                          "message": "Got it. VALR will transcribe it and add it to Past interviews."},
                         headers=NO_CACHE)
 
@@ -125,12 +134,14 @@ async def receive(request: Request, boundary: bytes, upload_id: str, limit: int)
     fields: dict[str, str] = {}
     part: dict[str, str] | None = None
     head = bytearray()
-    kind = ""
+    kind = filename = ""
     size = idx = 0
     seen_file = started = False
+    digest = hashlib.sha256()
 
     async def store(piece: bytes) -> None:
         nonlocal idx
+        digest.update(piece)
         await run(phone.put_chunk, upload_id, idx, phone.seal_chunk(key, piece))
         idx += 1
 
@@ -139,7 +150,7 @@ async def receive(request: Request, boundary: bytes, upload_id: str, limit: int)
             if event == "part":
                 part = value
                 if part["name"] == "file" and not seen_file:
-                    seen_file, head = True, bytearray()
+                    seen_file, head, filename = True, bytearray(), part["filename"]
                 elif part["name"] == "file":
                     raise HTTPException(400, "Send one file at a time.")
             elif event == "data" and part is not None:
@@ -178,9 +189,17 @@ async def receive(request: Request, boundary: bytes, upload_id: str, limit: int)
     rest = chunker.rest()
     if rest:
         await store(rest)
+    sha = digest.hexdigest()
+    earlier = await run(phone.find_duplicate, sha, upload_id)
+    if earlier:
+        await run(phone.drop_upload, upload_id)
+        return {"size": size, "kind": kind, "duplicate": earlier}
+    await run(phone.release_failed, sha)
+    hint_name, hint_when = phone.from_filename(fields.get("filename") or filename)
     when = phone.parse_when(fields.get("recorded_at", "")) if fields.get("recorded_at") else None
-    await run(phone.finish_upload, upload_id, size, kind, phone.clean_text(fields.get("title", ""), 200),
-              phone.clean_text(fields.get("name", ""), 80), when)
+    name = phone.clean_text(phone.strip_phones(fields.get("name", "")), 80) or hint_name
+    await run(phone.finish_upload, upload_id, size, kind,
+              phone.clean_text(phone.strip_phones(fields.get("title", "")), 200), name, when or hint_when, sha)
     return {"size": size, "kind": kind}
 
 
@@ -253,3 +272,22 @@ async def phone_token(request: Request) -> JSONResponse:
     logger.info("VALR upload token %s", "shown" if body.action == "show" else "rotated")
     return JSONResponse({"ok": True, "token": token, "message": "Copy it now: it won't be shown again."},
                         headers=NO_CACHE)
+
+
+@router.get("/valr/settings/phone-help", response_class=HTMLResponse)
+async def phone_help_page(request: Request) -> HTMLResponse:
+    """Settings › Phone call recordings › "iPhone shortcut steps": docs/phone-recordings.md."""
+    from app import phone_help, valr_page
+    from app.valr_ui import attention, shell
+    email = await valr_dashboard.owner(request)
+    try:
+        view = await valr_dashboard.state_view()
+    except Exception as error:  # noqa: BLE001
+        logger.warning("VALR page unavailable: %s", type(error).__name__)
+        return HTMLResponse(valr_page.error_page("The database didn't answer."), status_code=503, headers=NO_CACHE)
+    body = shell.page_head("Settings", "iPhone shortcut steps",
+                           "Send Truecaller recordings to VALR: one at a time, or all at once from a Home Screen button.",
+                           crumb="/valr/settings#phone-recordings|Settings") + phone_help.page_body()
+    html = shell.layout(view, email, valr_dashboard.csrf_token(email), "settings", "iPhone shortcut steps", body,
+                        attention.items(view), theme=request.query_params.get("theme"))
+    return HTMLResponse(html, headers=NO_CACHE)

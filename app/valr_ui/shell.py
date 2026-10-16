@@ -131,6 +131,7 @@ THEME_BOOT = ("<script>try{var t=localStorage.getItem('valr-theme');var d=docume
 def layout(view: dict[str, Any], email: str, csrf: str, active: str, title: str, body: str,
            items: list[dict[str, Any]], theme: str | None = None) -> str:
     from app.auth.pages import account_menu  # Here: app.auth.pages imports this module.
+    from app.valr_ui import pwa
     clock = Clock(view.get("zone") or "UTC", datetime.fromisoformat(view["generated_at"]))
     nav = "".join(f'<a href="{href}"{" aria-current=\"page\"" if key == active else ""}>{e(label)}</a>'
                   for key, label, href in NAV)
@@ -150,6 +151,7 @@ def layout(view: dict[str, Any], email: str, csrf: str, active: str, title: str,
 <script type="module" src="{asset('valr-app.js')}"></script>
 <script type="module" src="{asset('valr-player.js')}"></script>
 <script type="module" src="{asset('valr-notify.js')}"></script>
+{pwa.head()}
 </head><body class="app page-{e(active)}">
 <a class="sr-only skip" href="#main">Skip to content</a>
 <header class="appbar">

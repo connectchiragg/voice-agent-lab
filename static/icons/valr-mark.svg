@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="512" height="512">
+  <!-- VALR's Home Screen mark: a bone-white V on cobalt (--signal-fill). scripts/make_icons.py draws the PNGs from these points. -->
+  <rect width="100" height="100" fill="#2459d6"/>
+  <polygon points="25,27 36.5,27 50,60.5 63.5,27 75,27 55.6,74 44.4,74" fill="#f4f6fa"/>
+</svg>

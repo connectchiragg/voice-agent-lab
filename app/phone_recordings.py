@@ -13,6 +13,12 @@ Storage (Postgres, so the app container needs no writable disk):
 - `phone_audio`: the audio in CHUNK-byte pieces, each a Fernet token (VALR_TOKEN_KEY), so it
   streams in and out (Range requests) without holding a whole file in memory. Deleted
   VALR_PHONE_AUDIO_DAYS (7) days after processing (or after a final failure).
+- Re-sends are safe: each upload's SHA-256 is kept (`sha256`), and a file VALR already has
+  (waiting, processing or done) is answered {ok, duplicate, id} and not stored again. A failed
+  one can be sent again.
+- The file name is a hint (`from_filename`): Truecaller names often hold the contact and the
+  date. The date and time become `recorded_at`, a name becomes the other party; digits are
+  never kept, so a phone number in the name is never stored or shown.
 - `phone_upload_token`: the Shortcut's bearer token, as a SHA-256 hash only. VALR_UPLOAD_TOKEN
   is the first seed; Settings can show it once, and rotate it (the new one is shown once).
 
@@ -75,6 +81,14 @@ CREATE TABLE IF NOT EXISTS phone_upload_token (
     created_at    timestamptz NOT NULL DEFAULT now(),
     revealed_at   timestamptz
 );
+-- Duplicate detection (re-sends from the batch Shortcut). Older rows keep NULL.
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                 WHERE table_name = 'phone_uploads' AND column_name = 'sha256') THEN
+    ALTER TABLE phone_uploads ADD COLUMN sha256 text;
+    CREATE UNIQUE INDEX phone_uploads_by_sha256 ON phone_uploads (sha256) WHERE sha256 IS NOT NULL;
+  END IF;
+END $$;
 """
 UPLOAD_FIELDS = ("id", "received_at", "recorded_at", "size", "kind", "title", "other_name", "status", "tries",
                  "error", "duration_s", "meeting", "processed_at", "delete_after", "audio_deleted_at")
@@ -330,6 +344,41 @@ def clean_text(value: str, limit: int) -> str:
     return " ".join("".join(ch for ch in value if ch.isprintable()).split())[:limit]
 
 
+PHONE_LIKE = re.compile(r"\+?\d[\d\s().\-_]{5,}\d")
+FILLER = re.compile(r"\b(call|calls|recording|recordings|recorded|rec|truecaller|audio|voice|incoming|outgoing|"
+                    r"with|from|to|at|on|am|pm|in|out)\b", re.I)
+DATE_TIME = re.compile(
+    r"(?<![\d+])(?:(?P<y>20\d{2})[-_.]?(?P<m>[01]\d)[-_.]?(?P<d>[0-3]\d)|(?P<d2>[0-3]\d)[-_.](?P<m2>[01]\d)[-_.](?P<y2>20\d{2}))"
+    r"(?:[\sT_\-.]*(?:at[\s_]*)?(?P<H>[0-2]\d)[-_.:h]?(?P<M>[0-5]\d)(?:[-_.:m]?(?P<S>[0-5]\d))?)?(?!\d)", re.I)
+
+
+def strip_phones(text: str) -> str:
+    """No phone numbers: anything number-like goes."""
+    return " ".join(PHONE_LIKE.sub(" ", text or "").split())
+
+
+def from_filename(filename: str, zone: str = "") -> tuple[str, datetime | None]:
+    """'Riya Sen 2026-10-17 14-30-12.m4a' -> ('Riya Sen', 2026-10-17 14:30:12 local). A name made
+    only of digits (a phone number) becomes ''. Times are local (ASSISTANT_TIMEZONE)."""
+    from zoneinfo import ZoneInfo
+    stem = os.path.splitext(os.path.basename(filename or ""))[0][:200]
+    when = None
+    match = DATE_TIME.search(stem)
+    if match:
+        g = match.groupdict()
+        try:
+            local = datetime(int(g["y"] or g["y2"]), int(g["m"] or g["m2"]), int(g["d"] or g["d2"]),
+                             int(g["H"] or 0), int(g["M"] or 0), int(g["S"] or 0))
+            when = local.replace(tzinfo=ZoneInfo(zone or os.getenv("ASSISTANT_TIMEZONE", "Asia/Kolkata")))
+            stem = stem[:match.start()] + " " + stem[match.end():]
+        except ValueError:
+            when = None
+    name = re.sub(r"[\d+]", " ", strip_phones(stem))       # No digits at all survive.
+    name = FILLER.sub(" ", re.sub(r"[_\-.()\[\],#]+", " ", name))
+    name = " ".join(name.split())
+    return (clean_text(name, 80) if re.search(r"[^\W\d_]{2}", name) else ""), when
+
+
 def parse_when(value: str) -> datetime | None:
     try:
         moment = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
@@ -358,10 +407,25 @@ async def put_chunk(connection: Any, upload_id: str, idx: int, sealed: bytes) ->
 
 
 async def finish_upload(connection: Any, upload_id: str, size: int, kind: str, title: str, other_name: str,
-                        recorded_at: datetime | None) -> None:
+                        recorded_at: datetime | None, sha256: str | None = None) -> None:
     await connection.execute(
         "UPDATE phone_uploads SET status = 'uploaded', size = %s, kind = %s, title = %s, other_name = %s, "
-        "recorded_at = %s WHERE id = %s", (size, kind, title, other_name, recorded_at, upload_id))
+        "recorded_at = %s, sha256 = %s WHERE id = %s", (size, kind, title, other_name, recorded_at, sha256, upload_id))
+
+
+async def find_duplicate(connection: Any, sha256: str, upload_id: str) -> str | None:
+    """An earlier upload of the same bytes that is waiting, processing or done."""
+    cursor = await connection.execute(
+        "SELECT id FROM phone_uploads WHERE sha256 = %s AND id <> %s AND status IN ('uploaded', 'processing', 'done') "
+        "LIMIT 1", (sha256, upload_id))
+    row = await cursor.fetchone()
+    return row[0] if row else None
+
+
+async def release_failed(connection: Any, sha256: str) -> None:
+    """A failed earlier copy gives up its hash, so this re-send is processed."""
+    await connection.execute("UPDATE phone_uploads SET sha256 = NULL WHERE sha256 = %s AND status = 'failed'",
+                             (sha256,))
 
 
 async def drop_upload(connection: Any, upload_id: str) -> None:

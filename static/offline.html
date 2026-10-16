@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex"><meta name="theme-color" content="#05070c">
+<title>Offline · VALR</title>
+<style>
+  :root { color-scheme: dark; --char: #05070c; --bone: #e4e9f2; --ash: #9aa5ba; --signal-fill: #2459d6; }
+  @media (prefers-color-scheme: light) { :root { color-scheme: light; --char: #f3f5f9; --bone: #0a0f1c; --ash: #4a5670; } }
+  html, body { height: 100%; margin: 0; background: var(--char); color: var(--bone);
+               font: 16px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { min-height: 100%; display: grid; place-content: center; gap: 12px; padding: 24px; text-align: center; }
+  img { width: 64px; height: 64px; margin: 0 auto; border-radius: 14px; }
+  h1 { font-size: 1.4rem; margin: 0; letter-spacing: -0.02em; }
+  p { margin: 0; color: var(--ash); }
+  button { justify-self: center; margin-top: 8px; padding: 10px 18px; border: 0; background: var(--signal-fill);
+           color: #fff; font: inherit; cursor: pointer; }
+</style>
+</head><body>
+<main>
+  <img src="/static/icons/icon-192.png" alt="">
+  <h1>You're offline</h1>
+  <p>VALR needs a connection. Nothing private is stored on this phone.</p>
+  <button type="button" onclick="location.reload()">Try again</button>
+</main>
+</body></html>

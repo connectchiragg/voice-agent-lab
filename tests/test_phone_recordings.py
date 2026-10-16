@@ -47,9 +47,18 @@ class FakePhone:
         async def put_chunk(c, upload_id, idx, sealed):
             self.audio[(upload_id, idx)] = sealed
 
-        async def finish_upload(c, upload_id, size, kind, title, other_name, recorded_at):
+        async def finish_upload(c, upload_id, size, kind, title, other_name, recorded_at, sha256=None):
             self.uploads[upload_id].update(status="uploaded", size=size, kind=kind, title=title,
-                                           other_name=other_name, recorded_at=recorded_at)
+                                           other_name=other_name, recorded_at=recorded_at, sha256=sha256)
+
+        async def find_duplicate(c, sha256, upload_id):
+            return next((u["id"] for u in self.uploads.values() if u.get("sha256") == sha256 and u["id"] != upload_id
+                         and u["status"] in ("uploaded", "processing", "done")), None)
+
+        async def release_failed(c, sha256):
+            for u in self.uploads.values():
+                if u.get("sha256") == sha256 and u["status"] == "failed":
+                    u["sha256"] = None
 
         async def drop_upload(c, upload_id):
             self.uploads.pop(upload_id, None)
@@ -336,3 +345,69 @@ def test_a_failed_transcription_is_retried_then_given_up(client, key):
         assert run(processor.run_once(object())) is None
     row = next(iter(client.phone.uploads.values()))
     assert row["status"] == "failed" and row["error"] == "RuntimeError" and row["delete_after"] is not None
+
+
+# Re-sends from the batch Shortcut, and what a file name tells.
+
+def test_a_resent_file_is_a_duplicate_and_not_stored_again(client):
+    import hashlib
+    first = post(client, name="Riya Sen 2026-10-17 14-30-12.m4a").json()
+    assert first["ok"] is True and first["duplicate"] is False
+    again = post(client, name="copy of it.m4a")
+    assert again.status_code == 200 and again.json() == {"ok": True, "result": "ok", "duplicate": True, "id": first["id"],
+                                                         "message": "Already received. Nothing new to do."}
+    assert len(client.phone.uploads) == 1 and {k[0] for k in client.phone.audio} == {first["id"].split(":")[1]}
+    row = next(iter(client.phone.uploads.values()))
+    assert row["sha256"] == hashlib.sha256(M4A).hexdigest()
+    other = post(client, data=M4A[:-1] + b"x").json()  # Different bytes: a new recording.
+    assert other["duplicate"] is False and len(client.phone.uploads) == 2
+    row["status"] = "failed"  # A failed copy can be sent again.
+    retry = post(client).json()
+    assert retry["duplicate"] is False and row["sha256"] is None
+
+
+def test_the_file_name_gives_the_time_and_name_but_never_a_number(client):
+    post(client, name="Call recording - Riya Sen (+91 98765 43210) 17-10-2026 09.05.m4a")
+    row = next(iter(client.phone.uploads.values()))
+    assert row["other_name"] == "Riya Sen" and row["recorded_at"].isoformat() == "2026-10-17T09:05:00+05:30"
+    client.phone.uploads.clear()
+    post(client, data=M4A + b"1", name="+919876543210_20261017_143012.m4a")
+    row = next(iter(client.phone.uploads.values()))
+    assert row["other_name"] == "" and "98765" not in json.dumps(row, default=str)
+    client.phone.uploads.clear()
+    post(client, data=M4A + b"2", name="x.m4a", fields={"filename": "Arjun Rao 2026-10-16 18-00.m4a",
+                                                        "name": "", "title": "Call +91 98765 43210"})
+    row = next(iter(client.phone.uploads.values()))
+    assert row["other_name"] == "Arjun Rao" and row["recorded_at"].hour == 18 and "98765" not in row["title"]
+
+
+@pytest.mark.parametrize("filename, name, when", [
+    ("Riya Sen 2026-10-17 14-30-12.m4a", "Riya Sen", "2026-10-17T14:30:12+05:30"),
+    ("Rahul_K_2026_10_17_0930.mp3", "Rahul K", "2026-10-17T09:30:00+05:30"),
+    ("Recording 2026-10-17 at 14.30.12.m4a", "", "2026-10-17T14:30:12+05:30"),
+    ("9876543210.m4a", "", None), ("+91 98200 26101.m4a", "", None),
+    ("Acme HR.m4a", "Acme HR", None), ("call_rec_20261317.m4a", "", None)])
+def test_from_filename(monkeypatch, filename, name, when):
+    monkeypatch.setenv("ASSISTANT_TIMEZONE", "Asia/Kolkata")
+    got_name, got_when = phone.from_filename(filename)
+    assert got_name == name and (got_when.isoformat() if got_when else None) == when
+
+
+def test_the_shortcut_steps_page_is_owner_only_and_shows_the_batch_steps(client):
+    assert client.get("/valr/settings/phone-help").status_code == 403
+    assert client.get("/valr/settings/phone-help", headers={"Cf-Access-Jwt-Assertion": "guest"}).status_code == 403
+    page = client.get("/valr/settings/phone-help", headers=client.good)
+    assert page.status_code == 200 and "iPhone shortcut steps" in page.text
+    for step in ("VALR Inbox", "Save to Files", "Repeat with Each", "Get Contents of URL", "Delete Files",
+                 "Add to Home Screen", "<strong>If</strong>"):
+        assert step in page.text, step
+    settings = client.get("/valr/settings", headers=client.good).text
+    assert 'href="/valr/settings/phone-help"' in settings
+
+
+def test_help_markdown_is_escaped_and_nests_lists():
+    from app import phone_help
+    out = phone_help.render("## Hi <b>\n\n1. One **bold**\n   - inner `code`\n2. Two\n\n<script>x</script>")
+    assert "<h3>Hi &lt;b&gt;</h3>" in out and "<script>" not in out and "&lt;script&gt;" in out
+    assert out.count("<ol") == 1 and out.count("<ul") == 1 and "<code>code</code>" in out
+    assert "<strong>bold</strong>" in out and out.index("<ul") < out.index("Two")
