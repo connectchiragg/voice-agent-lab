@@ -1,5 +1,6 @@
 """The VALR cockpit: Access on every route, owner + CSRF on the actions, the pause flag,
 and nothing private (attendee emails, phone numbers) on the page or in the JSON."""
+import html
 import json
 import time
 from datetime import datetime, timedelta, timezone
@@ -57,6 +58,15 @@ def client(monkeypatch):
     return test_client
 
 
+def first_ref(client) -> str:
+    page = client.get("/valr/interviews", headers=GOOD).text
+    return page.split('href="/valr/interviews/slot-', 1)[1].split('"', 1)[0]
+
+
+def detail(client) -> str:
+    return client.get(f"/valr/interviews/slot-{first_ref(client)}", headers=GOOD).text
+
+
 def token(client) -> str:
     page = client.get("/valr", headers=GOOD).text
     return page.split('name="csrf-token" content="', 1)[1].split('"', 1)[0]
@@ -73,22 +83,23 @@ def test_page_and_state_need_a_verified_access_login(client):
 
 
 def test_attendee_emails_are_shown_to_the_owner_and_phone_numbers_are_not(client):
-    for text in (client.get("/valr", headers=GOOD).text,
-                 client.get("/valr/api/state", headers=GOOD).text):
+    upcoming = client.get("/valr/interviews", headers=GOOD).text
+    for text in (detail(client) + upcoming, client.get("/valr/api/state", headers=GOOD).text):
         assert "maya.lin@juniper.example" in text and "talent@juniper.example" in text  # Attendees.
         assert "greenhouse" not in text.lower() and "555 0134" not in text  # Tools; phone numbers.
         assert "[phone hidden]" in text
         assert "[email hidden]" in text and "priya@juniper.example" not in text  # Free text stays scrubbed.
-    page = client.get("/valr", headers=GOOD).text
+    page = detail(client)
     assert "Maya Lin" in page and "Recruiter, not researched" in page
     assert 'href="mailto:maya.lin@juniper.example"' in page
-    assert "$180k-$215k" in page and "45–60 LPA" in page  # Pay stays visible to the owner.
-    assert "+1 228 888 8007" in page  # VALR's own number, to call it: not an attendee's.
+    assert "45–60 LPA" in page  # India pay stays visible to the owner.
+    assert "+1 228 888 8007" in client.get("/valr", headers=GOOD).text  # VALR's own number, to call it.
 
 
 def test_plain_language_and_ist_times(client):
     import re
-    page = client.get("/valr", headers=GOOD).text
+    page = "".join(client.get(path, headers=GOOD).text for path in (
+        "/valr", "/valr/interviews", "/valr/performance", "/valr/settings", "/valr/leads")) + detail(client)
     for heading in ("Who you're meeting", "What to expect in this round", "Likely questions",
                     "Pay snapshot", "Prep checklist", "From your emails &amp; past rounds", "This week's focus", "Where you stand",
                     "How the interviewer reacted"):
@@ -122,7 +133,8 @@ def test_pause_flag_round_trip_needs_owner_and_csrf(client):
     assert ok.status_code == 200 and ok.json()["paused"] is True
     assert client.flags == {interview_store.DIALS_PAUSED: True}
     page = client.get("/valr", headers=GOOD).text
-    assert "Briefing calls paused" in page and "Paused: no call" in page and "Resume calls" in page
+    assert "Paused" in page and "Resume calls" in page and "Briefing calls are paused" in page
+    assert "Paused: no call" in client.get("/valr/interviews", headers=GOOD).text
     assert client.get("/valr/api/state", headers=GOOD).json()["next_call"] is None
     client.post("/valr/api/dials", content=json.dumps({"paused": False}),
                 headers={**json_headers, "X-CSRF-Token": csrf})
@@ -191,7 +203,7 @@ def test_builders():
     rows = valr_view.interviewer_rows(event, {"a@acme.example"}, True, {"me@x.com"})
     assert [(r["name"], r["email"], r["status"]) for r in rows] == [
         ("Ana", "a@acme.example", "researched"), ("Ben", "b@acme.example", "skipped_classifier"),
-        ("Hana Recruiter", "hr@acme.example", "skipped_hr"), ("Attendee 4", "c@acme.example", "declined")]
+        ("Hana Recruiter", "hr@acme.example", "skipped_hr"), ("C", "c@acme.example", "declined")]
     assert "me@x.com" not in json.dumps(rows) and "resource.calendar" not in json.dumps(rows)
     blocks = [{"id": "b", "start": start.isoformat(), "state": "waiting", "label": "L"}]
     nxt = valr_view.next_call(blocks, start - timedelta(hours=1), paused=False)
@@ -235,16 +247,21 @@ async def _view():
 
 
 @pytest.mark.parametrize("scenario,expected", [
-    ("empty", ["Finish setting up", "Connect your Google Calendar", "Your scores appear after"]),
-    ("error", ["We couldn't load your interviews just now", "Reconnect"]),
+    ("empty", {"/valr": ["Google isn't connected", "No phone number on file", "None yet"],
+               "/valr/interviews": ["Connect your Google Calendar"],
+               "/valr/performance": ["Your scores appear after"],
+               "/valr/settings": ["Connect Google", "Missing"]}),
+    ("error", {"/valr/interviews": ["We couldn't load your interviews just now"],
+               "/valr": ["Google access expired", "Reconnect Google", "The last calendar sync failed"]}),
 ])
 def test_first_run_and_error_states(client, monkeypatch, scenario, expected):
     async def collect(pool, now=None):
         return sample_view(scenario=scenario)
     monkeypatch.setattr(valr_view, "collect", collect)
-    page = client.get("/valr", headers=GOOD).text
-    for text in expected:
-        assert text in page, text
+    for path, texts in expected.items():
+        page = html.unescape(client.get(path, headers=GOOD).text)
+        for text in texts:
+            assert text in page, (path, text)
 
 
 def test_a_database_outage_is_a_page_not_a_traceback(client, monkeypatch):
@@ -270,8 +287,8 @@ def test_performance_reads_schema_2_and_falls_back_only_when_missing(tmp_path, m
     view = valr_view.performance(perf)
     assert target is None and len(view["interviews"]) == 7 and view["available"]
     assert [d["label"] for d in view["dimensions"]][:2] == ["Technical", "Communication"]
-    assert view["most_improved"]["label"] == "Answer first"
-    assert view["biggest_risk"]["label"] == "Pushback & curveballs"
+    assert view["most_improved"]["label"] == "Answering first"
+    assert view["biggest_risk"]["label"] == "Handling pushback"
     assert [f["action"] for f in view["focus_this_week"]] == data["interviews"][-1]["do_next_time"]
     assert view["interviews"][0]["dimensions"]["negotiation"] is not None  # A screen tests pay talk.
     assert view["interviews"][1]["dimensions"]["negotiation"] is None  # Not exercised: n/a, not 0.
@@ -313,12 +330,15 @@ def test_telegram_mode_tile_statuses_and_start_code(client, monkeypatch):
     monkeypatch.setattr(valr_view, "collect", collect)
     monkeypatch.setattr(telegram_api, "setup", none)
     monkeypatch.setattr(telegram_api, "new_code", new_code)
-    page = client.get("/valr", headers=GOOD).text
-    assert "Next heads-up on Telegram" in page and "Heads-up at <time" in page and "Telegram heads-up at" in page
-    assert "tries again" not in page and "messages you on Telegram" in page
-    assert "Calling at 4:10 PM" in page and "Pause heads-ups" in page
-    assert "Connect Telegram" in page and 'data-action="tgcode"' in page
-    assert "isn't connected yet" in page and "not connected (send the /start code)" in page
+    home = client.get("/valr", headers=GOOD).text
+    assert "Next Telegram heads-up" in home and "A Telegram message 30 minutes" in home
+    assert "Pause heads-ups" in home and "Telegram isn't connected" in home and "tries again" not in home
+    upcoming = client.get("/valr/interviews", headers=GOOD).text
+    assert "Telegram heads-up at" in upcoming and "Calling at 4:10 PM" in upcoming
+    settings = client.get("/valr/settings", headers=GOOD).text
+    assert "Open Telegram &amp; connect" in settings and 'data-action="tglink"' in settings
+    assert "TELEGRAM_" not in settings and "FATHOM_API_KEY" not in settings  # No server talk.
+    assert "connect it in Settings" in client.get("/valr/system", headers=GOOD).text
     csrf = token(client)
     headers = {**GOOD, "Content-Type": "application/json", "X-CSRF-Token": csrf}
     monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
@@ -329,5 +349,9 @@ def test_telegram_mode_tile_statuses_and_start_code(client, monkeypatch):
     guest = {**headers, "Cf-Access-Jwt-Assertion": "guest"}
     assert client.post("/valr/api/telegram/code", content="{}", headers=guest).status_code == 403
     assert codes == []
+    async def username(client_=None):
+        return "valr_sample_bot"
+    monkeypatch.setattr(telegram_api, "bot_username", username)
     ok = client.post("/valr/api/telegram/code", content="{}", headers=headers)
     assert ok.status_code == 200 and ok.json()["command"] == "/start 246810"
+    assert ok.json()["link"] == "https://t.me/valr_sample_bot?start=246810"  # One tap: /start 246810.

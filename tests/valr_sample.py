@@ -283,15 +283,17 @@ def sample_recording(found: bool = True) -> dict:
                          "url": f"{share}?timestamp={t}"} for t, label in moments], "note": ""}
 
 
-def sample_view(now: datetime | None = None, paused: bool = False, scenario: str = "full") -> dict:
+def sample_view(now: datetime | None = None, paused: bool = False, scenario: str = "full",
+                extras: bool = False) -> dict:
     """scenario: full (a busy week), empty (first run: nothing connected, no data) or error
-    (the calendar store and Temporal are down)."""
+    (the calendar store and Temporal are down). extras: add the other branches' data
+    (coach, impression cues, recordings, notetakers; tests/valr_sample_extras.py)."""
     now = (now or datetime.now(timezone.utc)).replace(second=0, microsecond=0)
     first = now + timedelta(hours=2, minutes=40)
     tomorrow = (now + timedelta(days=1)).replace(hour=9, minute=30)
     events = [
         _event("ev-juniper-1", "Juniper Robotics: Senior Backend, system design", "Juniper", first, 60, [
-            Person("me@example.com", "Chirag", is_self=True),
+            Person("me@example.com", "Me", is_self=True),
             Person("maya.lin@juniper.example", "Maya Lin", "accepted"),
             Person("dev.k@juniper.example", "Dev Kapoor", "accepted"),
             Person("talent@juniper.example", "Priya (Talent Acquisition)", organizer=True)]),
@@ -403,7 +405,7 @@ def sample_view(now: datetime | None = None, paused: bool = False, scenario: str
                                                  "last_error": None}, now),
         },
         "dials": {"briefing": {"used": 2, "limit": 12}, "callback": {"used": 1, "limit": 5}},
-        "performance": valr_view.performance(performance_file(now)),
+        "performance": valr_view.performance(_extras(performance_file(now)) if extras else performance_file(now)),
         "post_call": {"pending": 1, "queued": 0, "failed": 0, "recent": [
             {"title": "Nimbus · system design", "status": "pending_telegram",
              "updated_at": (now - timedelta(hours=3)).isoformat()},
@@ -428,5 +430,15 @@ def sample_view(now: datetime | None = None, paused: bool = False, scenario: str
                     dials={"briefing": {"used": None, "limit": 12}, "callback": {"used": None, "limit": 5}})
         view["connections"]["google"]["state"] = "reconnect_needed"
         view["connections"]["calendar"]["last_error"] = "HTTP 401 from Google Calendar"
+    if extras and scenario == "full":
+        from tests.valr_sample_extras import NOTETAKERS
+        view["connections"]["notetakers"] = NOTETAKERS
+        view["connections"]["telegram"] = {"configured": True, "linked": True, "username": "sample_owner",
+                                           "linked_at": valr_view.iso(now - timedelta(days=2))}
     view["next_call"] = valr_view.next_call(view["blocks"], now, paused)
     return view
+
+
+def _extras(perf: dict) -> dict:
+    from tests.valr_sample_extras import with_extras
+    return with_extras(perf)

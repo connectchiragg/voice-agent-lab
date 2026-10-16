@@ -116,7 +116,9 @@ async def on_message(bot: Bot, message: dict[str, Any]) -> None:
         if command == "/start" and argument.strip():
             async with research.pool.connection() as connection:
                 await telegram_api.setup(connection)
-                linked = await telegram_api.redeem(connection, chat_id, argument.strip())
+                sender = message.get("from") if isinstance(message.get("from"), dict) else {}
+                linked = await telegram_api.redeem(connection, chat_id, argument.strip(),
+                                                   username=str(sender.get("username") or "") or None)
             if linked:
                 logger.info("Telegram linked to the owner's chat")
                 await bot.send(chat_id, "Connected. " + HELP)

@@ -1,10 +1,15 @@
-"""Local preview of both pages with fictional data: the call page (/) and the VALR cockpit (/valr).
+"""Local preview of the VALR app with fictional data: the call page (/call) and every
+app page (/valr, /valr/interviews, /valr/leads, /valr/performance, /valr/settings, ...).
 
-    VALR_DEV_PREVIEW=1 python scripts/preview_ui.py        # http://127.0.0.1:8090/ and /valr
+    VALR_DEV_PREVIEW=1 python scripts/preview_ui.py        # http://127.0.0.1:8090/valr
     .../valr?scenario=empty                                 # first run: nothing connected, no data
     .../valr?scenario=error                                 # the calendar store is down
     VALR_DEV_PREVIEW=1 python scripts/preview_ui.py --performance data/performance.json
                                                             # your own scores in the Performance section
+    .../valr?scenario=down                                  # the database is down (any page)
+    .../valr?mode=telegram                                  # heads-up mode, Telegram not linked
+    .../valr?extras=0                                       # without the other branches' data
+    .../valr?theme=light                                    # pin light (or dark) for screenshots
 
 No Postgres, Temporal, Deepgram or LLM: the cockpit shows tests/valr_sample.py's made-up
 interviews, its buttons change in-memory state only, and a call talks to the stub
@@ -38,7 +43,9 @@ def main() -> None:
     import uvicorn
 
     from app import interview_store, interviews, main as app_main, research, valr_dashboard, valr_view, webrtc
+    from app.valr_ui import contracts, routes
     from tests.valr_sample import notetakers_view, sample_recording, sample_view
+    from tests.valr_sample_extras import sample_leads
     import webrtc_latency
 
     valr_dashboard.enable_dev_preview(args.host)  # Raises unless VALR_DEV_PREVIEW=1 and loopback.
@@ -46,11 +53,12 @@ def main() -> None:
     state = {"paused": False, "notetakers": {"fathom": "connected", "fireflies": "not_connected",
                                              "granola": "not_connected"}}
     scenario: contextvars.ContextVar[str] = contextvars.ContextVar("scenario", default="full")
+    options: contextvars.ContextVar[dict] = contextvars.ContextVar("options", default={})
 
     @app_main.app.middleware("http")
     async def pick_scenario(request, call_next):
         wanted = request.query_params.get("scenario", "full")
-        if wanted == "down" and request.url.path == "/valr":
+        if wanted == "down" and request.url.path.startswith("/valr") and "/api/" not in request.url.path:
             from fastapi.responses import HTMLResponse
             from app import valr_page
             return HTMLResponse(valr_page.error_page("The database didn't answer."), status_code=503)
@@ -59,6 +67,8 @@ def main() -> None:
         if path.startswith("/valr/api/notetakers/") or path == "/valr/api/recording" \
                 or path == "/valr/api/telegram/code":
             return await preview_api(request, path)
+        options.set({"telegram": request.query_params.get("mode") == "telegram",
+                     "extras": request.query_params.get("extras") != "0"})
         return await call_next(request)
 
     async def preview_api(request, path):
@@ -91,14 +101,24 @@ def main() -> None:
         real = valr_view.performance(json.loads(args.performance.read_text(encoding="utf-8")))
 
     async def collect(pool, now=None):
-        view = sample_view(paused=state["paused"], scenario=scenario.get())
+        view = sample_view(paused=state["paused"], scenario=scenario.get(), extras=options.get().get("extras", True))
         if scenario.get() == "full":
             view["connections"]["notetakers"] = notetakers_view(state["notetakers"])
-            view["mode"] = "telegram"  # The default since 2026-10-16; the bot is set up, not linked.
-            view["connections"]["telegram"] = {"configured": True, "linked": False, "linked_at": None}
             if real is not None:
                 view["performance"] = real
+        if options.get().get("telegram") or scenario.get() == "full":
+            view["mode"] = "telegram"  # The default since 2026-10-16; the bot is set up, not linked.
+            view["connections"]["telegram"] = {"configured": True, "linked": False, "linked_at": None, "username": None}
+        else:
+            view.setdefault("mode", "telegram" if "telegram" in view["connections"] else "call")
         return view
+
+    async def load_leads():
+        if scenario.get() == "empty" or not options.get().get("extras", True):
+            return contracts.leads(None)
+        return contracts.leads(sample_leads())
+
+    routes.load_leads = load_leads
 
     class Pool:
         def connection(self):
@@ -126,7 +146,7 @@ def main() -> None:
     interviews.sync_now = sync_now
     app_main.app.state.engines = webrtc_latency.stub_engines()
     webrtc.peers_of(app_main.app)
-    print(f"VALR preview: http://{HOST}:{args.port}/ (call) and http://{HOST}:{args.port}/valr (cockpit)")
+    print(f"VALR preview: http://{HOST}:{args.port}/valr (app) and http://{HOST}:{args.port}/call (talk)")
     uvicorn.run(app_main.app, host=args.host, port=args.port, lifespan="off", log_level="warning")
 
 

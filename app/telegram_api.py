@@ -52,6 +52,7 @@ CREATE TABLE IF NOT EXISTS telegram_link (
     code_expires  timestamptz,
     code_tries    int NOT NULL DEFAULT 0
 );
+ALTER TABLE telegram_link ADD COLUMN IF NOT EXISTS username text;
 CREATE TABLE IF NOT EXISTS telegram_heads_up (
     block_id      text PRIMARY KEY,
     message_id    bigint,
@@ -146,30 +147,50 @@ def bot() -> Bot | None:
     return Bot(token) if token else None
 
 
-_username: str | None = None
+_bot_username: str | None = None
+USERNAME = re.compile(r"^[A-Za-z][A-Za-z0-9_]{3,31}$")
+START_PAYLOAD = re.compile(r"^[A-Za-z0-9_-]{1,64}$")  # What t.me/<bot>?start= accepts.
+
+
+async def bot_username(client: Bot | None = None) -> str | None:
+    """The bot's @username for t.me deep links: TELEGRAM_BOT_USERNAME, else getMe (cached)."""
+    global _bot_username
+    explicit = os.getenv("TELEGRAM_BOT_USERNAME", "").strip().lstrip("@")
+    if USERNAME.match(explicit):
+        return explicit
+    if _bot_username:
+        return _bot_username
+    client = client or bot()
+    if client is None:
+        return None
+    try:
+        me = await client.call("getMe", {})
+    except TelegramError as error:
+        logger.warning("Telegram getMe failed: %s", type(error).__name__)
+        return None
+    name = str((me or {}).get("username") or "") if isinstance(me, dict) else ""
+    _bot_username = name if USERNAME.match(name) else None
+    return _bot_username
+
+
+def deep_link(username: str, code: str) -> str:
+    """https://t.me/<bot>?start=<code>: one tap opens the chat and sends `/start <code>`."""
+    if not USERNAME.match(username) or not START_PAYLOAD.match(code):
+        raise ValueError("Not a valid bot username or start payload.")
+    return f"https://t.me/{username}?start={code}"
 
 
 async def username(client: Bot | None = None) -> str:
-    """The bot's @username (TELEGRAM_BOT_USERNAME, else getMe once), for t.me deep links; "" if unknown."""
-    global _username
-    explicit = os.getenv("TELEGRAM_BOT_USERNAME", "").strip().lstrip("@")
-    if explicit:
-        return explicit
-    if _username is None:
-        client = client or bot()
-        if client is None:
-            return ""
-        try:
-            me = await client.call("getMe", {})
-            _username = str((me or {}).get("username") or "")
-        except TelegramError:
-            return ""
-    return _username
+    """The bot's @username, "" if unknown (the notetakers branch's name for bot_username)."""
+    return await bot_username(client) or ""
 
 
 def start_link(name: str, code: str) -> str:
-    """https://t.me/<bot>?start=<code>: Telegram opens the chat and sends "/start <code>"."""
-    return f"https://t.me/{name}?start={code}" if re.fullmatch(r"\w{5,32}", name or "") else ""
+    """deep_link, or "" for a bad username or payload (the notetakers branch's name)."""
+    try:
+        return deep_link(name, code)
+    except ValueError:
+        return ""
 
 
 # The owner link (Postgres).
@@ -194,10 +215,11 @@ async def owner_chat(connection: Any) -> int | None:
 
 async def link_status(connection: Any) -> dict[str, Any]:
     cursor = await connection.execute(
-        "SELECT chat_id IS NOT NULL, linked_at, code_expires FROM telegram_link WHERE id = 1")
+        "SELECT chat_id IS NOT NULL, linked_at, code_expires, username FROM telegram_link WHERE id = 1")
     row = await cursor.fetchone()
     linked = bool(row and row[0]) or bool(os.getenv("TELEGRAM_OWNER_CHAT_ID", "").strip())
-    return {"linked": linked, "linked_at": row[1] if row else None,
+    username = str(row[3]) if row and len(row) > 3 and row[3] and USERNAME.match(str(row[3])) else None
+    return {"linked": linked, "linked_at": row[1] if row else None, "username": username,
             "code_pending": bool(row and row[2] and row[2] > datetime.now(timezone.utc))}
 
 
@@ -212,8 +234,11 @@ async def new_code(connection: Any, now: datetime | None = None) -> str:
     return code
 
 
-async def redeem(connection: Any, chat_id: int, code: str, now: datetime | None = None) -> bool:
-    """`/start <code>` from `chat_id`: link it if the code is current; count a wrong try."""
+async def redeem(connection: Any, chat_id: int, code: str, now: datetime | None = None,
+                 username: str | None = None) -> bool:
+    """`/start <code>` from `chat_id` (typed, or from a t.me/<bot>?start=<code> deep link, which
+    arrives as the same text): link it if the code is current; count a wrong try. `username`:
+    the owner's Telegram @username, kept only to show "Connected as @username"."""
     now = now or datetime.now(timezone.utc)
     cursor = await connection.execute(
         "SELECT code_mac, code_expires, code_tries FROM telegram_link WHERE id = 1")
@@ -225,7 +250,8 @@ async def redeem(connection: Any, chat_id: int, code: str, now: datetime | None 
         return False
     await connection.execute(
         "UPDATE telegram_link SET chat_id = %s, linked_at = %s, code_mac = NULL, code_expires = NULL, "
-        "code_tries = 0 WHERE id = 1", (chat_id, now))
+        "code_tries = 0, username = %s WHERE id = 1",
+        (chat_id, now, username if username and USERNAME.match(username) else None))
     return True
 
 

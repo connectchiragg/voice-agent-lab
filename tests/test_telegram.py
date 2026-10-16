@@ -80,7 +80,7 @@ def world(monkeypatch):
     async def owner_chat(connection):
         return w.owner
 
-    async def redeem(connection, chat_id, code, now=None):
+    async def redeem(connection, chat_id, code, now=None, username=None):
         if w.codes.get(code) == 0:
             w.codes[code] = 1
             w.owner = chat_id
