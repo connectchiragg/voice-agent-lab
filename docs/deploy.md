@@ -501,6 +501,14 @@ when only code changed (it was about 6). In plain words:
 `--dry-run` prints the steps and runs nothing; `DRY_RUN=1` builds and stops
 before the swap.
 
+**Disk space** (the 24 GB disk once filled up with old images). Before building,
+the script prints the VM's free space; under 6 GB it first removes old rollback
+images and trims the build cache, and under 4 GB it stops without changing
+anything. After a successful deploy it keeps only the last 2 deploys' rollback
+images, the 2 newest `~/voice-agent-lab.prev-*` and `.bad-*` folders, and at
+most 3 GB of build cache. Change these with `PRUNE_BELOW_GB`, `ABORT_BELOW_GB`,
+`KEEP_STAMPS`, `KEEP_TREES` and `BUILD_CACHE_MAX`.
+
 **Once, before the first such deploy:** install BuildKit on the VM (the
 Dockerfile's pip cache needs it). From the repo root on the Mac:
 `ssh -i ~/.ssh/voice-agent-lab_ed25519 ubuntu@<vm-ip> 'sh -s' < deploy/vm-buildx.sh`.
