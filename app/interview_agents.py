@@ -134,6 +134,8 @@ class PrivateInputs:
     gmail_token: str | None = None
     gmail_status: str = ""
     pushed_texts: list[str] = field(default_factory=list)
+    fathom_key: str | None = None  # Decrypted from the dashboard's store (app/notetakers), or None.
+    granola_key: str | None = None
 
 
 def names_line(people: list[Person]) -> str:
@@ -169,11 +171,12 @@ def interview_tools(part: str, ctx: Ctx, event: SlotEvent, interviewers: list[Pe
 
         @tool("past_rounds")
         def rounds_tool(company: str) -> str:
-            """Earlier rounds with this company: Fathom recordings, the analysed interview
-            history and any pushed email context. Call once."""
+            """Earlier rounds with this company: Fathom recordings, Granola notes, the analysed
+            interview history and any pushed email context. Call once."""
             def fetch() -> tuple[str, list[str]]:
                 terms = search_terms(event, interviewers) + [company]
-                pieces = [private_sources.fathom_search(_private_http(), terms),
+                pieces = [private_sources.fathom_search(_private_http(), terms, private.fathom_key),
+                          private_sources.granola_search(_private_http(), terms, private.granola_key),
                           private_sources.history(event.company or company, terms),
                           private_sources.pushed(private.pushed_texts)]
                 return "\n\n".join(text for text, _ in pieces if text), \

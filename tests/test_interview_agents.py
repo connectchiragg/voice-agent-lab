@@ -41,19 +41,28 @@ def test_private_tools_use_gmail_fathom_history_and_pushes(monkeypatch):
                         lambda http, token, query, status="": (calls.append((token, query)) or
                                                                (f"Thread [source_url: https://mail.google.com/mail/#all/t1] {query}",
                                                                 ["https://mail.google.com/mail/#all/t1"])))
+    keys = []
     monkeypatch.setattr(private_sources, "fathom_search",
-                        lambda http, terms: ("Fathom: no matching recordings.", []))
+                        lambda http, terms, key=None: (keys.append(("fathom", key)) or
+                                                       ("Fathom: no matching recordings.", [])))
+    monkeypatch.setattr(private_sources, "granola_search",
+                        lambda http, terms, key=None: (keys.append(("granola", key)) or
+                                                       ("- Acme note [source_url: valr://granola/not_1]",
+                                                        ["valr://granola/not_1"])))
     monkeypatch.setattr(private_sources, "history",
                         lambda company, terms: ("- earlier round [source_url: valr://history/f/1]",
                                                 ["valr://history/f/1"]))
     c = ctx("private")
     tools = interview_tools("private", c, EVENT, [], PrivateInputs("tok", "connected",
-                                                                     [json.dumps({"id": "p", "excerpt": "x"})]))
+                                                                     [json.dumps({"id": "p", "excerpt": "x"})],
+                                                                     fathom_key="stored-f", granola_key="stored-g"))
     out = tool_named(tools, "gmail_search").run(query="acme.com")
     assert "t1" in out and calls == [("tok", "acme.com")]
     rounds = tool_named(tools, "past_rounds").run(company="Acme")
-    assert "earlier round" in rounds and "valr://pushed/p" in rounds
-    assert {"https://mail.google.com/mail/#all/t1", "valr://history/f/1", "valr://pushed/p"} <= c.seen_urls
+    assert "earlier round" in rounds and "valr://pushed/p" in rounds and "Acme note" in rounds
+    assert keys == [("fathom", "stored-f"), ("granola", "stored-g")]  # The dashboard's stored keys.
+    assert {"https://mail.google.com/mail/#all/t1", "valr://history/f/1", "valr://pushed/p",
+            "valr://granola/not_1"} <= c.seen_urls
 
 
 def test_linkedin_pages_are_never_opened():

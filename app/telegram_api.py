@@ -146,6 +146,32 @@ def bot() -> Bot | None:
     return Bot(token) if token else None
 
 
+_username: str | None = None
+
+
+async def username(client: Bot | None = None) -> str:
+    """The bot's @username (TELEGRAM_BOT_USERNAME, else getMe once), for t.me deep links; "" if unknown."""
+    global _username
+    explicit = os.getenv("TELEGRAM_BOT_USERNAME", "").strip().lstrip("@")
+    if explicit:
+        return explicit
+    if _username is None:
+        client = client or bot()
+        if client is None:
+            return ""
+        try:
+            me = await client.call("getMe", {})
+            _username = str((me or {}).get("username") or "")
+        except TelegramError:
+            return ""
+    return _username
+
+
+def start_link(name: str, code: str) -> str:
+    """https://t.me/<bot>?start=<code>: Telegram opens the chat and sends "/start <code>"."""
+    return f"https://t.me/{name}?start={code}" if re.fullmatch(r"\w{5,32}", name or "") else ""
+
+
 # The owner link (Postgres).
 
 async def setup(connection: Any) -> None:

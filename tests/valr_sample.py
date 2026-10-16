@@ -165,6 +165,33 @@ def performance_file(now: datetime) -> dict:
                            "pushback handling slipped over the last three rounds.")}
 
 
+def notetakers_view(states: dict) -> dict:
+    """The dashboard's notetaker status (app/notetakers.status_view's shape), no key anywhere."""
+    from app import notetakers
+    return {name: {"label": info["label"], "state": states.get(name, "not_connected"),
+                   "account": "", "connected_at": None, "last_ok_at": None, "can_store": True,
+                   "optional": bool(info.get("optional")), "share_hint": info.get("share_hint", ""),
+                   "share_help": info.get("share_help", ""),
+                   **{k: info[k] for k in ("key_label", "key_help", "gets", "video", "import")}}
+            for name, info in notetakers.INFO.items()}
+
+
+def sample_recording(found: bool = True) -> dict:
+    """A made-up /valr/api/recording answer: a Fathom embed and key moments."""
+    if not found:
+        return {"ok": True, "found": False}
+    share = "https://fathom.video/calls/424242"
+    moments = [(95, "Walk me through how you'd ingest telemetry from 10,000 robots?"),
+               (610, "How would you backfill a day of data without double counting?"),
+               (1490, "Tell me about a time you pushed back on a deadline?"),
+               (2710, "What questions do you have for us?")]
+    return {"ok": True, "found": True, "provider": "fathom", "label": "Fathom",
+            "title": "Orbit Labs: Backend Engineer, technical round", "start": None,
+            "share_url": share, "embed_url": "https://fathom.video/embed/sampletoken123",
+            "moments": [{"label": label, "seconds": t, "clock": f"{t // 60}:{t % 60:02d}",
+                         "url": f"{share}?timestamp={t}"} for t, label in moments], "note": ""}
+
+
 def sample_view(now: datetime | None = None, paused: bool = False, scenario: str = "full") -> dict:
     """scenario: full (a busy week), empty (first run: nothing connected, no data) or error
     (the calendar store and Temporal are down)."""
@@ -182,8 +209,14 @@ def sample_view(now: datetime | None = None, paused: bool = False, scenario: str
         _event("ev-nimbus", "Nimbus Pay: Staff Engineer, coding round (call +1 415 555 0134)", "Nimbus",
                tomorrow, 60, [Person("lee@nimbus.example", "Lee Park", "accepted"),
                               Person("noreply@greenhouse.io", "Greenhouse")]),
+        _event("ev-orbit", "Orbit Labs: Backend Engineer, technical round", "Orbit", now - timedelta(hours=5), 60, [
+            Person("me@example.com", "Chirag", is_self=True),
+            Person("ana.ruiz@orbit.example", "Ana Ruiz", "accepted")]),
     ]
     slots = {
+        "ev-orbit": {"key": "ev-orbit", "company_key": "orbit", "status": "done",
+                     "updated_at": now - timedelta(hours=6), "spoken": "Orbit Labs at 10: a technical round with Ana Ruiz.",
+                     "notes": [], "sources": [], "parts": {"interviewers_by_email": {}}},
         "ev-juniper-1": {
             "key": "ev-juniper-1", "company_key": "juniper", "status": "done",
             "updated_at": now - timedelta(minutes=20),
@@ -237,8 +270,11 @@ def sample_view(now: datetime | None = None, paused: bool = False, scenario: str
                          "duration_s": None, "spend_usd": 0.04, "detail": ""}],
         "ev-nimbus": [],
     }
-    recorded = {valr_view.group_blocks(events)[0].block_id: {"state": "waiting",
-                                                             "label": "your interviews with Juniper"}}
+    plans = valr_view.group_blocks(events)
+    recorded = {next(b.block_id for b in plans if "ev-juniper-1" in b.slot_keys): {
+                    "state": "waiting", "label": "your interviews with Juniper"},
+                next(b.block_id for b in plans if "ev-orbit" in b.slot_keys): {
+                    "state": "briefed", "label": "your interview with Orbit"}}
     blocks = valr_view.build_blocks(events, recorded, slots, jobs, {}, {"me@example.com"}, now, paused)
     jobs_recent = [
         {"job_id": "iv-1", "caller": "a1b2c3d4e5f6", "topic": "Juniper Robotics: Senior Backend, system design",
@@ -269,6 +305,8 @@ def sample_view(now: datetime | None = None, paused: bool = False, scenario: str
             "google": {"state": "connected", "account": "owner@example.com", "age_days": 6.2,
                        "expires_soon": True, "last_ok_at": valr_view.iso(now), "configured": True},
             "fathom": {"configured": True},
+            "notetakers": notetakers_view({"fathom": "connected", "fireflies": "not_connected",
+                                           "granola": "not_connected"}),
             "calendar": valr_view.calendar_view({"channel_id": "c", "channel_expires": now + timedelta(days=5),
                                                  "source": "google", "last_sync_at": now - timedelta(minutes=7),
                                                  "last_error": None}, now),
@@ -288,6 +326,7 @@ def sample_view(now: datetime | None = None, paused: bool = False, scenario: str
             "google": {"state": "not_connected", "account": "", "age_days": None, "expires_soon": False,
                        "last_ok_at": None, "configured": True},
             "fathom": {"configured": False},
+            "notetakers": notetakers_view({}),
             "calendar": valr_view.calendar_view({}, now)}
     elif scenario == "error":
         view.update(blocks=[], errors=["timeline"],
