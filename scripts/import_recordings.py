@@ -6,7 +6,7 @@
     python scripts/import_recordings.py --purge        # delete the raw-download cache and exit
 
 Keys come from .env (VALR_ENV_FILE overrides): FATHOM_API_KEY, FIREFLIES_API_KEY,
-ANTHROPIC_API_KEY. A missing vendor key skips that source. Keys are never printed.
+ANTHROPIC_API_KEY or OPENROUTER_API_KEY (see app/llm_gateway.py). A missing vendor key skips that source. Keys are never printed.
 
 Export format (for --from-export): {"source": "...", "meetings": [{"source", "id",
 "title", "date" (ISO 8601), "duration_minutes", "participants": [{"name", "role"}],
@@ -56,8 +56,9 @@ def main(argv: list[str] | None = None, llm=None, http=None) -> int:
               "--from-export was given. Ready to run once a key is added to .env.")
         return 0
     if llm is None and not args.no_llm:
-        if not os.getenv("ANTHROPIC_API_KEY"):
-            print("ANTHROPIC_API_KEY is not set; use --no-llm for a fetch-only run.")
+        from app.llm_gateway import required_key_missing
+        if missing := required_key_missing():
+            print(f"{missing}; use --no-llm for a fetch-only run.")
             return 1
         llm = AnthropicJsonLLM()
 
