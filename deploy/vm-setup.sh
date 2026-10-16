@@ -11,8 +11,10 @@ if ! command -v docker >/dev/null; then
   sudo apt-get update
   sudo apt-get install -y docker.io
 fi
+# BuildKit: the Dockerfile uses cache mounts (deploy/vm-buildx.sh, idempotent).
+sh deploy/vm-buildx.sh
 
-sudo docker build -t voice-agent-lab .
+sudo docker buildx build -t voice-agent-lab .
 sudo docker rm -f voice-agent-lab cloudflared 2>/dev/null || true
 # Bound to localhost only: the tunnel is the sole public entry point.
 sudo docker run -d --name voice-agent-lab --restart unless-stopped \

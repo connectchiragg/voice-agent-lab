@@ -8,19 +8,23 @@ ARG WORKER_PYTHON_IMAGE=python:3.13-slim-trixie
 # Python dependencies, binary wheels only (no compilers in the image). One exception: http-ece
 # (pywebpush's encryption, phone push) is published only as a pure-Python sdist; pip builds it
 # with setuptools, no compiler.
+# BuildKit only (docker buildx; deploy/vm-buildx.sh on the VM): pip's download cache lives in
+# a cache mount, outside the image, so a lock change re-downloads only the changed wheels.
 FROM ${PYTHON_IMAGE} AS deps
-ENV PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1
 COPY requirements.lock /tmp/requirements.lock
-RUN python -m venv /opt/venv \
+RUN --mount=type=cache,target=/root/.cache/pip,id=pip-app \
+    python -m venv /opt/venv \
  && /opt/venv/bin/pip install --only-binary=:all: --no-binary=http-ece -r /tmp/requirements.lock
 
 # The VALR research worker (`--target worker`): Python 3.13, because crewai requires
 # <3.14, with its own lock (crewai, anthropic, temporalio, psycopg). Only this image has
 # an LLM SDK for research; the app image below is unchanged by it.
 FROM ${WORKER_PYTHON_IMAGE} AS worker-deps
-ENV PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1
 COPY requirements-worker.lock /tmp/requirements-worker.lock
-RUN python -m venv /opt/venv \
+RUN --mount=type=cache,target=/root/.cache/pip,id=pip-worker \
+    python -m venv /opt/venv \
  && /opt/venv/bin/pip install --only-binary=:all: --no-binary=http-ece -r /tmp/requirements-worker.lock
 
 FROM ${WORKER_PYTHON_IMAGE} AS worker
