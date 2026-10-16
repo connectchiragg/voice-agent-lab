@@ -61,17 +61,60 @@ class FakeLLM:
         self.analyses = list(analyses or [])
         self.fail_on = fail_on
         self.calls = []
+        self.rubric_base = []
 
-    def json(self, *, model, system, user, schema, max_tokens, effort):
-        self.calls.append({"model": model, "system": system, "user": user, "effort": effort})
+    def json(self, *, model, system, user, schema, max_tokens, effort, constrained=True):
+        self.calls.append({"model": model, "system": system, "user": user, "effort": effort,
+                           "constrained": constrained})
         self.ledger.add(model, len(user) // 4, 50)
         if self.fail_on and self.fail_on in user:
             raise LLMError("declined")
         if "is_interview" in schema["properties"]:
             return dict(self.label)
+        if "where_you_stand" in schema["properties"]:
+            return coach_reply()
+        if "leaned_in" in schema["properties"]:
+            return {"cues": [], "leaned_in": "", "disengaged": "", "close": "none"}
+        if "overall_score" in schema["properties"]:
+            return rubric_reply(self.rubric_base.pop(0) if self.rubric_base else 6)
+        if "topics" in schema["properties"]:
+            return {"topics": [{"topic": "consistency", "verdict": "improved", "occurrences": [
+                {"date": "2026-09-01", "interview_id": "fathom:1", "status": "first_seen",
+                 "note": "vague"}]}]}
         if "scores" in schema["properties"]:
             return self.analyses.pop(0) if self.analyses else analysis()
         return dict(BRIEF)
+
+
+def coach_reply() -> dict:
+    return {
+        "where_you_stand": "You are close to the bar. Lead with the answer.",
+        "whats_working": [{"headline": "Clear designs", "detail": "You name components.",
+                           "quote_id": "Q1"}],
+        "whats_costing_you": [{"headline": "Burying the answer", "plain_meaning": "Answer first.",
+                               "why_it_matters": "They stop listening.", "quote_id": "Q1",
+                               "what_happened": "Long preamble.", "do_instead": "Say the answer first.",
+                               "model_rephrase": "Short answer: shard by tenant."}] * 2,
+        "this_weeks_focus": [{"drill": f"Drill {i}", "how": "Timer", "done_when": "Under 60s"}
+                             for i in range(3)],
+        "negotiation": {"read": "You share numbers early.",
+                        "scripts": [{"moment": "Asked current pay", "say": "I'd rather hear the range first."}]},
+        "interviewers": {"leaned_in_when": "You gave numbers.", "disengaged_when": "You rambled.",
+                         "quote_ids": ["Q1", "Q999"]},
+        "headline": "Close to the bar; lead with the answer."}
+
+
+def rubric_reply(base: int, comp_came_up: bool = False) -> dict:
+    from app.profile.rubric import RUBRIC
+    scores = [{"key": f"{g}.{s}", "score": (0 if g == "negotiation" and not comp_came_up else base),
+               "justification": f"{s} evidence", "quote": "I would shard by tenant"}
+              for g, subs in RUBRIC.items() for s in subs]
+    return {"company": "Acme", "company_stage": "series_a_b", "round_type": "system_design",
+            "outcome": "advanced", "outcome_evidence": "next round scheduled",
+            "overall_score": base, "scores": scores,
+            "do_next_time": ["Lead with the answer", "Quantify impact", "Ask about SLOs", "x"],
+            "question_feedback": [{"question": f"Q{i}", "went_well": "w", "improve": "i",
+                                   "model_answer_hint": "h"} for i in range(7)]}
 
 
 def meeting(title, turns=None, participants=("Priya", "Chirag Goel"), date="2026-09-01T10:00:00Z"):
@@ -173,6 +216,8 @@ def settings(tmp_path):
     return Settings(profile_path=tmp_path / "profile.json",
                     evaluation_path=tmp_path / "evaluation.json",
                     scores_path=tmp_path / "interview_scores.csv",
+                    performance_path=tmp_path / "performance.json",
+                    performance_csv=tmp_path / "performance_scores.csv",
                     compensation_path=tmp_path / "comp.json", cache_dir=tmp_path / "raw",
                     candidate_name="Chirag", classifier_model="claude-haiku-5-5",
                     evaluator_model="claude-sonnet-5-5")
@@ -243,6 +288,8 @@ def test_script_from_export_never_prints_comp(tmp_path, monkeypatch, capsys, cap
     for name, value in (("VALR_ENV_FILE", tmp_path / "none.env"),
                         ("VALR_EVALUATION_PATH", tmp_path / "e.json"),
                         ("VALR_SCORES_PATH", tmp_path / "s.csv"),
+                        ("VALR_PERFORMANCE_PATH", tmp_path / "perf.json"),
+                        ("VALR_PERFORMANCE_CSV", tmp_path / "perf.csv"),
                         ("VALR_RECORDINGS_CACHE", tmp_path / "raw"),
                         ("VALR_PROFILE_PATH", tmp_path / "p.json")):
         monkeypatch.setenv(name, str(value))

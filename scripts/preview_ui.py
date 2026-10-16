@@ -3,6 +3,8 @@
     VALR_DEV_PREVIEW=1 python scripts/preview_ui.py        # http://127.0.0.1:8090/ and /valr
     .../valr?scenario=empty                                 # first run: nothing connected, no data
     .../valr?scenario=error                                 # the calendar store is down
+    VALR_DEV_PREVIEW=1 python scripts/preview_ui.py --performance data/performance.json
+                                                            # your own scores in the Performance section
 
 No Postgres, Temporal, Deepgram or LLM: the cockpit shows tests/valr_sample.py's made-up
 interviews, its buttons change in-memory state only, and a call talks to the stub
@@ -29,6 +31,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--port", type=int, default=8090)
     parser.add_argument("--host", default=HOST, help=argparse.SUPPRESS)
+    parser.add_argument("--performance", type=Path,
+                        help="a real performance.json to render (local only; never served beyond 127.0.0.1)")
     args = parser.parse_args()
 
     import uvicorn
@@ -81,12 +85,19 @@ def main() -> None:
             return JSONResponse({"ok": True, "found": 3, "new": 1, "message": f"{label}: 3 recordings in the last 7 days, 1 new."})
         return JSONResponse({"ok": True, "message": f"{label}: 2 notes read, 2 new."})
 
+    real = None
+    if args.performance:
+        import json
+        real = valr_view.performance(json.loads(args.performance.read_text(encoding="utf-8")))
+
     async def collect(pool, now=None):
         view = sample_view(paused=state["paused"], scenario=scenario.get())
         if scenario.get() == "full":
             view["connections"]["notetakers"] = notetakers_view(state["notetakers"])
             view["mode"] = "telegram"  # The default since 2026-10-16; the bot is set up, not linked.
             view["connections"]["telegram"] = {"configured": True, "linked": False, "linked_at": None}
+            if real is not None:
+                view["performance"] = real
         return view
 
     class Pool:
