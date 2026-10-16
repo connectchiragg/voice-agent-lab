@@ -108,20 +108,35 @@ def score_performance(cfg: Settings, record: dict, meetings_by_id: dict, llm: Js
     All v1 keys are kept, so v1 readers keep working."""
     analyses = record.get("interviews") or []
     scored, errors = [], []
-    for a in analyses:
+    # Resume support: finished interviews are kept (0600) until the whole run succeeds.
+    partial_path = cfg.performance_path.with_suffix(".partial.json")
+    try:
+        done = json.loads(partial_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        done = {}
+    for n, a in enumerate(analyses, 1):
         iid = f"{a.get('source')}:{a.get('id')}"
-        log.info("scoring %d/%d", len(scored) + len(errors) + 1, len(analyses))
+        if iid in done:
+            scored.append(done[iid])
+            continue
+        log.info("scoring %d/%d", n, len(analyses))
         try:
-            scored.append(rubric.score_interview(meetings_by_id.get(iid), a, llm,
-                                                 cfg.evaluator_model, cfg.candidate_name))
+            item = rubric.score_interview(meetings_by_id.get(iid), a, llm,
+                                          cfg.evaluator_model, cfg.candidate_name)
         except LLMError as exc:
             errors.append(f"{iid}: {exc}")
+            continue
+        scored.append(item)
+        done[iid] = item
+        write_private(partial_path, redact_compensation(json.dumps(done), comp))
     topics = (performance.recurring_weak_topics(analyses, scored, llm, cfg.evaluator_model,
                                                 cfg.candidate_name) if scored else [])
     if analyses and not scored:
         raise LLMError(f"no interview could be scored ({errors[0] if errors else 'unknown'})")
     perf = performance.build(scored, topics)
     perf["errors"] = errors
+    if not errors:
+        partial_path.unlink(missing_ok=True)
     write_private(cfg.performance_path, redact_compensation(
         json.dumps(perf, indent=2, ensure_ascii=False), comp) + "\n")
     write_private(cfg.performance_csv, redact_compensation(performance.to_csv(perf), comp))

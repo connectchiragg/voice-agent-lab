@@ -7,7 +7,7 @@ their scored sub-dimensions; the model also gives a holistic overall score.
 import json
 
 from app.profile.evaluate import cap_words, format_transcript, speaking_metrics
-from app.profile.llm import JsonLLM
+from app.profile.llm import JsonLLM, LLMError
 
 SCHEMA_VERSION = 2
 
@@ -91,7 +91,7 @@ SCHEMA = {
         "round_type": {"type": "string", "enum": ROUND_TYPES},
         "outcome": {"type": "string", "enum": OUTCOMES},
         "outcome_evidence": {"type": "string"},
-        "overall_score": {"type": "integer"},
+        "overall_score": {"type": "integer"},  # 0 = not enough evidence
         # A flat list keeps the compiled grammar small (a nested object per sub-dimension
         # is rejected as too large). Missing keys are treated as N/A.
         "scores": {"type": "array", "items": {
@@ -181,8 +181,12 @@ def score_interview(meeting: dict | None, analysis: dict, llm: JsonLLM, model: s
             + (f"<transcript>\n{transcript}\n</transcript>" if transcript
                else "(No transcript available: score from the earlier analysis only.)"))
     raw = llm.json(model=model, system=SYSTEM.format(candidate=candidate), user=user,
-                   schema=SCHEMA, max_tokens=12000, effort="medium")
+                   schema=SCHEMA, max_tokens=12000, effort="medium",
+                   constrained=False)
     out = normalise(raw)
+    if "scores" not in raw or "overall_score" not in raw:
+        raise LLMError(f"{model} reply did not follow the rubric schema "
+                       f"(top-level keys: {sorted(raw)[:8]})")
     return {"interview_id": f"{analysis.get('source')}:{analysis.get('id')}",
             "source": analysis.get("source"), "id": analysis.get("id"),
             "title": analysis.get("title"), "date": analysis.get("date"),

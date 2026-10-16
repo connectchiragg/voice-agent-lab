@@ -140,3 +140,68 @@ def test_score_script_prints_no_comp(tmp_path, monkeypatch, capsys):
     rest = "\n".join(ln for ln in out.splitlines() if not ln.startswith("token spend"))
     assert not re.search(r"\b(31|35|120|66|77|52|59)\b", rest)
     assert json.loads((tmp_path / "e.json").read_text())["schema_version"] == 2
+
+
+def test_parse_json_object_tolerates_fences_and_rejects_garbage():
+    from app.profile.llm import LLMError, parse_json_object
+    assert parse_json_object('```json\n{"a": 1}\n```') == {"a": 1}
+    with pytest.raises(LLMError):
+        parse_json_object("no json here")
+
+
+def test_rubric_call_is_unconstrained():
+    llm = FakeLLM()
+    a = analysis()
+    a.update(source="fathom", id="1", title="t", date="2026-09-01T10:00:00Z")
+    rubric.score_interview(None, a, llm, "claude-sonnet-5-5", "Chirag")
+    assert llm.calls[0]["constrained"] is False
+
+
+def test_llm_retries_dropped_connections_then_succeeds():
+    import anthropic
+    import httpx
+    from app.profile.llm import AnthropicJsonLLM
+
+    class Resp:
+        usage = type("U", (), {"input_tokens": 10, "output_tokens": 5})()
+        stop_reason = "end_turn"
+        content = [type("B", (), {"type": "text", "text": '{"ok": true}'})()]
+
+    llm = AnthropicJsonLLM(client=object(), sleep=lambda s: None)
+    attempts = []
+
+    def flaky(kwargs):
+        attempts.append(1)
+        if len(attempts) < 3:
+            raise anthropic.APIConnectionError(request=httpx.Request("POST", "https://x"))
+        return Resp()
+    llm._stream = flaky
+    assert llm.json(model="m", system="s", user="u", schema={}, max_tokens=10,
+                    effort="low") == {"ok": True}
+    assert len(attempts) == 3 and llm.ledger.calls["m"]["calls"] == 1
+
+
+def test_rubric_reply_off_schema_raises():
+    from app.profile.llm import LLMError
+    llm = FakeLLM()
+    llm.json = lambda **kw: {"interview": {}}
+    a = analysis()
+    a.update(source="fathom", id="1", title="t", date="2026-09-01T10:00:00Z")
+    with pytest.raises(LLMError, match="interview"):
+        rubric.score_interview(None, a, llm, "m", "Chirag")
+
+
+def test_score_performance_resumes_from_partial(tmp_path):
+    from app.profile import importer
+    cfg = settings(tmp_path)
+    a1, a2 = analysis(), analysis()
+    a1.update(source="fathom", id="1", title="A", date="2026-09-01T10:00:00Z")
+    a2.update(source="fathom", id="2", title="B", date="2026-09-02T10:00:00Z")
+    llm = FakeLLM(fail_on="Title: B")
+    out = importer.score_performance(cfg, {"interviews": [a1, a2]}, {}, llm, COMP)
+    partial = cfg.performance_path.with_suffix(".partial.json")
+    assert partial.exists() and list(json.loads(partial.read_text())) == ["fathom:1"]
+    llm2 = FakeLLM()
+    importer.score_performance(cfg, {"interviews": [a1, a2]}, {}, llm2, COMP)
+    assert sum(1 for c in llm2.calls if "Title: A" in c["user"]) == 0
+    assert not partial.exists() and out["schema_version"] == 2

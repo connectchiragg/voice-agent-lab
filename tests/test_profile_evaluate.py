@@ -63,8 +63,9 @@ class FakeLLM:
         self.calls = []
         self.rubric_base = []
 
-    def json(self, *, model, system, user, schema, max_tokens, effort):
-        self.calls.append({"model": model, "system": system, "user": user, "effort": effort})
+    def json(self, *, model, system, user, schema, max_tokens, effort, constrained=True):
+        self.calls.append({"model": model, "system": system, "user": user, "effort": effort,
+                           "constrained": constrained})
         self.ledger.add(model, len(user) // 4, 50)
         if self.fail_on and self.fail_on in user:
             raise LLMError("declined")

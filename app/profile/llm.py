@@ -5,6 +5,7 @@ so they depend on the `JsonLLM` protocol; tests pass a fake.
 """
 import json
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import Protocol
 
@@ -45,35 +46,54 @@ class JsonLLM(Protocol):
     ledger: Ledger
 
     def json(self, *, model: str, system: str, user: str, schema: dict, max_tokens: int,
-             effort: str) -> dict: ...
+             effort: str, constrained: bool = True) -> dict: ...
 
 
 class AnthropicJsonLLM:
-    """Structured outputs (output_config.format) so every reply is schema-valid JSON."""
+    """JSON replies from the Messages API: grammar-constrained (output_config.format) by
+    default, or schema-in-prompt for schemas too large to compile."""
 
-    def __init__(self, client=None, ledger: Ledger | None = None):
+    def __init__(self, client=None, ledger: Ledger | None = None, attempts: int = 4,
+                 sleep=None):
         if client is None:
             import anthropic
-            client = anthropic.Anthropic(timeout=300.0, max_retries=2)
+            client = anthropic.Anthropic(timeout=90.0, max_retries=2)
         self.client = client
         self.ledger = ledger or Ledger()
+        self.attempts = attempts
+        self.sleep = sleep or time.sleep
+
+    def _stream(self, kwargs: dict):
+        # Streamed, so a stalled request fails on the read timeout instead of hanging. The
+        # server-side-fallback beta was dropped: it hung 10+ min on long rubric requests.
+        with self.client.messages.stream(**kwargs) as stream:
+            return stream.get_final_message()
 
     def json(self, *, model: str, system: str, user: str, schema: dict, max_tokens: int,
-             effort: str) -> dict:
+             effort: str, constrained: bool = True) -> dict:
+        """constrained=False skips grammar-constrained decoding (large schemas compile too
+        slowly server-side): the schema goes in the prompt and the reply is parsed."""
+        import anthropic
+        output_config = {"effort": effort}
+        if constrained:
+            output_config["format"] = {"type": "json_schema", "schema": schema}
+        else:
+            system = (f"{system}\n\nReply with only one JSON object (no prose, no code fence) "
+                      f"that matches this JSON schema:\n{json.dumps(schema)}")
         kwargs = dict(model=model, max_tokens=max_tokens, system=system,
                       messages=[{"role": "user", "content": user}],
-                      output_config={"effort": effort,
-                                     "format": {"type": "json_schema", "schema": schema}})
-        import anthropic
-        try:
-            if model.startswith("claude-sonnet-5-5"):
-                # Server-side fallback on a safety-classifier refusal (Claude API only).
-                response = self.client.beta.messages.create(
-                    **kwargs, betas=["server-side-fallback-2026-07-01"], fallbacks="default")
-            else:
-                response = self.client.messages.create(**kwargs)
-        except anthropic.APIStatusError as exc:
-            raise LLMError(f"{model} request failed with HTTP {exc.status_code}") from exc
+                      output_config=output_config)
+        for attempt in range(self.attempts):
+            try:
+                response = self._stream(kwargs)
+                break
+            except anthropic.APIStatusError as exc:
+                raise LLMError(f"{model} request failed with HTTP {exc.status_code}") from exc
+            except anthropic.APIConnectionError as exc:
+                if attempt == self.attempts - 1:
+                    raise LLMError(f"{model} connection failed: {type(exc).__name__}") from exc
+                log.info("llm %s: connection dropped, retry %d", model, attempt + 1)
+                self.sleep(5 * 2 ** attempt)
         usage = response.usage
         self.ledger.add(model, usage.input_tokens, usage.output_tokens)
         log.info("llm %s: %d in / %d out tokens", model, usage.input_tokens, usage.output_tokens)
@@ -81,8 +101,19 @@ class AnthropicJsonLLM:
             raise LLMError(f"{model} declined the request")
         if response.stop_reason == "max_tokens":
             raise LLMError(f"{model} hit max_tokens={max_tokens}")
-        text = next((b.text for b in response.content if b.type == "text"), "")
-        try:
-            return json.loads(text)
-        except json.JSONDecodeError as exc:
-            raise LLMError(f"{model} returned invalid JSON") from exc
+        text = "".join(b.text for b in response.content if b.type == "text")
+        return parse_json_object(text, model)
+
+
+def parse_json_object(text: str, model: str = "model") -> dict:
+    """The JSON object in a reply, tolerating a code fence or stray prose around it."""
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        start, end = text.find("{"), text.rfind("}")
+        if start != -1 and end > start:
+            try:
+                return json.loads(text[start:end + 1])
+            except json.JSONDecodeError:
+                pass
+    raise LLMError(f"{model} returned invalid JSON")
