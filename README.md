@@ -631,6 +631,29 @@ VALR_INTERVIEW_MONTH_USD; $0.40 per job, VALR_INTERVIEW_JOB_USD); briefing calls
 own 12 dials a day (VALR_BRIEFING_DIALS_PER_DAY), so callbacks cannot starve them.
 VALR_BRIEFING_DIAL=0 keeps everything but never dials; VALR_BRIEFINGS=0 turns the sweep off.
 
+**The VALR page** (valr.haciensus.com, `/valr`, behind Cloudflare Access; `app/valr_view.py`
+gathers, `app/valr_page.py` renders, `static/valr.js` adds the live parts). Written for a
+user who did not build VALR: plain words, every time as "11:15 AM IST" (ASSISTANT_TIMEZONE)
+with a relative "in 2 h 25 min". Top to bottom: what VALR does, the next briefing call and
+the three actions (call VALR now, pause or resume calls, sync the calendar); set-up steps
+until Google, Fathom, the phone number and a test call are done; the week's interviews,
+each opening a detail view (the briefing, who you're meeting, what this round is like,
+likely questions, the pay band against your target, a prep checklist, what your emails
+and past rounds say, the company); performance (scorecards out of 10, a trend with
+3-interview moving averages and a dimension picker, per-question feedback, most improved,
+biggest risk, focus this week); and, folded under System, spend, call budgets,
+connections and recent research. Attendee emails and phone numbers are never shown.
+`GET /valr/api/state` returns the same view as JSON. Owner actions (POST, same-origin
+JSON with the page's CSRF token, owner's Access login): sync, refresh one interview's
+research (caches bypassed), and pause or resume automatic calls, a `valr_flags` row the
+briefing-call workflows read before every scheduled dial (a skipped attempt is just
+skipped, so resuming before T-5 still gets a call; calls you ask for still ring;
+VALR_BRIEFING_DIAL=0 stays the hard off). Performance reads `interview_scorecards.json`
+(VALR_SCORECARDS_PATH) when the profile importer writes it, else adapts
+`interview_scores.json` and `evaluation.json` (1-5 scores shown out of 10).
+`VALR_DEV_PREVIEW=1 python scripts/preview_ui.py` serves both pages with made-up data at
+http://127.0.0.1:8090 (`/valr?scenario=empty`, `error`, `down` for the other states).
+
 **Context push (optional).** A Mac-side job (not built) may POST per-interview email
 context to `/valr/context` (JSON {event_key?, company?, subject?, summary?, excerpt?, notes?},
 8 KB) with an Access service token plus `Authorization: Bearer VALR_CONTEXT_TOKEN`;

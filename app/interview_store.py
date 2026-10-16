@@ -12,6 +12,9 @@ calendar tool). psycopg and the standard library only.
   loads exactly that block's briefs.
 - `interview_context_push`: optional per-interview email context POSTed by a
   Mac-side job (/valr/context), encrypted with VALR_TOKEN_KEY; R1 reads it.
+- `valr_flags`: owner switches set from the dashboard. `dials_paused`: while true,
+  the block workflows skip their automatic briefing dials (on-demand callbacks the
+  owner asks for on a call still ring). VALR_BRIEFING_DIAL=0 stays the hard off.
 """
 import json
 from datetime import datetime, timedelta, timezone
@@ -53,6 +56,11 @@ CREATE TABLE IF NOT EXISTS interview_context_push (
     received_at  timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS interview_context_push_by_company ON interview_context_push (lower(company));
+CREATE TABLE IF NOT EXISTS valr_flags (
+    name         text PRIMARY KEY,
+    enabled      boolean NOT NULL,
+    updated_at   timestamptz NOT NULL DEFAULT now()
+);
 """
 
 
@@ -167,3 +175,33 @@ async def pushed_context(connection: Any, event_key: str, company_name: str,
         "SELECT sealed FROM interview_context_push WHERE event_key = %s OR lower(company) = lower(%s) "
         "ORDER BY received_at DESC LIMIT %s", (event_key, company_name or "\x00", limit))
     return [row[0] for row in await cursor.fetchall()]
+
+
+DIALS_PAUSED = "dials_paused"
+
+
+async def flag(connection: Any, name: str) -> dict[str, Any]:
+    """{enabled, updated_at}; a flag never set is off."""
+    cursor = await connection.execute(
+        "SELECT enabled, updated_at FROM valr_flags WHERE name = %s", (name,))
+    row = await cursor.fetchone()
+    return {"enabled": bool(row[0]), "updated_at": row[1]} if row else \
+        {"enabled": False, "updated_at": None}
+
+
+async def set_flag(connection: Any, name: str, enabled: bool) -> None:
+    await connection.execute(
+        "INSERT INTO valr_flags (name, enabled, updated_at) VALUES (%s, %s, now()) "
+        "ON CONFLICT (name) DO UPDATE SET enabled = excluded.enabled, updated_at = now()",
+        (name, enabled))
+
+
+async def slot_jobs(connection: Any, keys: list[str], limit: int = 200) -> list[dict[str, Any]]:
+    """Research runs for these slots, newest first: status, cost, duration, cache detail."""
+    if not keys:
+        return []
+    cursor = await connection.execute(
+        "SELECT event_key, status, created_at, duration_s, spend_usd, detail FROM research_jobs "
+        "WHERE event_key = ANY(%s) ORDER BY created_at DESC LIMIT %s", (keys, limit))
+    names = ("event_key", "status", "created_at", "duration_s", "spend_usd", "detail")
+    return [dict(zip(names, row)) for row in await cursor.fetchall()]

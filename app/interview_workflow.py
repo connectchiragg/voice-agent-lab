@@ -22,6 +22,8 @@ Three workflows, all run by the research worker:
 - `BlockCallWorkflow`, one per block of back-to-back interviews (id from the block's
   start, `briefing-<UTC start>`): calls the owner at T-15, then T-10 and T-5 if
   unanswered, and stops after an answer. Its own daily dial budget ("briefing").
+  Before each scheduled dial it asks `dials_paused` (the dashboard's pause switch);
+  a paused attempt is skipped, so resuming before T-5 still gets a call.
   The on-demand variant ("research tomorrow's interviews" on a call) waits for that
   call to end and for the slots' research, then calls back at once.
 
@@ -52,6 +54,7 @@ BRIEFING_DIALS_PER_DAY = 12
 PART_SECONDS = 240
 SYNTH_SECONDS = 150
 FULL = ("private", "round", "interviewers", "company")
+DIAL_PAUSE_PATCH = "valr-dial-pause"
 
 
 @dataclass
@@ -421,6 +424,7 @@ class BlockCallWorkflow:
             times = [first + timedelta(minutes=5) * index for index in range(len(CALL_LEADS))]
         else:
             times = [start - lead for lead in CALL_LEADS]
+        paused = 0
         for number, due in enumerate(times, 1):
             if not block.on_demand and workflow.now() >= start:
                 return await self.finish(block, "missed", "the block started before an answer")
@@ -430,6 +434,11 @@ class BlockCallWorkflow:
                 return await self.finish(block, "missed", "the block started before an answer")
             if not block.dial:
                 return await self.finish(block, "briefed", "dry run: not dialled")
+            # Patched: blocks already running when this shipped replay without the check.
+            if not block.on_demand and workflow.patched(DIAL_PAUSE_PATCH) and await self.paused():
+                paused += 1
+                self.status.detail = "automatic calls are paused"
+                continue
             attempt = CallAttempt(number, workflow.now().isoformat())
             self.status.attempts.append(attempt)
             if not await self.reserve(block, attempt):
@@ -443,7 +452,17 @@ class BlockCallWorkflow:
             if self.cancelled:
                 return await self.finish(block, "cancelled")
             self.status.state = "waiting"
+        if paused == len(times):
+            return await self.finish(block, "paused", "automatic calls were paused")
         return await self.finish(block, "unanswered", f"no answer after {len(times)} attempts")
+
+    async def paused(self) -> bool:
+        try:
+            return await workflow.execute_activity(
+                "dials_paused", result_type=bool, start_to_close_timeout=timedelta(seconds=20),
+                retry_policy=RetryPolicy(maximum_attempts=3))
+        except ActivityError:
+            return False  # Unknown: dial as before; the daily budget still applies.
 
     async def sleep(self, duration: timedelta) -> None:
         try:

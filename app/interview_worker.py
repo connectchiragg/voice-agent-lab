@@ -10,6 +10,7 @@
   interviewers go through the HR guard and the classifier first.
 - `slot_synthesize`: merge the new parts into the slot's stored context, write the brief.
 - `slot_finish`, `slots_ready`, `block_record`: bookkeeping.
+- `dials_paused`: the dashboard's pause switch for automatic briefing calls.
 
 Nothing here logs an email address, a phone number, an email's text or a pay figure.
 """
@@ -447,9 +448,15 @@ class InterviewActivities:
             await interview_store.record_block(connection, record.block_id, record.start_utc,
                                                record.slot_keys, record.label, record.state)
 
+    @activity.defn(name="dials_paused")
+    async def dials_paused(self) -> bool:
+        async with await connect() as connection:
+            await interview_store.setup(connection)
+            return (await interview_store.flag(connection, interview_store.DIALS_PAUSED))["enabled"]
+
     def all(self) -> list[Any]:
         return [self.calendar_sync, self.slot_plan, self.interview_part, self.slot_synthesize,
-                self.slot_finish, self.slots_ready, self.block_record]
+                self.slot_finish, self.slots_ready, self.block_record, self.dials_paused]
 
 
 def part_record(result: InterviewPartResult) -> dict[str, Any]:

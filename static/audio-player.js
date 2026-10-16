@@ -12,6 +12,7 @@ export class StreamAudioPlayer {
     this.streamEnded = true;
     this.replyId = 0;
     this.replyPlayed = 0;  // Seconds of the current reply fully played.
+    this.output = null;  // Optional node replies play through (e.g. a level meter); else the speakers.
   }
 
   // Start counting played audio for a new reply (barge-in reports this count).
@@ -60,7 +61,7 @@ export class StreamAudioPlayer {
     const source = this.context.createBufferSource();
     source.buffer = buffer;
     source.replyId = this.replyId;
-    source.connect(this.context.destination);
+    source.connect(this.output ?? this.context.destination);
     this.sources.add(source);
     this.onActiveChange(true);
     source.onended = () => {
