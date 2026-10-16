@@ -12,7 +12,7 @@ import psycopg
 import pytest
 from cryptography.fernet import Fernet
 
-from app import google_oauth, lead_classify, lead_worker, leads_store
+from app import gmail_api, google_oauth, lead_classify, lead_worker, leads_store
 from app.interview_types import Person, SlotEvent
 from app.lead_classify import Decision
 from app.lead_workflow import GmailSyncInput
@@ -87,6 +87,10 @@ def raw_message(email):
                         "parts": [{"mimeType": "text/plain", "body": {"data": data}}]}}
 
 
+RATE_LIMITED = {"error": {"code": 403, "message": "Quota exceeded for quota metric 'Total Query Cost'",
+                           "errors": [{"domain": "usageLimits", "reason": "rateLimitExceeded"}]}}
+
+
 class FakeGmail:
     def __init__(self):
         self.messages = {email.id: raw_message(email) for email, _ in EMAILS}
@@ -94,10 +98,15 @@ class FakeGmail:
         self.history: list[str] = []
         self.history_gone = False
         self.calls: list[str] = []
+        self.gets_allowed: int | None = None  # Then every messages.get is rate limited.
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path.removeprefix("/gmail/v1/users/me")
         self.calls.append(path)
+        if path.startswith("/messages/") and self.gets_allowed is not None:
+            if self.gets_allowed <= 0:
+                return httpx.Response(403, json=RATE_LIMITED)
+            self.gets_allowed -= 1
         if path == "/profile":
             return httpx.Response(200, json={"emailAddress": OWNER, "historyId": str(self.history_id)})
         if path == "/messages":
@@ -138,6 +147,11 @@ def world(monkeypatch, tmp_path):
         {"interview_id": "fathom:9", "date": (datetime.now(timezone.utc) - timedelta(days=2)).date().isoformat(),
          "company": "Orbit Labs", "overall_score": 8.0, "outcome": "advanced"}]}))
     monkeypatch.delenv("FATHOM_API_KEY", raising=False)
+    slept = []
+
+    async def no_sleep(seconds):
+        slept.append(seconds)
+    monkeypatch.setattr(gmail_api, "_pacer", gmail_api.Pacer(1e9, sleep=no_sleep))
 
     async def connect():
         return await psycopg.AsyncConnection.connect(os.environ["VALR_TEST_POSTGRES"], autocommit=True)
@@ -289,3 +303,53 @@ def test_watch_stores_the_expiry(world):
     result = asyncio.run(activities.gmail_watch("test"))
     assert result.error == "" and result.history_id == 5000
     assert asyncio.run(rows(connect, "SELECT watch_expires FROM gmail_state"))[0][0] == NOW + timedelta(days=7)
+
+
+def gets(gmail):
+    return [c.rsplit("/", 1)[1] for c in gmail.calls if c.startswith("/messages/")]
+
+
+@needs_postgres
+def test_a_rate_limit_pauses_the_backfill_and_the_next_run_resumes_it(world, monkeypatch):
+    gmail, activities, connect, _ = world
+    monkeypatch.setattr(lead_worker, "BATCH", 5)
+    gmail.gets_allowed = 7  # One full batch of 5, then 2 of the second batch.
+
+    first = asyncio.run(activities.gmail_sync(GmailSyncInput("poll")))
+    assert (first.mode, first.more, first.fetched, first.error) == ("paused-ratelimit", True, 7, "rate limited, resuming")
+    state = asyncio.run(rows(connect, "SELECT history_id, backfill_done_at, backfill_count, last_error FROM gmail_state"))
+    assert state == [(5000, None, 7, "rate limited, resuming")]  # The baseline is saved first.
+    assert len(asyncio.run(rows(connect, "SELECT 1 FROM lead_emails"))) == 7  # The partial batch too.
+
+    # A push while the backfill is not done only records the push: no Gmail call.
+    calls = len(gmail.calls)
+    push = asyncio.run(activities.gmail_sync(GmailSyncInput("push", 5200)))
+    assert push.mode == "skipped" and len(gmail.calls) == calls
+    assert asyncio.run(rows(connect, "SELECT last_push_at IS NOT NULL FROM gmail_state")) == [(True,)]
+
+    done_before = set(gets(gmail)[:7])
+    gmail.gets_allowed = None
+    calls = len(gmail.calls)
+    second = asyncio.run(activities.gmail_sync(GmailSyncInput("resume")))
+    assert (second.mode, second.more, second.fetched, second.left) == ("backfill", False, len(EMAILS) - 7, 0)
+    resumed = [c.rsplit("/", 1)[1] for c in gmail.calls[calls:] if c.startswith("/messages/")]
+    assert not done_before & set(resumed)  # Nothing fetched twice.
+    state = asyncio.run(rows(connect, "SELECT backfill_done_at IS NOT NULL, backfill_count, last_error FROM gmail_state"))
+    assert state == [(True, len(EMAILS), None)]
+    assert asyncio.run(activities.gmail_sync(GmailSyncInput("poll"))).mode == "history"
+
+
+@needs_postgres
+def test_each_run_fetches_at_most_the_per_run_cap(world, monkeypatch):
+    gmail, activities, connect, _ = world
+    monkeypatch.setenv("VALR_LEADS_FETCH_PER_RUN", "8")
+    passes = []
+    while True:
+        summary = asyncio.run(activities.gmail_sync(GmailSyncInput("resume")))
+        passes.append((summary.mode, summary.fetched, summary.more))
+        if not summary.more:
+            break
+    expected = [8] * (len(EMAILS) // 8) + ([len(EMAILS) % 8] if len(EMAILS) % 8 else [])
+    assert [p[1] for p in passes] == expected and all(p[0] == "backfill" for p in passes)
+    assert len(gets(gmail)) == len(EMAILS) == len(set(gets(gmail)))
+    assert asyncio.run(rows(connect, "SELECT backfill_done_at IS NOT NULL FROM gmail_state")) == [(True,)]

@@ -10,14 +10,26 @@
 - `search`: message ids for a query (messages.list), paged and capped; the backfill.
 - `message`: one message (format "full"), parsed into a lead_classify.Email. Its text stays
   in memory for the classifier; only metadata, the decision and a derived summary are kept.
+
+Every call goes through `send`: a per-process pace (`Pacer`, VALR_GMAIL_RPS messages.get a
+second, default 4: 20 quota units/s, 1200/min, far under Gmail's per-user limit; list,
+history and profile calls are charged their own units) and, on a rate limit (429, or 403
+with reason rateLimitExceeded / userRateLimitExceeded), exponential backoff with jitter,
+honouring Retry-After, at most MAX_TRIES tries within RETRY_BUDGET_S, then `GmailRateLimited`.
+Any other 403 (insufficientPermissions...) is raised at once. Only Google's reason is logged.
 """
 from __future__ import annotations
 
+import asyncio
 import base64
+import logging
+import os
+import random
 import re
+import time
 from datetime import datetime, timezone
 from email.utils import getaddresses, parsedate_to_datetime
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 import httpx
 
@@ -29,16 +41,130 @@ HEADERS = ("from", "to", "cc", "subject", "date", "list-unsubscribe", "list-id",
            "auto-submitted")
 
 
+logger = logging.getLogger("valr")
+
+# Gmail quota units per call (developers.google.com/gmail/api/reference/quota).
+UNITS = {"profile": 1, "watch": 100, "stop": 50, "history": 2, "list": 5, "get": 5}
+RATE_REASONS = {"rateLimitExceeded", "userRateLimitExceeded"}
+MAX_TRIES = 5
+RETRY_BUDGET_S = 120.0
+BACKOFF_BASE_S = 4.0
+BACKOFF_CAP_S = 60.0
+
+
 class HistoryGone(Exception):
     """history.list answered 404: the stored historyId is too old."""
+
+
+class GmailRateLimited(Exception):
+    """Gmail kept answering "rate limited" for MAX_TRIES tries (or RETRY_BUDGET_S)."""
+
+    def __init__(self, reason: str, retry_after: float | None = None) -> None:
+        super().__init__(reason)
+        self.reason, self.retry_after = reason, retry_after
 
 
 def auth(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
+class Pacer:
+    """Spaces calls so they spend at most `units_per_s` quota units a second (no burst)."""
+
+    def __init__(self, units_per_s: float, clock: Callable[[], float] = time.monotonic,
+                 sleep: Callable[[float], Awaitable[Any]] = asyncio.sleep) -> None:
+        self.units_per_s = max(0.1, units_per_s)
+        self.clock, self.sleep = clock, sleep
+        self.next_at = 0.0
+
+    async def take(self, units: float) -> float:
+        """Waits for this call's turn; -> the seconds waited."""
+        now = self.clock()
+        start = max(now, self.next_at)
+        self.next_at = start + units / self.units_per_s
+        if start > now:
+            await self.sleep(start - now)
+        return start - now
+
+
+def units_per_s() -> float:
+    """VALR_GMAIL_RPS messages.get a second (default 4), in quota units."""
+    try:
+        rps = float(os.getenv("VALR_GMAIL_RPS", "4"))
+    except ValueError:
+        rps = 4.0
+    return max(0.1, rps) * UNITS["get"]
+
+
+_pacer: Pacer | None = None
+
+
+def pacer() -> Pacer:
+    global _pacer
+    if _pacer is None:
+        _pacer = Pacer(units_per_s())
+    return _pacer
+
+
+def error_reason(response: httpx.Response) -> str:
+    """Google's error reason (e.g. rateLimitExceeded), or the HTTP status."""
+    try:
+        error = response.json().get("error") or {}
+    except ValueError:
+        return str(response.status_code)
+    if not isinstance(error, dict):
+        return str(response.status_code)
+    for item in [*(error.get("errors") or []), *(error.get("details") or [])]:
+        if isinstance(item, dict) and item.get("reason"):
+            return str(item["reason"])
+    return str(error.get("status") or response.status_code)
+
+
+def rate_limited(response: httpx.Response) -> bool:
+    if response.status_code == 429:
+        return True
+    return response.status_code == 403 and error_reason(response) in RATE_REASONS
+
+
+def retry_after(response: httpx.Response) -> float | None:
+    try:
+        return max(0.0, float(response.headers.get("retry-after", "")))
+    except ValueError:
+        return None  # Absent, or an HTTP date: use the backoff.
+
+
+def backoff(attempt: int) -> float:
+    """attempt 1, 2, 3...: 4, 8, 16, 32 s (capped at 60), plus up to 25% jitter."""
+    delay = min(BACKOFF_CAP_S, BACKOFF_BASE_S * 2 ** (attempt - 1))
+    return delay + random.uniform(0, delay / 4)
+
+
+async def send(http: httpx.AsyncClient, method: str, path: str, token: str, kind: str,
+               **kwargs: Any) -> httpx.Response:
+    """One Gmail call, paced; rate limits retried (see the module doc). Other statuses are
+    returned as they are, for the caller to handle."""
+    waited = 0.0
+    for attempt in range(1, MAX_TRIES + 1):
+        await pacer().take(UNITS.get(kind, 5))
+        response = await http.request(method, f"{GMAIL}{path}", headers=auth(token), **kwargs)
+        if not rate_limited(response):
+            if response.status_code >= 400 and response.status_code != 404:
+                logger.warning("VALR gmail: %s answered %d (%s)", kind, response.status_code,
+                               error_reason(response))
+            return response
+        reason, after = error_reason(response), retry_after(response)
+        delay = min(BACKOFF_CAP_S, after if after is not None else backoff(attempt))
+        if attempt == MAX_TRIES or waited + delay > RETRY_BUDGET_S:
+            logger.warning("VALR gmail: %s rate limited (%s) after %d tries; pausing", kind, reason, attempt)
+            raise GmailRateLimited(reason, after)
+        logger.info("VALR gmail: %s rate limited (%s); retry %d in %.1fs", kind, reason, attempt, delay)
+        await pacer().sleep(delay)
+        waited += delay
+    raise AssertionError("unreachable")
+
+
 async def profile(http: httpx.AsyncClient, token: str) -> dict[str, Any]:
-    response = await http.get(f"{GMAIL}/profile", headers=auth(token))
+    response = await send(http, "GET", "/profile", token, "profile")
     response.raise_for_status()
     return response.json()
 
@@ -46,13 +172,13 @@ async def profile(http: httpx.AsyncClient, token: str) -> dict[str, Any]:
 async def watch(http: httpx.AsyncClient, token: str, topic: str) -> dict[str, Any]:
     """-> {historyId, expiration (ms since the epoch)}. All mail, no label filter: sent
     replies are touchpoints too; spam, drafts and chats are dropped by the classifier."""
-    response = await http.post(f"{GMAIL}/watch", headers=auth(token), json={"topicName": topic})
+    response = await send(http, "POST", "/watch", token, "watch", json={"topicName": topic})
     response.raise_for_status()
     return response.json()
 
 
 async def stop(http: httpx.AsyncClient, token: str) -> None:
-    response = await http.post(f"{GMAIL}/stop", headers=auth(token))
+    response = await send(http, "POST", "/stop", token, "stop")
     if response.status_code not in (200, 204, 404):
         response.raise_for_status()
 
@@ -65,7 +191,7 @@ async def history(http: httpx.AsyncClient, token: str, start: int,
     refs: dict[str, dict[str, Any]] = {}
     latest = start
     for _ in range(max_pages):
-        response = await http.get(f"{GMAIL}/history", params=params, headers=auth(token))
+        response = await send(http, "GET", "/history", token, "history", params=dict(params))
         if response.status_code == 404:
             raise HistoryGone()
         response.raise_for_status()
@@ -86,7 +212,7 @@ async def search(http: httpx.AsyncClient, token: str, query: str, cap: int) -> l
     params: dict[str, Any] = {"q": query, "maxResults": min(PAGE, cap)}
     refs: list[dict[str, Any]] = []
     while len(refs) < cap:
-        response = await http.get(f"{GMAIL}/messages", params=params, headers=auth(token))
+        response = await send(http, "GET", "/messages", token, "list", params=dict(params))
         response.raise_for_status()
         body = response.json()
         refs += body.get("messages") or []
@@ -97,8 +223,7 @@ async def search(http: httpx.AsyncClient, token: str, query: str, cap: int) -> l
 
 
 async def message(http: httpx.AsyncClient, token: str, message_id: str) -> dict[str, Any] | None:
-    response = await http.get(f"{GMAIL}/messages/{message_id}", params={"format": "full"},
-                              headers=auth(token))
+    response = await send(http, "GET", f"/messages/{message_id}", token, "get", params={"format": "full"})
     if response.status_code == 404:
         return None  # Deleted since the notification.
     response.raise_for_status()

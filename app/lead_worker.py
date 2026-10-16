@@ -1,8 +1,14 @@
 """Lead tracker activities for the research worker (task queue `voice-research`).
 
-- `gmail_sync`: the messages added since the stored historyId (or, the first time, the last
-  VALR_LEADS_BACKFILL_DAYS days, at most VALR_LEADS_BACKFILL_MAX messages), plus up to
-  DEFERRED_PER_PASS earlier "deferred" ones. Each new message: heuristics, then Claude Haiku
+- `gmail_sync`: the messages added since the stored historyId (or, until the backfill is done,
+  the last VALR_LEADS_BACKFILL_DAYS days, at most VALR_LEADS_BACKFILL_MAX messages, oldest
+  first), plus up to DEFERRED_PER_PASS earlier "deferred" ones. At most
+  VALR_LEADS_FETCH_PER_RUN (150) messages a run, in batches of BATCH, each recorded before the
+  next, so a crash or a rate limit resumes where it stopped (summary.more: the workflow runs
+  again). Gmail calls are paced (gmail_api, VALR_GMAIL_RPS); a rate limit that outlasts the
+  retries ends the run successfully as mode "paused-ratelimit" (last_error "rate limited,
+  resuming") and the workflow resumes it ~2 minutes later. While the backfill is not done, a
+  push only records last_push_at. Each new message: heuristics, then Claude Haiku
   within the day's budget (VALR_LEADS_LLM_PER_DAY) and the research month cap; the decision
   is logged without content; a kept one becomes a touchpoint. A historyId that is too old
   (404) falls back to a 3-day search. One pass at a time (a Postgres advisory lock).
@@ -12,7 +18,8 @@
 - `gmail_watch`: users.watch on VALR_GMAIL_TOPIC, daily.
 
 Settings: VALR_LEADS=1 turns the schedules on; VALR_GMAIL_TOPIC; VALR_LEADS_BACKFILL_DAYS (30),
-VALR_LEADS_BACKFILL_MAX (500), VALR_LEADS_LLM_PER_DAY (300), VALR_LEADS_POLL_MINUTES (30).
+VALR_LEADS_BACKFILL_MAX (500), VALR_LEADS_LLM_PER_DAY (300), VALR_LEADS_POLL_MINUTES (30),
+VALR_LEADS_FETCH_PER_RUN (150), VALR_GMAIL_RPS (4).
 Nothing here logs an address, a subject or an email's text.
 """
 from __future__ import annotations
@@ -40,6 +47,9 @@ SYNC_LOCK = 7_202_610_18
 DEFERRED_PER_PASS = 40
 RECOVERY_QUERY = "newer_than:3d -in:chats"
 CONCURRENCY = 4
+BATCH = 25  # Messages fetched, decided and recorded together.
+PAUSED = "paused-ratelimit"
+RATE_LIMITED = "rate limited, resuming"
 FATHOM_MEETINGS = "https://api.fathom.ai/external/v1/meetings"
 DETAIL_URL = "/valr/performance"  # When no recording is known.
 
@@ -63,6 +73,15 @@ def topic() -> str:
 
 def llm_per_day() -> int:
     return int(os.getenv("VALR_LEADS_LLM_PER_DAY", "300"))
+
+
+def per_run() -> int:
+    """Gmail messages fetched at most per gmail_sync run (VALR_LEADS_FETCH_PER_RUN, 150)."""
+    return max(1, int(os.getenv("VALR_LEADS_FETCH_PER_RUN", "150")))
+
+
+def unique_ids(refs: list[dict[str, Any]]) -> list[str]:
+    return list(dict.fromkeys(ref["id"] for ref in refs if ref.get("id")))
 
 
 def owner_emails() -> set[str]:
@@ -152,6 +171,9 @@ class LeadActivities:
         state = await leads_store.load_state(connection)
         if request.reason == "push":
             await leads_store.save_state(connection, last_push_at=now)
+            if not state.get("backfill_done_at"):
+                summary.mode = "skipped"  # The backfill covers it: its historyId baseline came first.
+                return summary
         if request.history_id and state.get("history_id") and request.history_id <= state["history_id"]:
             summary.mode = "skipped"  # A late or repeated push: already processed.
             return summary
@@ -163,54 +185,109 @@ class LeadActivities:
             if status == "reconnect needed":
                 await self.alert_reconnect(connection, state)
             return summary
-        refs: list[dict[str, Any]]
-        new_history: int | None = None
-        if not state.get("history_id"):
-            summary.mode = "backfill"
-            profile = await gmail_api.profile(self.http, token)
-            new_history = int(profile.get("historyId") or 0)  # Before listing: nothing is missed.
-            days = int(os.getenv("VALR_LEADS_BACKFILL_DAYS", "30"))
-            cap = int(os.getenv("VALR_LEADS_BACKFILL_MAX", "500"))
-            await leads_store.save_state(connection, account=str(profile.get("emailAddress", "")).lower(),
-                                         backfill_started_at=now)
-            refs = await gmail_api.search(self.http, token, f"newer_than:{days}d -in:chats", cap)
-        else:
-            summary.mode = "history"
-            try:
-                refs, new_history = await gmail_api.history(self.http, token, int(state["history_id"]))
-            except gmail_api.HistoryGone:
-                summary.mode = "recovery"
-                logger.warning("VALR leads: Gmail historyId too old; searching the last 3 days")
-                new_history = int((await gmail_api.profile(self.http, token)).get("historyId") or 0)
-                refs = await gmail_api.search(self.http, token, RECOVERY_QUERY, 300)
-        ids = list(dict.fromkeys(ref["id"] for ref in refs if ref.get("id")))
-        done = await leads_store.seen(connection, ids)
-        todo = [i for i in ids if i not in done]
-        todo += [i for i in await leads_store.deferred(connection, DEFERRED_PER_PASS) if i not in todo]
-        await self.process(connection, token, todo, summary)
-        values: dict[str, Any] = {"last_sync_at": now, "last_error": None}
-        if new_history:
-            values["history_id"] = max(new_history, int(state.get("history_id") or 0))
-        if summary.mode == "backfill":
-            values.update(backfill_done_at=datetime.now(timezone.utc), backfill_count=len(ids))
-        await leads_store.save_state(connection, **values)
-        logger.info("VALR leads: Gmail %s (%s): %d new, %d kept, %d dropped, %d deferred, %d model calls, $%.4f",
-                    summary.mode, request.reason, summary.fetched, summary.kept, summary.dropped,
-                    summary.deferred, summary.llm_calls, summary.usd)
+        try:
+            if not state.get("backfill_done_at"):
+                await self.backfill(connection, token, state, now, summary)
+            else:
+                await self.incremental(connection, token, state, now, summary)
+        except gmail_api.GmailRateLimited as error:
+            # Decisions so far are saved (per batch); the workflow resumes in a few minutes.
+            summary.mode, summary.more, summary.error = PAUSED, True, RATE_LIMITED
+            await leads_store.save_state(connection, last_sync_at=now, last_error=RATE_LIMITED)
+            logger.warning("VALR leads: Gmail rate limited (%s); paused, resuming later", error.reason)
+        logger.info("VALR leads: Gmail %s (%s): %d new, %d kept, %d dropped, %d deferred, %d model calls, "
+                    "$%.4f, %d left", summary.mode, request.reason, summary.fetched, summary.kept,
+                    summary.dropped, summary.deferred, summary.llm_calls, summary.usd, summary.left)
         return summary
 
+    async def backfill(self, connection: Any, token: str, state: dict[str, Any], now: datetime,
+                       summary: GmailSyncSummary) -> None:
+        """The first VALR_LEADS_BACKFILL_DAYS days, oldest first, at most per_run() messages a
+        run; done (backfill_done_at) once every listed message has been looked at."""
+        summary.mode = "backfill"
+        started = state.get("backfill_started_at") or now
+        if not state.get("history_id"):
+            profile = await gmail_api.profile(self.http, token)
+            # Saved before listing, so the history passes after the backfill miss nothing.
+            await leads_store.save_state(connection, account=str(profile.get("emailAddress", "")).lower(),
+                                         history_id=int(profile.get("historyId") or 0) or None,
+                                         backfill_started_at=started)
+        elif not state.get("backfill_started_at"):
+            await leads_store.save_state(connection, backfill_started_at=started)
+        days = int(os.getenv("VALR_LEADS_BACKFILL_DAYS", "30"))
+        cap = int(os.getenv("VALR_LEADS_BACKFILL_MAX", "500"))
+        since = int((started - timedelta(days=days)).timestamp())  # Fixed, so resumed runs list the same mail.
+        refs = await gmail_api.search(self.http, token, f"after:{since} -in:chats", cap)
+        ids = list(reversed(unique_ids(refs)))  # Oldest first: a message before the replies to it.
+        done = await leads_store.recorded(connection, ids)
+        todo = [i for i in ids if i not in done]
+        work = todo[:per_run()]
+        try:
+            await self.process_batches(connection, token, work, summary)
+        finally:
+            await leads_store.save_state(connection, backfill_count=len(await leads_store.recorded(connection, ids)))
+        summary.left = len(todo) - len(work)
+        values: dict[str, Any] = {"last_sync_at": now, "last_error": None}
+        if summary.left:
+            summary.more = True
+        else:
+            values.update(backfill_done_at=datetime.now(timezone.utc))
+        await leads_store.save_state(connection, **values)
+
+    async def incremental(self, connection: Any, token: str, state: dict[str, Any], now: datetime,
+                          summary: GmailSyncSummary) -> None:
+        """Messages added since the stored historyId, plus earlier deferred ones. The historyId
+        moves on only when every new message fits in this run."""
+        summary.mode = "history"
+        try:
+            refs, new_history = await gmail_api.history(self.http, token, int(state["history_id"]))
+        except gmail_api.HistoryGone:
+            summary.mode = "recovery"
+            logger.warning("VALR leads: Gmail historyId too old; searching the last 3 days")
+            new_history = int((await gmail_api.profile(self.http, token)).get("historyId") or 0)
+            refs = list(reversed(await gmail_api.search(self.http, token, RECOVERY_QUERY, 300)))
+        ids = unique_ids(refs)
+        done = await leads_store.seen(connection, ids)
+        fresh = [i for i in ids if i not in done]
+        limit = per_run()
+        work = fresh[:limit]
+        work += [i for i in await leads_store.deferred(connection, DEFERRED_PER_PASS)
+                 if i not in fresh][:max(0, limit - len(work))]
+        await self.process_batches(connection, token, work, summary)
+        summary.left = max(0, len(fresh) - limit)
+        values: dict[str, Any] = {"last_sync_at": now, "last_error": None}
+        if summary.left:
+            summary.more = True
+        elif new_history:
+            values["history_id"] = max(new_history, int(state.get("history_id") or 0))
+        await leads_store.save_state(connection, **values)
+
+    async def process_batches(self, connection: Any, token: str, ids: list[str],
+                              summary: GmailSyncSummary) -> None:
+        """BATCH messages at a time, each fetched, decided and recorded before the next: a
+        rate limit or a crash loses at most the batch in flight."""
+        for start in range(0, len(ids), BATCH):
+            await self.process(connection, token, ids[start:start + BATCH], summary)
+
     async def process(self, connection: Any, token: str, ids: list[str], summary: GmailSyncSummary) -> None:
+        """Fetches, decides and records `ids`. On GmailRateLimited the messages fetched so far
+        are still decided and recorded, then it is raised."""
         owners = owner_emails()
         limits = research_jobs.Limits.interview_from_env()
         budget = Budget(max(0, llm_per_day() - await leads_store.llm_calls_today(connection)),
                         await research_jobs.month_spend(connection) < limits.month_usd)
         emails: list[Email] = []
+        limited: gmail_api.GmailRateLimited | None = None
         for message_id in ids:
-            raw = await gmail_api.message(self.http, token, message_id)
+            try:
+                raw = await gmail_api.message(self.http, token, message_id)
+            except gmail_api.GmailRateLimited as error:
+                limited = error
+                break
             beat()
             if raw is not None:
                 emails.append(gmail_api.parse(raw))
-        summary.fetched = len(emails)
+        summary.fetched += len(emails)
         known = await leads_store.kept_threads(connection, [e.thread_id for e in emails])
         gate = asyncio.Semaphore(CONCURRENCY)
 
@@ -263,8 +340,10 @@ class LeadActivities:
             else:
                 summary.deferred += 1
         if rows:
-            summary.usd = await research_jobs.record_spend(
+            summary.usd += await research_jobs.record_spend(
                 connection, f"leads-{datetime.now(timezone.utc):%Y-%m-%d}", rows)
+        if limited is not None:
+            raise limited
 
     async def alert_reconnect(self, connection: Any, state: dict[str, Any]) -> bool:
         """Telegram, once per expiry (keyed by the token's connected_at), when the refresh
@@ -311,8 +390,8 @@ class LeadActivities:
             state = await leads_store.load_state(connection)
             values: dict[str, Any] = {"watch_expires": expires, "watch_renewed_at": datetime.now(timezone.utc)}
             await leads_store.save_state(connection, **values)
-            if not state.get("history_id"):
-                logger.info("VALR leads: watch on; the first sync backfills")
+            if not state.get("backfill_done_at"):
+                logger.info("VALR leads: watch on; the backfill runs from the poll")
         logger.info("VALR leads: Gmail watch renewed (%s) until %s", reason, expires.isoformat())
         return WatchSummary(expires.isoformat(), history)
 
@@ -523,6 +602,7 @@ async def cli(command: str) -> None:
             rows = await cursor.fetchall()
         print(json.dumps({"history_id": state.get("history_id"), "watch_expires": str(state.get("watch_expires")),
                           "last_sync_at": str(state.get("last_sync_at")), "backfill_count": state.get("backfill_count"),
+                          "backfill_done_at": str(state.get("backfill_done_at")),
                           "last_error": state.get("last_error"), "decisions_30d": counts,
                           "leads": [f"{r[0]} {r[1]}: {r[2]}" for r in rows]}, indent=2))
         return

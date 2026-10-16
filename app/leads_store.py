@@ -1,7 +1,8 @@
 """Postgres for the lead tracker (same database as the rest of VALR; created if missing).
 
 - `gmail_state`: one row: the account, the last processed historyId, the watch's expiry,
-  the backfill's progress, the last push and sync, the last error (a class name only).
+  the backfill's progress (backfill_count: messages of the backfill decided so far;
+  backfill_done_at once all are), the last push and sync, the last error (a class name only).
 - `lead_emails`: one row per Gmail message ever looked at: its decision, how it was made,
   the category and confidence. No subject, no text, no address: only the sender's domain.
   This is the de-duplication record and the decision log.
@@ -153,6 +154,16 @@ async def seen(connection: Any, message_ids: list[str]) -> set[str]:
     cursor = await connection.execute(
         "SELECT message_id FROM lead_emails WHERE message_id = ANY(%s) AND decision <> 'deferred'",
         (message_ids,))
+    return {row[0] for row in await cursor.fetchall()}
+
+
+async def recorded(connection: Any, message_ids: list[str]) -> set[str]:
+    """Ids with any row, deferred ones included: the backfill's progress (a deferred one is
+    retried by later passes, it does not hold the backfill open)."""
+    if not message_ids:
+        return set()
+    cursor = await connection.execute(
+        "SELECT message_id FROM lead_emails WHERE message_id = ANY(%s)", (message_ids,))
     return {row[0] for row in await cursor.fetchall()}
 
 
