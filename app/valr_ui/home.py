@@ -24,48 +24,68 @@ def globe_json(leads: dict[str, Any]) -> str:
     return safe_json({"leads": leads.get("leads") or [], "stages": leads.get("stages") or []})
 
 
+def globe_leads(leads: dict[str, Any]) -> list[dict[str, Any]]:
+    """What the 3D globe draws: the live and the closed leads (closed hidden until the toggle),
+    one small record each. Expired leads, people and links stay out."""
+    return [{"id": r["id"], "company": r["company"], "temperature": r["temperature"], "band": r["band"],
+             "stage": r["stage_raw"] or r["stage"], "stage_label": r["stage_label"],
+             "last_touch_at": r["last_activity_at"], "status": "closed" if r["bucket"] == "closed" else "active"}
+            for r in (leads.get("leads") or []) + (leads.get("closed") or [])]
+
+
 def raw_json(leads: dict[str, Any]) -> str:
-    """The 3D globe's data: GET /valr/api/leads as is, without expired leads."""
-    raw = leads.get("raw") or {}
-    active = {r["id"] for r in leads.get("leads") or []}
-    kept = [lead for lead in raw.get("leads") or [] if lead.get("id") in active]
-    ids = {lead["id"] for lead in kept}
-    people = [{**c, "leads": [i for i in c.get("leads") or [] if i in ids]} for c in raw.get("contacts") or []]
-    people = [c for c in people if c["leads"]]
-    pids = {c["id"] for c in people}
-    links = [k for k in raw.get("links") or [] if k.get("source") in ids and (k.get("target") in ids or k.get("target") in pids)]
-    return safe_json({"leads": kept, "contacts": people, "links": links, "stages": raw.get("stages") or []})
+    """The 3D globe's data (static/leads-globe.js)."""
+    return safe_json({"leads": globe_leads(leads)})
 
 
-def hero(leads: dict[str, Any], compact: bool = False) -> str:
-    rows = leads.get("leads") or []
-    live = [r for r in rows if r["stage"] != "closed"]
-    interviewing = sum(1 for r in rows if r["stage"] == "interviewing")
-    waiting = sum(1 for r in rows if r["waiting_on_you"])
-    hot = sum(1 for r in live if (r.get("temperature") or 0) >= 60)
-    legend = "".join(
-        f'<a class="legend-item" href="/valr/leads?stage={e(s["key"])}"><span class="sw st-{e(s["key"])}" aria-hidden="true"></span>'
-        f'{e(s["label"])} <span class="num muted">{s["count"]}</span></a>' for s in leads.get("stages") or [] if s["count"])
+def band_sw(band: str, temperature: Any = None) -> str:
+    """A band swatch; with a score, its place inside the band sets the shade (static/leads.css)."""
+    from app.leads import BANDS
+    lows = dict(BANDS)
+    f = 1.0
+    if temperature is not None and band in lows:
+        f = max(0.0, min(1.0, (float(temperature) - lows[band]) / 25))
+    return f'<span class="band-sw b-{e(band)}" style="--f:{f:.2f}" aria-hidden="true"></span>'
+
+
+def band_legend(leads: dict[str, Any], show_closed: bool = False) -> str:
+    """"Hot 5 · Warm 12 · Cool 30 · Cold 15", each a link to that band, and the Closed toggle."""
+    items = "".join(
+        f'<a class="legend-item" href="/valr/leads?band={e(b["key"])}" title="{e(b["meaning"])}">{band_sw(b["key"])}'
+        f'{e(b["label"])} <span class="num">{b["count"]}</span></a>' for b in leads.get("bands") or [])
+    closed = leads.get("closed_band") or {}
+    toggle = (f'<label class="globe-toggle" title="{e(closed.get("meaning", ""))}"><input type="checkbox" data-globe-closed'
+              f'{" checked" if show_closed else ""}> {band_sw("closed")}Show closed <span class="num">{closed["count"]}</span></label>'
+              if closed.get("count") else "")
+    return f'<div class="band-legend" aria-label="Temperature bands">{items}{toggle}</div>'
+
+
+def hero(leads: dict[str, Any], compact: bool = False, show_closed: bool = False) -> str:
+    counts = leads.get("counts") or {}
+    live = counts.get("live", 0)
+    interviewing = sum(1 for r in leads.get("leads") or [] if r["stage"] == "interviewing")
+    waiting = counts.get("waiting_on_you", 0)
+    hot = counts.get("hot", 0)
     if leads.get("available"):
-        title = f'{len(live)} live lead{"s" if len(live) != 1 else ""}'
+        title = f'{live} live lead{"s" if live != 1 else ""}'
         sub = " · ".join(x for x in (f"{hot} hot" if hot else "", f"{interviewing} interviewing" if interviewing else "",
                                      f"{waiting} waiting on you" if waiting else "") if x) or "Nothing waiting on you"
+        legend = band_legend(leads, show_closed)
     else:
-        title, sub = "Your pipeline", "Leads appear here once the Gmail lead tracker is connected."
-    temp = ('<p class="globe-key mono small" aria-hidden="true"><span>cold</span><i class="ramp"></i><span>hot</span></p>'
-            if leads.get("raw") else "")
+        title, sub, legend = "Your pipeline", "Leads appear here once the Gmail lead tracker is connected.", ""
     return f"""
+<link rel="stylesheet" href="{asset('leads.css')}">
 <section class="hero-globe{' compact' if compact else ''}" aria-labelledby="hero-title">
   <div class="globe" data-globe data-mode="{'leads' if compact else 'home'}" data-src="{globe_src()}"
-       data-fallback="{asset('valr-globe-lite.js')}" role="img"
-       aria-label="A globe of your job leads, coloured from cold blue to hot orange. The list on the Leads page has the same information.">
+       data-fallback="{asset('valr-globe-lite.js')}" role="group"
+       aria-label="A globe of your live leads: hottest at the top, coldest at the bottom. The list on the Leads page has the same information.">
     <noscript><p class="muted small">The globe needs JavaScript; the Leads page lists everything.</p></noscript>
   </div>
   <div class="hero-copy">
     <p class="eyebrow"><span class="eb-rule"></span>Pipeline</p>
     <{'h2' if compact else 'h1'} id="hero-title" class="hero-title">{e(title)}</{'h2' if compact else 'h1'}>
     <p class="hero-sub">{e(sub)}</p>
-    {f'<div class="legend">{legend}</div>' if legend else ''}{temp}
+    {legend}
     <a class="hero-link mono" href="/valr/leads">{'All leads →' if leads.get('available') else 'Leads settings →'}</a>
   </div>
   <div class="lead-peek" data-lead-peek hidden aria-live="polite"></div>
@@ -137,6 +157,10 @@ def todo_cell(todos: list[dict[str, Any]]) -> str:
             fix = t.get("fix") or {}
             target = fix.get("href") or "#"
             rows.append(f'<li><a href="{e(target)}"><span class="todo-box" aria-hidden="true"></span>{e(t["title"])}</a></li>')
+            continue
+        if t.get("sub") or t.get("url"):
+            gmail = f' · <a href="{e(t["url"])}" target="_blank" rel="noopener">Open in Gmail</a>' if t.get("url") else ""
+            rows[-1] = rows[-1].removesuffix("</li>") + f'<span class="todo-sub">{e(t.get("sub", ""))}{gmail}</span></li>'
     return f'<div class="now-cell"><p class="label">To do</p><ul class="todos">{"".join(rows)}</ul></div>'
 
 

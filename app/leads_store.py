@@ -137,6 +137,22 @@ async def overrides(connection: Any) -> Overrides:
     return out
 
 
+async def move_overrides(connection: Any, aliases: dict[str, str]) -> int:
+    """A rebuild renamed some leads (leads.lead_aliases: old id -> new id): key their
+    corrections by the new ids, so they still apply once the touchpoints are saved under
+    the new ids. Returns the rows moved."""
+    moved = 0
+    for old, new in sorted(aliases.items()):
+        if not old or not new or old == new:
+            continue
+        cursor = await connection.execute("UPDATE lead_overrides SET lead_id = %s WHERE lead_id = %s", (new, old))
+        moved += cursor.rowcount or 0
+        cursor = await connection.execute(
+            "UPDATE lead_overrides SET value = %s WHERE kind = 'merge' AND value = %s", (new, old))
+        moved += cursor.rowcount or 0
+    return moved
+
+
 async def load_state(connection: Any) -> dict[str, Any]:
     cursor = await connection.execute(f"SELECT {', '.join(STATE_COLUMNS)} FROM gmail_state WHERE id = 1")
     row = await cursor.fetchone()

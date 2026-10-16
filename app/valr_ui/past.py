@@ -103,6 +103,6 @@ def enrich(interview: dict[str, Any], row: dict[str, Any] | None, leads: list[di
 
 
 def all_leads(leads: dict[str, Any] | None) -> list[dict[str, Any]]:
-    """contracts.leads(...) -> every lead, active and expired."""
+    """contracts.leads(...) -> every lead: live, closed and expired."""
     leads = leads or {}
-    return list(leads.get("leads") or []) + list(leads.get("expired") or [])
+    return list(leads.get("leads") or []) + list(leads.get("closed") or []) + list(leads.get("expired") or [])

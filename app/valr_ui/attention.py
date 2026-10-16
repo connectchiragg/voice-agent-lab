@@ -194,9 +194,9 @@ def todos(view: dict[str, Any], attention: list[dict[str, Any]],
                             "done": done == len(prep)})
     out += [{"title": i["title"], "fix": i["fix"], "kind": "fix"} for i in attention if i.get("todo")]
     for lead in (leads or {}).get("leads") or []:
-        if lead.get("waiting_on_you"):
-            out.append({"title": f"Reply to {lead['company']}", "href": f"/valr/leads?lead={lead['id']}",
-                        "kind": "lead"})
+        if lead.get("waiting_on") == "you":  # app/leads.ball_in_court: a live lead, the ball in his court.
+            out.append({"title": f"Reply to {lead['company']}", "href": f"/valr/leads?lead={lead['id']}#lead",
+                        "kind": "lead", "sub": lead.get("waiting_reason") or "", "url": lead.get("url") or ""})
     past = (view.get("performance") or {}).get("interviews") or []
     if past and now is not None:
         latest = past[-1]
