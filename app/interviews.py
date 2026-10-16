@@ -423,7 +423,7 @@ def squashed(text: str) -> str:
     return re.sub(r"[\W_]+", "", text.lower())
 
 
-FUZZY_MIN = 0.6  # SequenceMatcher ratio: "bright lion" vs "brightline" 0.82, "nortwen" vs "northwind" 0.67.
+FUZZY_MIN = 0.6  # SequenceMatcher ratio: "brightlion" vs "brightline" 0.9, "nortwen" vs "northwind" 0.75.
 
 
 def names_of(event: SlotEvent) -> list[str]:
