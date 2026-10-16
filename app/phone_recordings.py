@@ -22,6 +22,11 @@ Storage (Postgres, so the app container needs no writable disk):
 - `phone_upload_token`: the Shortcut's bearer token, as a SHA-256 hash only. VALR_UPLOAD_TOKEN
   is the first seed; Settings can show it once, and rotate it (the new one is shown once).
 
+Evaluation: the worker hands each processed call to the coach (the default hook queues it on
+the worker's own connection: the worker image has no groq/fastapi, so nothing here may import
+app.research). A hand-off that failed is retried once at each worker start, or by hand:
+`python -m app.phone_recordings reevaluate <upload id|--all-unevaluated>` (worker container).
+
 Nothing here logs a name, a title, a token or transcript text.
 """
 from __future__ import annotations
@@ -664,7 +669,8 @@ class Processor:
         company, how = await self.company(connection, recording, meeting, event, row.get("other_name") or "",
                                           candidate)
         recording.company = company
-        await pipeline.intake(connection, recording, "upload", hook=self.hook, match=lambda r: _same(event))
+        await pipeline.intake(connection, recording, "upload", hook=self.hook or default_hook(connection),
+                              match=lambda r: _same(event))
         if how:
             await set_company_how(connection, upload_id, how)
         await mark(connection, upload_id, status="done", processed_at=now, error=None,
@@ -697,6 +703,53 @@ class Processor:
         ev = company_resolver.Evidence(kind="recording", title=recording.title, people=people, transcript=text)
         decision = await resolver.resolve(connection, ev, entity_id=f"interview:{PROVIDER}:{recording.external_id}")
         return decision.company, decision.how
+
+
+def default_hook(connection: Any) -> Any:
+    """VALR_EVAL_HOOK's hook; the default one queues on this very connection (the worker has no
+    web pool, and no groq/fastapi to import one with)."""
+    from app.notetakers import pipeline
+    if os.getenv(pipeline.HOOK_ENV, pipeline.DEFAULT_HOOK).strip() != pipeline.DEFAULT_HOOK:
+        return None  # pipeline.hand_off resolves the configured one.
+    from app.profile import notetaker_hook
+
+    async def hook(provider: str, external_id: str, meeting: dict | None) -> str:
+        return await notetaker_hook.evaluate_recording(provider, external_id, meeting, connection=connection)
+    return hook
+
+
+UNEVALUATED = ("pending", "no_hook", "failed")
+
+
+async def reevaluate(connection: Any, upload_id: str | None = None) -> list[tuple[str, str]]:
+    """Hand processed phone recordings to the evaluation again: one (by id, whatever its state;
+    a failed post-call report is queued again) or every one whose hand-off never succeeded.
+    -> [(id, status)]. Logs ids and statuses only."""
+    from app import post_call
+    from app.notetakers import pipeline, store
+    await store.setup(connection)
+    if upload_id:
+        ids = [upload_id]
+    else:
+        cursor = await connection.execute(
+            "SELECT external_id FROM notetaker_recordings WHERE provider = %s AND eval_status = ANY(%s) "
+            "ORDER BY received_at", (PROVIDER, list(UNEVALUATED)))
+        ids = [r[0] for r in await cursor.fetchall()]
+    results = []
+    for external_id in ids:
+        meeting = await sealed_meeting(connection, external_id)
+        if meeting is None:
+            results.append((external_id, "no_transcript"))
+            continue
+        if upload_id:
+            await post_call.setup(connection)
+            await connection.execute("DELETE FROM post_call_reports WHERE provider = %s AND external_id = %s "
+                                     "AND status = 'failed'", (PROVIDER, external_id))
+        status = await pipeline.hand_off(connection, PROVIDER, external_id, meeting, default_hook(connection))
+        results.append((external_id, status))
+    if results:
+        logger.info("VALR phone recordings re-evaluated: %s", ", ".join(f"{i} {s}" for i, s in results))
+    return results
 
 
 async def set_company_how(connection: Any, upload_id: str, how: str) -> None:
@@ -749,10 +802,14 @@ async def loop(connect: Callable[[], Any], stop: asyncio.Event | None = None) ->
     stop = stop or asyncio.Event()
     every = float(os.getenv("VALR_PHONE_LOOP_S", "30"))
     processor = Processor()
+    picked_up = False
     while not stop.is_set():
         try:
             async with await connect() as connection:
                 await setup(connection)
+                if not picked_up:  # Once per worker start: recordings whose hand-off failed earlier.
+                    picked_up = True
+                    await reevaluate(connection)
                 while await processor.run_once(connection):
                     pass
                 await purge(connection, datetime.now(timezone.utc))
@@ -762,3 +819,24 @@ async def loop(connect: Callable[[], Any], stop: asyncio.Event | None = None) ->
             await asyncio.wait_for(stop.wait(), timeout=every)
         except asyncio.TimeoutError:
             pass
+
+
+async def _cli(target: str) -> int:
+    import psycopg
+    from app import research_jobs
+    async with await psycopg.AsyncConnection.connect(research_jobs.conninfo(), autocommit=True) as connection:
+        await setup(connection)
+        results = await reevaluate(connection, None if target == "--all-unevaluated" else target)
+    for external_id, status in results:
+        print(f"phone:{external_id}  {status}")
+    print(f"{len(results)} re-evaluated; the post-call loop scores them within a few minutes.")
+    return 0
+
+
+if __name__ == "__main__":
+    import sys
+    if sys.argv[1:2] != ["reevaluate"] or len(sys.argv) != 3:
+        sys.exit("usage: python -m app.phone_recordings reevaluate <upload id|--all-unevaluated>  "
+                 "(in the research worker container)")
+    logging.basicConfig(level=logging.INFO)
+    sys.exit(asyncio.run(_cli(sys.argv[2].removeprefix("phone:"))))

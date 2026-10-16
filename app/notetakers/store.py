@@ -16,6 +16,9 @@
 - `recording_media`: the provider's signed download of a recording (Fathom's official
   download API, app/notetakers/media.py): its status and the signed URL, sealed with
   VALR_TOKEN_KEY like the keys, until it expires.
+- `notetaker_hidden`: recordings the owner removed from Past interviews: "Hide" (a Fathom or
+  Fireflies recording, which lives at the provider) or "Delete" (a phone upload, whose data
+  is gone). Keeps them (and any scorecard of theirs) out of the list and off a re-sync.
 """
 import json
 from datetime import datetime
@@ -68,6 +71,13 @@ CREATE TABLE IF NOT EXISTS recording_media (
     expires_at    timestamptz,
     error         text,
     updated_at    timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (provider, external_id)
+);
+CREATE TABLE IF NOT EXISTS notetaker_hidden (
+    provider      text NOT NULL,
+    external_id   text NOT NULL,
+    how           text NOT NULL,            -- hidden (Fathom/Fireflies: kept at the provider) | deleted (phone)
+    at            timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (provider, external_id)
 );
 CREATE INDEX IF NOT EXISTS notetaker_recordings_by_start ON notetaker_recordings (started_at);
@@ -292,3 +302,24 @@ async def save_media(connection: Any, provider: str, external_id: str, media: di
         "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, now()) ON CONFLICT (provider, external_id) DO UPDATE SET "
         + ", ".join(f"{k} = excluded.{k}" for k in MEDIA_FIELDS[:-1]) + ", updated_at = now()",
         (provider, external_id, *values))
+
+
+# The owner's Hide / Delete (Past interviews).
+
+async def hide(connection: Any, provider: str, external_id: str, how: str = "hidden") -> None:
+    await connection.execute(
+        "INSERT INTO notetaker_hidden (provider, external_id, how) VALUES (%s, %s, %s) "
+        "ON CONFLICT (provider, external_id) DO UPDATE SET how = EXCLUDED.how, at = now()",
+        (provider, external_id, how))
+
+
+async def hidden(connection: Any) -> set[tuple[str, str]]:
+    cursor = await connection.execute("SELECT provider, external_id FROM notetaker_hidden")
+    return {(p, x) for p, x in await cursor.fetchall()}
+
+
+async def delete_recording(connection: Any, provider: str, external_id: str) -> None:
+    """The recording's row (its sealed transcript too) and its cached media."""
+    for table in ("notetaker_recordings", "recording_media"):
+        await connection.execute(f"DELETE FROM {table} WHERE provider = %s AND external_id = %s",
+                                 (provider, external_id))

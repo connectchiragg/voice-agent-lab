@@ -87,6 +87,13 @@ async def set_status(connection: Any, provider: str, external_id: str, status: s
         (status, *fields.values(), provider, str(external_id)))
 
 
+async def statuses(connection: Any) -> dict[tuple[str, str], str]:
+    """Every recording's report status, for Past interviews' "Review pending / not available"."""
+    await setup(connection)
+    cursor = await connection.execute("SELECT provider, external_id, status FROM post_call_reports")
+    return {(p, x): st for p, x, st in await cursor.fetchall()}
+
+
 async def queued(connection: Any, limit: int = 5) -> list[dict[str, Any]]:
     cursor = await connection.execute(
         "SELECT provider, external_id, sealed, recording_url FROM post_call_reports "
@@ -213,6 +220,9 @@ async def run_queue(connection: Any, fetch: Fetch = fathom_fetch, process: Proce
                 meeting = json.loads(google_oauth.decrypt(token_key(), row["sealed"]))
             except Exception:  # noqa: BLE001 - re-fetch instead
                 meeting = None
+        if meeting is None and row["provider"] == "phone":  # Kept by VALR (app/phone_recordings.py).
+            from app import phone_recordings
+            meeting = await phone_recordings.sealed_meeting(connection, row["external_id"])
         if meeting is None:
             meeting = await asyncio.to_thread(fetch, row["provider"], row["external_id"])
         if meeting is None:

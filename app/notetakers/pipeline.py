@@ -42,6 +42,14 @@ DEFAULT_HOOK = "app.profile.notetaker_hook:evaluate_recording"
 Hook = Callable[[str, str, dict | None], Awaitable[str] | str]
 
 
+def failure(error: BaseException) -> str:
+    """The exception class, plus the missing module for an ImportError. Never the message:
+    it could quote a transcript."""
+    name = type(error).__name__
+    missing = getattr(error, "name", None) if isinstance(error, ImportError) else None
+    return f"{name}: {missing}" if missing else name
+
+
 def resolve_hook() -> Hook | None:
     target = os.getenv(HOOK_ENV, DEFAULT_HOOK).strip()
     module_name, _, function = target.partition(":")
@@ -49,7 +57,8 @@ def resolve_hook() -> Hook | None:
         return None
     try:
         module = importlib.import_module(module_name)
-    except ModuleNotFoundError:
+    except ModuleNotFoundError as error:
+        logger.warning("VALR evaluation hook %s not importable (%s)", target, failure(error))
         return None
     hook = getattr(module, function, None)
     return hook if callable(hook) else None
@@ -68,8 +77,8 @@ async def hand_off(connection: Any, provider: str, external_id: str, meeting: di
         result = hook(provider, external_id, meeting)
         detail = await result if inspect.isawaitable(result) else result
     except Exception as error:  # noqa: BLE001 - the recording stays pending; the page says so.
-        logger.warning("VALR evaluation hook failed for a %s recording: %s", provider, type(error).__name__)
-        await store.set_eval(connection, provider, external_id, "failed", type(error).__name__)
+        logger.warning("VALR evaluation hook failed for a %s recording: %s", provider, failure(error))
+        await store.set_eval(connection, provider, external_id, "failed", failure(error))
         return "failed"
     await store.set_eval(connection, provider, external_id, "handed_off", str(detail or "")[:300])
     await store.clear_sealed(connection, provider, external_id)
