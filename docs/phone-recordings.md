@@ -14,6 +14,10 @@ The audio is deleted 7 days after processing. The transcript and the review stay
 Truecaller (recording)  →  Share  →  "Send to VALR" Shortcut  →  VALR  →  Past interviews + Telegram report
 ```
 
+## iPhone call recording (iOS 18.1+) on a Mac: VALR Recorder Sync
+
+If you record calls with the iPhone's own call recording, the recordings land in Notes and iCloud syncs them to your Mac. The menu-bar app in `mac/VALRRecorderSync/` sends each new one to this same upload endpoint automatically (same upload token). Setup and how it reads Notes: [mac/VALRRecorderSync/README.md](../mac/VALRRecorderSync/README.md).
+
 ## What you need
 
 - Truecaller Premium on the iPhone, with call recording working.
