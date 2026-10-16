@@ -115,7 +115,7 @@ def test_merge_overlays_new_parts_and_drops_removed_interviewers():
     assert interview_worker.interviewed(merged) == {"b@acme.com", "new@acme.com"}
 
 
-def test_slot_guardrail_wants_140_to_230_spoken_words_and_sourced_notes():
+def test_slot_guardrail_wants_120_to_190_spoken_words_and_sourced_notes():
     check = slot_guardrail({"https://a.example"}, Meter("synth"))
     note = SimpleNamespace(fact="f", source_urls=["https://a.example"])
     good = SimpleNamespace(pydantic=SimpleNamespace(spoken=" ".join(["word"] * 180), notes=[note]))
@@ -125,6 +125,9 @@ def test_slot_guardrail_wants_140_to_230_spoken_words_and_sourced_notes():
     digits = SimpleNamespace(pydantic=SimpleNamespace(spoken=" ".join(["word"] * 170) + " 40 LPA",
                                                       notes=[note]))
     assert not check(digits)[0]
+    domain = SimpleNamespace(pydantic=SimpleNamespace(spoken=" ".join(["word"] * 170) + " kestrelapp dot com",
+                                                      notes=[note]))
+    assert not check(domain)[0]
 
 
 def test_round_and_company_extras_follow_the_sourcing_rule():

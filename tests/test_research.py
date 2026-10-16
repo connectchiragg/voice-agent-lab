@@ -153,7 +153,7 @@ def test_the_callback_call_greets_with_the_topic_and_quotes_findings_as_data():
         assert callbacks.greeting(conversation) == ("Hi, it's VALR, calling back with what I found "
                                                     "about Coorg. Is now a good time?")
         note = callbacks.prompt_note(conversation)
-        assert "relay the prepared answer" in note and "only from the notes" in note
+        assert "give the prepared answer" in note and "only from the notes" in note
         assert note.count("</research>") == 1  # The findings cannot close the data block.
         assert "(sensitive: only if asked)" in note
     finally:
