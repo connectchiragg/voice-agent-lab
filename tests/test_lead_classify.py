@@ -116,3 +116,30 @@ def test_parse_reads_the_requested_action():
     assert asked.action_requested is True and asked.action == "share your availability for a thirty minute screen next week"
     assert lead_classify.parse('{"keep": true, "confidence": 0.9, "action_requested": "yes"}').action_requested is None
     assert lead_classify.parse('{"keep": true, "confidence": 0.9}').action == ""
+
+
+@pytest.mark.parametrize("sender, subject, dropped", [
+    ("news@coursera.org", "Coursera + Udemy: top courses for engineers", True),
+    ("hello@udemy.com", "Your interview prep course is 80% off", True),          # A learning platform, whatever it says.
+    ("team@sentry.io", "What's new in Sentry: release notes for October", True),  # A product newsletter.
+    ("alerts@jobsite.example", "Recommended jobs for you this week", True),       # A digest.
+    ("noreply@acme.example", "Webinar: scaling Postgres", True),
+    ("talent@sentry.io", "Your application to Sentry: next steps", False),       # A process word: the model decides.
+    ("recruiter@acme.example", "Introducing you to the Acme hiring manager", False),
+])
+def test_marketing_newsletters_and_digests_are_dropped_before_the_model(sender, subject, dropped):
+    from datetime import datetime, timezone
+    email = lead_classify.Email(id="m1", thread_id="t1", at=datetime(2026, 10, 1, tzinfo=timezone.utc),
+                                from_name="Sender", from_email=sender, subject=subject,
+                                text="We would like to discuss the role and your interview availability.")
+    early = lead_classify.prefilter(email)
+    assert (early is not None and not early.keep) is dropped
+
+
+def test_course_marketing_already_stored_never_becomes_a_lead():
+    from datetime import datetime, timezone
+    from app import leads
+    from app.leads import Contact, Touch
+    t = Touch("gmail:c", "email", datetime(2026, 10, 1, tzinfo=timezone.utc), company="Coursera + Udemy",
+              domain="coursera.org", direction="in", people=[Contact("news@coursera.org", "Coursera")], title="Courses")
+    assert leads.build([t], datetime(2026, 10, 2, tzinfo=timezone.utc)) == []

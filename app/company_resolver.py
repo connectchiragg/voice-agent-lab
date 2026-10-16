@@ -38,7 +38,7 @@ from app import company_names as names
 
 logger = logging.getLogger("valr")
 MODEL = "claude-haiku-5-5"
-RESOLVER_VERSION = 5  # Bump when the rules change: cached answers from older rules are ignored.
+RESOLVER_VERSION = 6  # Bump when the rules change: cached answers from older rules are ignored.
 CONFIDENT = 0.7      # Below this (or needs_web) one web search follows.
 SHOW = 0.5           # Below this after research: "Company not identified".
 MAX_TOKENS = 300

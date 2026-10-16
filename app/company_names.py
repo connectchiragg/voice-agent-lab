@@ -58,9 +58,36 @@ AGENCY_DOMAINS = frozenset("""
     shl.com hirevue.com testgorilla.com mettl.com imocha.io xobin.com glider.ai interviewvector.com
     intervue.io barraiser.com incruiter.com flocareer.com gloroots.com recrew.ai recrew.in recrew.com
     watsonsearchpartner.com watsonsearchpartners.com successpact.com crossover.com andela.com
-    weekday.works weekday.so weekday.contact quickhyre.ai quickhyre.com randstad.com adecco.com michaelpage.com hays.com roberthalf.com teamlease.com quesscorp.com
+    weekday.works weekday.so weekday.contact weekday.ai weekday.app weekdayworks.com quickhyre.ai quickhyre.com
+    qrata.ai qrata.com randstad.com adecco.com michaelpage.com hays.com roberthalf.com teamlease.com quesscorp.com
     abcconsultants.net kellyservices.com manpowergroup.com ciel.co.in xpheno.com
     """.split())
+# ATS, mailer, job-board and recruiting-platform brands: a domain label that is (or starts with)
+# one of these, with or without "mail"/"email"/"careers", is a recruiter's tool, never a company
+# ("hirebridgemail.com", "recruitee-email.com", "naukri.com").
+TOOL_BRANDS = frozenset("""
+    hirebridge recruitee greenhouse lever ashby ashbyhq workable smartrecruiters zohorecruit freshteam keka
+    darwinbox naukri instahyre iimjobs hirist cutshort wellfound weekday workday myworkday icims jobvite teamtailor
+    breezy bamboohr recruiterflow hirequotient goodtime calendly modernloop linkedin indeed glassdoor monster
+    foundit apna internshala unstop hackerrank hackerearth codility hirevue testgorilla mettl imocha quickhyre
+    qrata gloroots recrew
+    """.split())
+MAILER_WORDS = ("email", "mailer", "mailing", "mail", "careers", "career", "jobs", "notify", "notifications",
+                "hiring", "talent", "recruiting")
+
+
+def tool_brand(domain: str) -> str:
+    """The ATS / job-board / recruiting-platform brand a domain belongs to, or ""."""
+    labels = (domain or "").lower().strip(".").split(".")
+    for label in labels[:-1]:
+        bare = label.replace("-", "")
+        variants = [bare] + [bare[:-len(w)] for w in MAILER_WORDS if bare.endswith(w) and len(bare) > len(w) + 2]
+        for variant in variants:
+            if variant in TOOL_BRANDS:  # Exact, after a mailer word is cut ("leverage.com" is not Lever).
+                return variant
+    return ""
+
+
 # Calendar, video and notetaker tools.
 TOOL_DOMAINS = frozenset("""
     zoom.us zoom.com calendar.google.com google.com meet.google.com microsoft.com teams.microsoft.com
@@ -243,6 +270,11 @@ def is_company(name: str, owner: Iterable[str] | None = None) -> bool:
         return False  # Only role / title words: "Deployed Engineer", "AI Software".
     if is_fragment(name):
         return False  # "30pm", "Complete the Mandatory AI", "Deployed Engineer is".
+    bare = (name or "").strip()
+    if re.fullmatch(r"[a-z]{2,5}", bare):
+        return False  # "eekee", "faff": a short lower-case non-word is never a name by itself (the model decides).
+    if is_agency_name(bare):
+        return False  # An ATS, job board or recruiting platform: "Recruitee Email", "Weekday AI".
     return any(len(w) >= 3 for w in rest) or (len(rest) == 1 and (name or "").strip().isupper() and len(rest[0]) >= 2)
 
 
@@ -402,7 +434,7 @@ DOMAIN_SUFFIXES = frozenset({"app", "hq", "inc", "team", "careers", "jobs", "hir
                              "infoweb", "info"})
 NAME_PARTS = ("technologies", "technology", "solutions", "software", "systems", "infoweb", "digital", "labs", "cloud",
               "health", "data", "tech", "group", "global", "ai")
-DROP_SUFFIX = ("app", "hq", "inc", "team", "careers", "jobs", "hiring")
+DROP_SUFFIX = ("app", "hq", "inc", "team", "careers", "jobs", "hiring", "email", "mailer", "mail")
 DROP_PREFIX = ("get", "try", "join", "use", "hello", "go", "meet", "with")
 
 
@@ -439,8 +471,14 @@ def on(domain: str, names: frozenset[str]) -> bool:
     return any(domain == n or domain.endswith("." + n) for n in names)
 
 
+def is_learning(domain: str) -> bool:
+    """A course / learning platform (their mail is marketing, never a lead)."""
+    from app.lead_classify import LEARNING
+    return on((domain or "").lower().strip("."), LEARNING)
+
+
 def is_ats(domain: str) -> bool:
-    return on(domain, ATS_DOMAINS)
+    return on(domain, ATS_DOMAINS) or bool(tool_brand(domain))
 
 
 def is_agency(domain: str, learned: Iterable[str] = ()) -> bool:
@@ -454,7 +492,7 @@ def registrable(domain: str, agencies: Iterable[str] = ()) -> str:
     """The company's registrable domain; "" for free-mail, ATS, job-board, agency and tool domains."""
     domain = (domain or "").lower().strip(".")
     if not domain or "." not in domain or domain in FREEMAIL or on(domain, ATS_DOMAINS) or on(domain, TOOL_DOMAINS) \
-            or is_agency(domain, agencies):
+            or is_agency(domain, agencies) or tool_brand(domain):
         return ""
     labels = domain.split(".")
     if len(labels) >= 3 and labels[-2] in SECOND_LEVEL:
@@ -603,9 +641,18 @@ def resolve(*, attendees: Iterable[str] = (), sender_email: str = "", sender_nam
 
 
 def is_agency_name(name: str, agencies: Iterable[str] = ()) -> bool:
-    """Is this name one of the known (or learned) agencies or platforms?"""
+    """Is this name a known (or learned) agency, platform or ATS brand ("Weekday AI",
+    "Recruitee Email", "Hirebridgemail")?"""
     k = key(name).replace(" ", "")
-    return bool(k) and any(key(agency_name(d)).replace(" ", "") == k for d in set(AGENCY_DOMAINS) | set(agencies))
+    if not k:
+        return False
+    brands = {key(agency_name(d)).replace(" ", "") for d in set(AGENCY_DOMAINS) | set(agencies)} | set(TOOL_BRANDS)
+    for brand in brands:
+        if len(brand) >= 3 and k.startswith(brand):
+            rest = k[len(brand):]
+            if not rest or rest in DOMAIN_SUFFIXES or rest in MAILER_WORDS or rest in ("works", "contact"):
+                return True
+    return False
 
 
 def firm(found: Resolution, people: Iterable[str] = ()) -> str:
