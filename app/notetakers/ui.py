@@ -34,8 +34,8 @@ def summary_buttons(notetakers: dict[str, dict[str, Any]]) -> str:
     out = []
     for name in ORDER:
         s = notetakers.get(name)
-        if not s:
-            continue
+        if not s or s.get("optional"):
+            continue  # Optional connections (Granola) live only in the cards below.
         dot = "ok" if is_on(s) else "bad" if s["state"] == "refused" else "muted"
         out.append(f'<a class="btn small" href="#nt-{name}" data-connect-open="{name}">'
                    f'<span class="dot {dot}" aria-hidden="true"></span>{e(s["label"])}'
@@ -52,14 +52,17 @@ def cards(notetakers: dict[str, dict[str, Any]]) -> str:
         if not s:
             continue
         label, tone = STATE.get(s["state"], (s["state"], "muted"))
+        if s.get("optional") and s["state"] == "not_connected":
+            label, tone = "Optional", "muted"
         on = is_on(s)
         account = f'<span class="muted small">{e(s["account"])}</span>' if s.get("account") else ""
         connect_label = "Replace key" if s["state"] == "connected" else "Connect"
         buttons = [f'<button class="btn small{"" if on else " primary"}" type="button" '
                    f'data-connect-open="{name}" aria-controls="nt-form-{name}" aria-expanded="false">{connect_label}</button>']
         if on:
+            sync_label = "Import past meetings" if name == "fireflies" else "Check for new recordings"
             buttons.append(f'<button class="btn small" type="button" data-action="ntsync" data-provider="{name}">'
-                           'Check for new recordings</button>')
+                           f'{sync_label}</button>')
         if s["state"] in ("connected", "refused"):
             buttons.append(f'<button class="btn small ghost" type="button" data-action="ntdisconnect" '
                            f'data-provider="{name}">Disconnect</button>')
@@ -74,6 +77,11 @@ def cards(notetakers: dict[str, dict[str, Any]]) -> str:
     <div class="nt-row"><button class="btn small primary" type="submit">Save and test key</button>
     <button class="btn small ghost" type="button" data-connect-cancel="{name}">Cancel</button></div>
   </form>"""
+        hint = (f'<p class="small nt-hint">{e(s["share_hint"])} <a class="src" href="{e(s["share_help"])}" '
+                f'target="_blank" rel="noopener noreferrer">Fathom sharing settings ↗</a></p>'
+                if s.get("share_hint") else "")
+        if s.get("optional"):
+            hint += '<p class="small nt-hint">API connect: needs a Granola Business or Enterprise plan.</p>'
         upload = ""
         if s.get("import"):
             upload = f"""
@@ -87,7 +95,7 @@ def cards(notetakers: dict[str, dict[str, Any]]) -> str:
   <header class="nt-head"><h3>{e(s["label"])}</h3>{chip(label, tone)}</header>
   {account}
   <p class="muted small">{e(s["gets"])}</p>
-  <p class="small nt-video">{e(VIDEO.get(s["video"], ""))}</p>
+  <p class="small nt-video">{e(VIDEO.get(s["video"], ""))}</p>{hint}
   <div class="nt-row">{''.join(buttons)}</div>{form}{upload}
 </article>""")
     return f'<div class="nt-grid" id="notetakers">{"".join(items)}</div>'

@@ -2,7 +2,7 @@
 
 - Standard Webhooks (https://www.standardwebhooks.com), used by Fathom
   (https://developers.fathom.ai/webhooks) and Granola (https://docs.granola.ai/webhooks).
-- Fireflies webhooks V2 (https://docs.fireflies.ai/graphql-api/webhooks-v2): X-Hub-Signature.
+  (Fireflies is used only for a one-time history import, so it has no webhook here.)
 """
 import base64
 import binascii
@@ -35,13 +35,3 @@ def verify_standard_webhook(secret: str, headers: dict[str, str], body: bytes,
         if version == "v1" and hmac.compare_digest(signature, expected):
             return True
     return False
-
-
-def verify_hub_signature(secret: str, header: str, body: bytes) -> bool:
-    """Fireflies: `x-hub-signature` is the hex HMAC-SHA256 of the raw body (optionally "sha256=")."""
-    if not (secret and header):
-        return False
-    expected = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
-    return hmac.compare_digest(header.removeprefix("sha256=").strip().lower(), expected)
-
-

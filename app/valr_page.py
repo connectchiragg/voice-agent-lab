@@ -262,11 +262,12 @@ def setup(view: dict[str, Any]) -> str:
                 + ("Reconnect" if google["state"] != "not_connected" else "Connect Google") + "</a>"
                 + ("" if google["configured"] else
                    '<span class="muted small"> Needs GOOGLE_OAUTH_CLIENT_ID/SECRET on the server first.</span>'))
+    required = [t for t in takers.values() if not t.get("optional")]  # Granola is optional.
     on = [t["label"] for t in takers.values() if notetaker_ui.is_on(t)]
-    refused = any(t["state"] == "refused" for t in takers.values())
-    n_state = "attention" if refused else "done" if on else "todo"
+    refused = any(t["state"] == "refused" for t in required) and not any(notetaker_ui.is_on(t) for t in required)
+    n_state = "attention" if refused else "done" if any(notetaker_ui.is_on(t) for t in required) else "todo"
     n_text = (f"Connected: {', '.join(on)}. VALR scores each recorded interview and plays it back here."
-              if on else "Fathom, Fireflies or Granola: VALR learns from your recorded interviews, "
+              if on else "Fathom (or a Fireflies history import): VALR learns from your recorded interviews, "
                          "scores each one and plays it back here.")
     steps = [("Connect Google", g_state,
               g_text.get(google["state"], "So VALR can see your interview invites and the recruiters' emails about them. Read-only."),

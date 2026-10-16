@@ -170,6 +170,8 @@ def notetakers_view(states: dict) -> dict:
     from app import notetakers
     return {name: {"label": info["label"], "state": states.get(name, "not_connected"),
                    "account": "", "connected_at": None, "last_ok_at": None, "can_store": True,
+                   "optional": bool(info.get("optional")), "share_hint": info.get("share_hint", ""),
+                   "share_help": info.get("share_help", ""),
                    **{k: info[k] for k in ("key_label", "key_help", "gets", "video", "import")}}
             for name, info in notetakers.INFO.items()}
 

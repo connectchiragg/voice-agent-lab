@@ -10,7 +10,8 @@ and never sent back. An environment key (FATHOM_API_KEY, FIREFLIES_API_KEY,
 GRANOLA_API_KEY) still works and shows as "from server settings".
 
 New recordings reach the evaluation through app/notetakers/pipeline.py (webhooks:
-app/notetakers/routes.py: `/hooks/fathom`, `/hooks/fireflies`, `/hooks/granola`).
+app/notetakers/routes.py: `/hooks/fathom`, `/hooks/granola`; Fireflies is a one-time
+history import).
 """
 import logging
 import os
@@ -30,15 +31,18 @@ INFO: dict[str, dict[str, Any]] = {
     "fathom": {
         "label": "Fathom", "key_label": "Fathom API key",
         "key_help": "In Fathom: Settings → API Access → Generate API key.",
-        "gets": "Recordings (played here), transcripts and summaries; new ones arrive by webhook.",
-        "video": "embed", "import": False},
+        "gets": "Recordings, transcripts and summaries; new ones arrive by webhook.",
+        "video": "embed", "import": False,
+        "share_hint": "To play recordings inside VALR, set Fathom sharing to \u2018Anyone with the link\u2019.",
+        "share_help": "https://help.fathom.video/en/articles/295616"},
     "fireflies": {
         "label": "Fireflies", "key_label": "Fireflies API key",
         "key_help": "In Fireflies: Integrations → Fireflies API → copy the API key.",
-        "gets": "Transcripts and summaries; recordings open in Fireflies (no embed player).",
+        "gets": "Past meetings only (one-time history import); recordings open in Fireflies.",
         "video": "link", "import": False},
     "granola": {
-        "label": "Granola", "key_label": "Granola API key (grn_…)",
+        "label": "Granola", "key_label": "Granola API key (needs a Granola Business or Enterprise plan)",
+        "optional": True,
         "key_help": "In Granola (desktop): Settings → Connectors → API keys. Needs a Business or "
                     "Enterprise plan; on other plans, upload the CSV export from Settings instead.",
         "gets": "Notes, summaries and transcripts. Granola records no audio or video.",
@@ -98,8 +102,9 @@ async def status_view(connection: Any) -> dict[str, dict[str, Any]]:
         out[name] = {"label": info["label"], "state": state, "account": (row or {}).get("account") or "",
                      "connected_at": _iso((row or {}).get("connected_at")),
                      "last_ok_at": _iso((row or {}).get("last_ok_at")),
-                     "can_store": bool(token_key()), **{k: info[k] for k in ("key_label", "key_help", "gets",
-                                                                              "video", "import")}}
+                     "can_store": bool(token_key()), "optional": bool(info.get("optional")),
+                     "share_hint": info.get("share_hint", ""), "share_help": info.get("share_help", ""),
+                     **{k: info[k] for k in ("key_label", "key_help", "gets", "video", "import")}}
     return out
 
 
@@ -136,7 +141,14 @@ async def sync_recent(connection: Any, provider: str, http: httpx.AsyncClient, d
     return {"found": len(found), "new": new}
 
 
-async def match_event(connection: Any, recording: Recording) -> str | None:
+def event_ref(event: Any) -> dict[str, Any]:
+    """What a recording keeps of its calendar event (no attendees)."""
+    from app.valr_view import scrub
+    return {"key": event.key, "title": scrub(event.title), "company": scrub(event.company or ""),
+            "start": event.start_utc}
+
+
+async def match_event(connection: Any, recording: Recording) -> dict[str, Any] | None:
     """The calendar event this recording belongs to (time window + attendee emails), if any."""
     from app import calendar_sync
     from app.interview_worker import owner_emails
@@ -154,7 +166,7 @@ async def match_event(connection: Any, recording: Recording) -> str | None:
         score = base.match_score(recording, event.start_utc, event.end_utc, emails, event.title)
         if score > best_score:
             best, best_score = event, score
-    return best.key if best else None
+    return event_ref(best) if best else None
 
 
 async def find_for_event(connection: Any, event: Any, http: httpx.AsyncClient,
@@ -181,8 +193,10 @@ async def find_for_event(connection: Any, event: Any, http: httpx.AsyncClient,
             logger.warning("VALR notetaker %s lookup failed: %s", name, type(error).__name__)
     match = base.best_match(candidates, event.start_utc, event.end_utc, emails, event.title)
     if match:
+        ref = event_ref(event)
         await store.upsert_recording(connection, match.public(), "sync")
-        await store.set_event(connection, match.provider, match.external_id, event.key)
+        await store.set_event(connection, match.provider, match.external_id, ref["key"], ref["title"],
+                              ref["company"], ref["start"])
     return match
 
 

@@ -413,14 +413,13 @@ anonymised caller hashes, never numbers.
   setWebhook), then link the chat with the dashboard's `/start <code>`.
 - Notetakers (app/notetakers): keys are pasted on the dashboard ("Get set up") and stored
   Fernet-encrypted in Postgres with VALR_TOKEN_KEY; nothing to deploy for that. Webhooks
-  need three more exact-path POST bypasses on `valr.haciensus.com`, each verified in the
-  app: `/hooks/fathom` (FATHOM_WEBHOOK_SECRET, Standard Webhooks), `/hooks/fireflies`
-  (FIREFLIES_WEBHOOK_SECRET, `X-Hub-Signature`) and `/hooks/granola`
-  (GRANOLA_WEBHOOK_SECRET, Standard Webhooks). An unset secret answers 503. Register them
+  need two more exact-path POST bypasses on `valr.haciensus.com`, each verified in the
+  app: `/hooks/fathom` (FATHOM_WEBHOOK_SECRET, Standard Webhooks) and `/hooks/granola`
+  (GRANOLA_WEBHOOK_SECRET, Standard Webhooks). Fireflies is a one-time history import
+  (no webhook). An unset secret answers 503. Register them
   at each provider: Fathom Settings → API Access → Add Webhook (or `POST /webhooks`) with
   destination `https://valr.haciensus.com/hooks/fathom`, "my recordings", transcript and
-  summary on, and its `whsec_` secret in `.env`; Fireflies Settings → Developer settings →
-  Webhooks (V2, `meeting.transcribed`); Granola Settings → Connectors → Webhooks
+  summary on, and its `whsec_` secret in `.env`; Granola Settings → Connectors → Webhooks
   (`note.generated`, Business plan and up). Everything else (`/valr/api/notetakers/*`,
   `/valr/api/recording`) stays behind Access.
 - The app container now runs with the data mount:
