@@ -8,7 +8,7 @@
 #   VERSION=1.0.1 scripts/release_mac.sh
 #
 # Then commit downloads/: deploy/deploy-all.sh ships `git archive` of the branch, and the
-# Dockerfile copies downloads/ into the app image. Keep the DMG small (it is ~1.3 MB).
+# Dockerfile copies downloads/ into the app image. Keep the DMG small (it is ~1.6 MB).
 set -euo pipefail
 VERSION="${VERSION:-1.0.0}"
 [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "VERSION must look like 1.2.3" >&2; exit 1; }

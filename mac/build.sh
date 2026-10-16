@@ -66,7 +66,14 @@ ditto -c -k --keepParent "$APP" "$ZIP"
 STAGE="$(mktemp -d)"
 cp -R "$APP" "$STAGE/"
 ln -s /Applications "$STAGE/Applications"
-hdiutil create -quiet -volname "$APP_NAME" -srcfolder "$STAGE" -ov -format UDZO "$DMG"
+if [ "${PLAIN_DMG:-0}" != "1" ] && "$HERE/dmg/style_dmg.sh" "$STAGE" "$DMG" "$APP_NAME" \
+     "$HERE/dmg/background.tiff" "$APP/Contents/Resources/AppIcon.icns"; then
+  echo "    styled installer window (mac/dmg/)"
+else
+  echo "    !! Styled DMG failed (Finder automation blocked?); falling back to a plain DMG." >&2
+  rm -f "$DMG"
+  hdiutil create -quiet -volname "$APP_NAME" -srcfolder "$STAGE" -ov -format UDZO "$DMG"
+fi
 rm -rf "$STAGE"
 
 # ---------------------------------------------------------------------------
