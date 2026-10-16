@@ -119,33 +119,11 @@ ul, ol { margin: 0; }
 @keyframes slide { from { transform: translateX(40px); opacity: 0; } }
 
 /* Performance. */
-.tiles { display: grid; gap: 1px; background: var(--hairline); border: 1px solid var(--hairline); }
-.tile { background: var(--graphite); padding: 20px; display: grid; gap: 8px; align-content: start; }
-.tile.risk { box-shadow: inset 2px 0 0 var(--bad); }
-.tile .chip { justify-self: start; }
-.tile-big { margin: 0; font-size: 3rem; letter-spacing: -0.05em; line-height: 1; font-weight: 500; }
-.tile-mid { margin: 0; font-size: var(--fs-lg); letter-spacing: -0.03em; font-weight: 500; }
 .of { font-size: 0.4em; color: var(--ash); letter-spacing: 0; margin-left: 4px; }
 .focus-list { list-style: none; padding: 0; display: grid; border-top: 1px solid var(--hairline); }
 .focus-list li { display: grid; grid-template-columns: 48px minmax(0, 1fr); gap: 12px; padding: 16px 0; border-bottom: 1px solid var(--hairline); }
 .f-num { color: var(--signal); font-size: var(--fs-sm); padding-top: 3px; }
 .f-action { margin: 0; font-size: 1.125rem; font-weight: 500; letter-spacing: -0.01em; }
-.chart-box { border: 1px solid var(--hairline); background: var(--graphite); padding: 6px 16px 16px; margin-top: 32px; }
-.chart-head .sub-title { margin: 16px 0 2px; }
-.picker { display: flex; gap: 6px; overflow-x: auto; padding: 12px 0; scrollbar-width: thin; }
-.pick { flex: none; border: 1px solid var(--hairline-strong); background: transparent; color: var(--ash); padding: 7px 12px; cursor: pointer; font: 500 0.6875rem/1 var(--mono); letter-spacing: 0.1em; text-transform: uppercase; }
-.pick[aria-pressed="true"] { background: var(--signal-fill); border-color: var(--signal-fill); color: var(--on-signal); }
-.chart-wrap { position: relative; }
-.chart { width: 100%; min-height: 240px; }
-.chart svg { display: block; width: 100%; height: auto; overflow: visible; }
-.chart .grid line { stroke: var(--hairline); }
-.chart .axis text { fill: var(--ash); font: 500 10px var(--mono); letter-spacing: 0.06em; }
-.chart .raw { fill: var(--ash); opacity: 0.55; }
-.chart .ma { fill: none; stroke: var(--signal); stroke-width: 2.5; stroke-linejoin: round; stroke-linecap: round; }
-.chart .ma.faint { stroke: var(--ash); stroke-width: 1.25; opacity: 0.35; }
-.chart .ma-dot { fill: var(--char); stroke: var(--signal); stroke-width: 2; }
-.chart .ma-area { fill: var(--glow); }
-.chart-tip { position: absolute; pointer-events: none; padding: 8px 10px; background: var(--graphite); border: 1px solid var(--hairline-strong); font: 500 var(--fs-xs)/1.4 var(--mono); white-space: nowrap; z-index: 2; }
 .badges { list-style: none; padding: 0; display: flex; flex-wrap: wrap; gap: 10px; margin-top: 24px; }
 .badge { display: flex; gap: 10px; align-items: baseline; border: 1px solid var(--hairline); padding: 10px 14px; }
 .badge-mark { color: var(--signal); }
@@ -198,7 +176,6 @@ ul, ol { margin: 0; }
   .tz { width: auto; }
   .nav { display: flex; }
   .actions .btn.primary { flex: 0 0 auto; }
-  .tiles { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .two { grid-template-columns: 1fr 1fr; }
   .sys-grid { grid-template-columns: 1fr 1fr; }
   .sys-card.wide { grid-column: span 1; }
@@ -219,16 +196,6 @@ ul, ol { margin: 0; }
 }
 
 /* Performance (schema 2). */
-.picker.subs { padding-top: 0; }
-.pick.sub { border-style: dashed; }
-.pick.sub[aria-pressed="true"] { border-style: solid; }
-.pick-badge { margin-left: 4px; }
-.chart-status { margin: 8px 0 0; font-family: var(--mono); color: var(--ash); letter-spacing: 0.04em; }
-.trend-text { max-width: 70ch; margin-top: 20px; font-size: 1.0625rem; color: var(--ash); border-left: 2px solid var(--signal); padding-left: 14px; }
-.weak-list { list-style: none; padding: 0; display: grid; border-top: 1px solid var(--hairline); }
-.weak { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; padding: 12px 0; border-bottom: 1px solid var(--hairline); }
-.weak-topic { flex: 1 1 200px; font-weight: 500; }
-.weak .muted { flex: 1 1 100%; }
 .kv-rows { list-style: none; padding: 0; display: grid; border-top: 1px solid var(--hairline); }
 .kv-rows li { display: flex; justify-content: space-between; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--hairline); }
 .score-bars li.na { opacity: 0.5; }

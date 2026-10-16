@@ -8,7 +8,7 @@ POST-only, owner-only and CSRF-checked in app/valr_dashboard.py.
     /valr/interviews/past          past interviews
     /valr/interviews/past/<id>     one past interview: recording, impression, feedback
     /valr/leads                    globe, filters (?stage=&q=) and list (?lead=<id> opens one)
-    /valr/performance              the coach first, then the numbers
+    /valr/performance              trends, then what they mean, then the numbers (folded)
     /valr/settings                 connections, calls, limits
     /valr/system                   health, costs, recent research (tucked away)
 
@@ -181,7 +181,7 @@ async def render(request: Request, name: str, **params: str) -> HTMLResponse:
                           query.get("q", "")[:80], query.get("lead", "")[:64], query.get("status", "")[:10],
                           band=query.get("band", "")[:10], waiting=query.get("waiting", "")[:10])
     elif name == "performance":
-        body = performance.page(view, clock)
+        body = performance.page(view, clock, await load_leads())
     elif name == "settings":
         body = settings.page(view, clock, items)
     else:
