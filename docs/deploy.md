@@ -86,7 +86,7 @@ which cost about 7.5 times as much per hour):
 | Disk | 25 GB gp3 root, plus a 2 GB `/swapfile` (`vm.swappiness=10`) |
 | Image | Ubuntu 24.04 arm64 (`ubuntu-noble-24.04-arm64-server-20261004`) |
 | Network | security group `voice-agent-lab`: SSH only, from the owner's IP; no other inbound port, the tunnels are outbound |
-| SSH | `ssh -i ~/.ssh/voice-agent-lab_ed25519 ubuntu@15.252.242.165` (key pair `voice-agent-lab`) |
+| SSH | `ssh -i ~/.ssh/voice-agent-lab_ed25519 ubuntu@<vm-ip>` (key pair `voice-agent-lab`) |
 
 The public IPv4 is not an Elastic IP: it changes if the instance is stopped and
 started. Read it with
