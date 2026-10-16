@@ -116,7 +116,7 @@ def lead_card(lead: dict[str, Any], clock: Clock, leads: dict[str, Any]) -> str:
            if lead["next_step"] else "")
     return f"""
 <section class="card lead-card" id="lead" aria-labelledby="lead-title">
-  <div class="card-row"><h2 id="lead-title" class="card-title">{e(lead['company'])}</h2><a class="close" href="?" aria-label="Close">✕</a></div>
+  <div class="card-row"><h2 id="lead-title" class="card-title">{e(lead['company'])}{' <span class="chip tone-muted">agency</span>' if lead.get('agency_only') else ''}</h2><a class="close" href="?" aria-label="Close">✕</a></div>
   <p class="muted">{e(lead['role'] or 'Role unknown')}{(' · ' + e(lead['domain'])) if lead['domain'] else ''}</p>
   <p>{chip(stage, STAGE_TONE[lead['stage']])} {chip('Waiting on you', 'warn') if lead['waiting_on_you'] else ''}
     {chip('Expired', 'muted') if lead['status'] == 'expired' else ''}</p>
@@ -193,7 +193,7 @@ def page(view: dict[str, Any], clock: Clock, leads: dict[str, Any], stage: str, 
         + (("&amp;band=" + e(band)) if band else "") + ("&amp;waiting=you" if waiting else "")
     table = "".join(f"""
 <tr data-lead-row="{e(r['id'])}" data-stage="{e(r['stage'])}" data-band="{e(r['band'])}"{' class="expired"' if r['status'] == 'expired' else ''}{' aria-current="true"' if r['id'] == selected else ''}>
-  <td><a href="?lead={e(r['id'])}{keep}#lead"><b>{e(r['company'])}</b></a><span class="muted small block">{e(r['role'])}</span>{court_line(r)}</td>
+  <td><a href="?lead={e(r['id'])}{keep}#lead"><b>{e(r['company'])}</b></a>{' <span class="chip tone-muted">agency</span>' if r.get('agency_only') else ''}<span class="muted small block">{e(r['role'])}</span>{court_line(r)}</td>
   <td class="temp">{temperature(r)}</td>
   <td><span class="sw st-{e(r['stage'])}" aria-hidden="true"></span>{e(r['stage_label'])}{' ' + chip('You', 'warn') if r['waiting_on'] == 'you' else ''}</td>
   <td class="hide-sm">{e(r['next_step']) or '<span class="muted">–</span>'}</td>

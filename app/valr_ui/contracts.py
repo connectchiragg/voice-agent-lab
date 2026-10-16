@@ -163,8 +163,9 @@ def leads(raw: Any, now: datetime | None = None) -> dict[str, Any]:
         waiting, reason = court(lead, bucket, band_name)
         rows.append({
             "id": re.sub(r"[^\w-]", "-", str(lead.get("id") or f"lead-{i}"))[:64],
-            "company": company_label(lead.get("company")),
+            "company": text(lead.get("company"), 120) if lead.get("agency_only") else company_label(lead.get("company")),
             "company_how": text(lead.get("company_how"), 300),
+            "agency": text(lead.get("agency"), 60), "agency_only": bool(lead.get("agency_only")),
             "role": text(lead.get("role") or lead.get("title"), 120),
             "stage": stage, "stage_raw": raw_stage,
             "stage_label": STAGE_LABELS.get(raw_stage) or dict(STAGES).get(stage, "Other"),
@@ -186,8 +187,9 @@ def leads(raw: Any, now: datetime | None = None) -> dict[str, Any]:
     rows.sort(key=lambda r: (-(r["temperature"] if r["temperature"] is not None else -1), r["company"].lower()))
     live = [r for r in rows if r["bucket"] == "live"]
     closed = [r for r in rows if r["bucket"] == "closed"]
-    stage_counts = {key: sum(1 for r in live if r["stage"] == key) for key, _ in STAGES}
-    bands = [{"key": k, "label": label, "meaning": meaning, "count": sum(1 for r in live if r["band"] == k)}
+    companies = [r for r in live if not r["agency_only"]]  # An agency with no employer yet is not a company.
+    stage_counts = {key: sum(1 for r in companies if r["stage"] == key) for key, _ in STAGES}
+    bands = [{"key": k, "label": label, "meaning": meaning, "count": sum(1 for r in companies if r["band"] == k)}
              for k, label, meaning in BANDS]
     gmail = raw.get("gmail") if isinstance(raw.get("gmail"), dict) else {}
     return {"available": isinstance(raw.get("leads"), list) and raw.get("connected", True) is not False,
@@ -198,7 +200,7 @@ def leads(raw: Any, now: datetime | None = None) -> dict[str, Any]:
                        if k not in ("closed", "other") or stage_counts[k]],
             "bands": bands, "closed_band": {"key": CLOSED_BAND[0], "label": CLOSED_BAND[1],
                                             "meaning": CLOSED_BAND[2], "count": len(closed)},
-            "counts": {"live": len(live), "closed": len(closed), "expired": len(rows) - len(live) - len(closed),
+            "counts": {"live": len(companies), "agencies": len(live) - len(companies), "closed": len(closed), "expired": len(rows) - len(live) - len(closed),
                        "waiting_on_you": sum(1 for r in live if r["waiting_on"] == "you"),
                        **{b["key"]: b["count"] for b in bands}},
             "raw_stages": [s for s in raw.get("stages") or [] if isinstance(s, str)],
@@ -221,12 +223,17 @@ def recording(raw: Any, interview: dict[str, Any] | None = None) -> dict[str, An
 
 
 def company_label(value: Any) -> str:
-    """A lead's company, or "Company not identified" (never a round label or the owner's name)."""
+    """A lead's company, normalised ("Cermati.com" -> "Cermati"), or "Company not identified"
+    (never a round label, the owner's name or a fragment)."""
     from app import company_names
     name = text(value, 80)
     if name.startswith("Unknown"):
         return company_names.NOT_IDENTIFIED
-    return company_names.label(name)
+    if " via " in name:  # "Deriv via Recrew": the employer, and the agency behind it.
+        client, _, agency = name.partition(" via ")
+        shown = company_names.display(client)
+        return f"{shown} via {agency}" if shown else company_names.NOT_IDENTIFIED
+    return company_names.display(name) or company_names.NOT_IDENTIFIED
 
 
 def account(value: Any) -> str:

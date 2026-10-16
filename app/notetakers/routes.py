@@ -245,14 +245,15 @@ def recording_summary(row: dict[str, Any]) -> dict[str, Any]:
             "start": notetakers._iso(row["started_at"]), "end": notetakers._iso(row["ended_at"]),
             "share_url": base.safe_link(row["share_url"]),
             "player": notetakers.INFO.get(provider, {}).get("video") == "player",
-            "company": row.get("company") or "", "interviewers": store.names(row),
+            "company": company_of(row.get("company") or ""), "interviewers": store.names(row),
             "evaluation": row["eval_status"]}
 
 
 def company_of(*candidates: str) -> str:
     """The first real company name: never a round label ("L2- ...") or the owner's own name."""
+    from app import company_names
     owner = base.owner_words()
-    return next((c.strip() for c in candidates if c and base.is_company(c, owner)), "")
+    return next((company_names.display(c, owner) for c in candidates if c and company_names.display(c, owner)), "")
 
 
 def past_view(events: list[Any], rows: list[dict[str, Any]], now: datetime) -> list[dict[str, Any]]:

@@ -50,7 +50,7 @@ def interview_label(slot: dict[str, Any]) -> dict[str, str]:
     """{"company", "round", "headline", "raw"}: the company (from the calendar, else the
     attendees' domain), the round, "Round 2 · quillworks" and the raw title, kept secondary."""
     from app import company_names
-    company = slot.get("company") if company_names.is_company(slot.get("company") or "") else ""
+    company = company_names.display(slot.get("company") or "")
     company = company or company_from_people(slot.get("interviewers") or [])
     title = slot.get("title") or ""
     rnd = round_from_title(title)

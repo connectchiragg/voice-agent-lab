@@ -598,3 +598,90 @@ def test_a_title_never_outranks_an_attendee_domain():
     found = names.resolve(attendees=["mia@telnyx.example"], title="Interview with Hien Tran")
     assert found.name == "Telnyx" and found.conflict  # The model is asked; the title is only a candidate.
     assert names.resolve(attendees=["mia@telnyx.example"], stated="Telnyx", title="Hien").name == "Telnyx"
+
+
+# fcfacce live check: stage labels, display names everywhere, people, agencies, transcripts.
+
+def test_every_company_stage_has_a_label():
+    pytest.importorskip("groq")  # app.valr_view needs the web image (the worker venv has no groq).
+    from app import valr_view
+    from app.profile.rubric import COMPANY_STAGES
+    assert valr_view.stage("pre_seed_seed") == "Pre-seed / Seed"
+    for key in COMPANY_STAGES:
+        assert key == "unknown" or key in valr_view.STAGES, key
+
+
+@pytest.mark.parametrize("raw, shown", [
+    ("Razorpay Software Private Limited", "Razorpay"),
+    ("Revantage Global Services India", "Revantage Global Services"),
+    ("Revantage Global Services India Private Limited", "Revantage Global Services"),
+    ("Cermati.com", "Cermati"),
+    ("Orvera.ai", "Orvera.ai"),
+    ("FourKites, Inc.", "FourKites"),
+])
+def test_displayed_names_are_normalised(raw, shown):
+    assert names.display(raw) == shown
+    if __import__("importlib").util.find_spec("groq"):  # app.valr_view needs the web image.
+        from app import valr_view
+        assert valr_view.company_name(raw) == shown
+
+
+def test_a_stored_person_name_is_junk_and_always_replaced():
+    everyone = {"Kiran Varma"}
+    assert resolver.existing_confidence("Kiran Varma", (), everyone) == 0.0
+    assert resolver.keep_or_change("Kiran Varma", resolver.Decision("", confidence=0.0), (), everyone)
+    assert resolver.keep_or_change("Kiran Varma", resolver.Decision("Zinnov", confidence=0.4), (), everyone)
+    touches = [Touch("gmail:p", "email", at(1), company="Kiran Varma", domain="zinnov.example", direction="in",
+                     people=[Contact("kiran@zinnov.example", "Kiran Varma")], title="Hello", thread="t9"),
+               Touch("gmail:q", "email", at(2), company="Zinnov", domain="zinnov.example", direction="in",
+                     people=[Contact("kiran@zinnov.example", "Kiran Varma")], title="Re: Hello", thread="t9")]
+    built = leads.build(touches, at(3))
+    assert [l.company for l in built] == ["Zinnov"]  # The person's "lead" folds into the company's.
+
+
+def test_agency_only_leads_wait_for_a_client():
+    touches = [Touch("gmail:r1", "email", at(1), company="", domain="recrew.ai", direction="in",
+                     people=[Contact("ops@recrew.ai", "Ops Desk")], title="Exciting opportunity", thread="r1")]
+    lead = leads.build(touches, at(2))[0]
+    assert lead.company == "Recrew (agency): role not yet named" and lead.agency_only and lead.agency == "Recrew"
+    touches.append(Touch("gmail:r2", "email", at(2), company="Deriv", domain="recrew.ai", direction="in",
+                         people=[Contact("ops@recrew.ai", "Ops Desk")], title="Re: Exciting opportunity", thread="r1"))
+    lead = leads.build(touches, at(3))[0]
+    assert lead.company == "Deriv via Recrew" and not lead.agency_only
+    assert names.is_agency("quickhyre.ai") and names.from_domain("quickhyre.ai") == ""
+
+
+def test_agency_only_leads_are_not_counted_as_companies():
+    from app.valr_ui import contracts
+    view = leads.graph(leads.build([Touch("gmail:r1", "email", at(1), domain="recrew.ai", direction="in",
+                                          people=[Contact("ops@recrew.ai", "Ops")], title="Role")], at(2)), at(2))
+    shown = contracts.leads(view, now=at(2))
+    assert shown["counts"]["live"] == 0 and shown["counts"]["agencies"] == 1
+    assert sum(b["count"] for b in shown["bands"]) == 0
+    assert shown["leads"][0]["company"].startswith("Recrew (agency)")
+
+
+def test_transcript_pass_reads_the_opening_only_and_never_logs_it(caplog):
+    import logging
+    meeting = {"turns": [{"speaker": "Mia Chen", "text": "Hi, I'm Mia from Zinnov, thanks for your interest.", "start": 3},
+                         {"speaker": "Sam Rivera", "text": "Thanks for having me.", "start": 9},
+                         {"speaker": "Mia Chen", "text": "Secret later detail about compensation.", "start": 900}]}
+    text, speakers = resolver.intro(meeting)
+    assert "Zinnov" in text and "Secret later detail" not in text and speakers == ["Mia Chen", "Sam Rivera"]
+    seen = []
+
+    class Spy(FakeClient):
+        def create(self, **kw):
+            seen.append(kw["messages"][0]["content"])
+            return super().create(**kw)
+    caplog.set_level(logging.DEBUG)
+    ev = resolver.Evidence(kind="recording", title="Technical", people=[(n, "") for n in speakers], transcript=text)
+    got = run(make(Spy({"company": "Zinnov", "confidence": 0.9, "reasoning": "Introduced herself from Zinnov."}))
+              .resolve(FakeConn(), ev))
+    assert got.company == "Zinnov" and "first two minutes" in seen[0] and "Mia from Zinnov" in seen[0]
+    assert "Mia from Zinnov" not in caplog.text
+    other = resolver.Evidence(kind="recording", title="Technical", transcript=text + " more")
+    assert other.fingerprint() != resolver.Evidence(kind="recording", title="Technical", transcript=text).fingerprint()
+    # A speaker's name the model offers is a person, never the company.
+    who = run(make(FakeClient({"company": "Mia Chen", "confidence": 0.9})).resolve(FakeConn(), ev))
+    assert who.company == ""

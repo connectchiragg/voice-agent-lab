@@ -179,6 +179,8 @@ class Lead:
     waiting_reason: str = ""
     waiting_since: datetime | None = None
     company_how: str = ""
+    agency: str = ""          # A recruiting agency or platform behind this lead, if any
+    agency_only: bool = False  # Only the agency is known (no employer yet): not counted as a company
 
 
 # Names and domains.
@@ -299,7 +301,10 @@ class Index:
             self.by_domain.setdefault(domain, lead.id)
         if touch.role:
             lead.role = touch.role
-        if touch.company and (lead.company == company_names.NOT_IDENTIFIED or lead.company.startswith("Unknown")):
+        if touch.company and lead.agency_only:  # The agency named its client: "Deriv via Recrew".
+            lead.company, lead.agency_only = f"{touch.company} via {lead.agency}", False
+            lead.company_how = touch.company_how
+        elif touch.company and (lead.company == company_names.NOT_IDENTIFIED or lead.company.startswith("Unknown")):
             lead.company = touch.company
             lead.company_how = touch.company_how
         for person in touch.people:
@@ -315,6 +320,11 @@ class Index:
 
 
 def new_lead_for(touch: Touch) -> Lead | None:
+    if not touch.company.strip() and company_names.is_agency(touch.domain):
+        agency = company_names.agency_name(touch.domain)  # Only an agency so far: no employer yet.
+        key = "agency:" + touch.domain.lower()
+        return Lead(id=lead_id_for(key), company=f"{agency} (agency): role not yet named", key=key,
+                    company_how=f"recruiting agency domain {touch.domain.lower()}", agency=agency, agency_only=True)
     name = touch.company.strip() or domain_company(touch.domain)
     how = touch.company_how if touch.company.strip() else (f"Gmail sender domain {company_domain(touch.domain)}"
                                                            if name else "")
@@ -378,9 +388,13 @@ def build(touches: list[Touch], now: datetime, overrides: Overrides | None = Non
     before = {t.id: t.lead_id for t in touches if t.lead_id}  # Each touchpoint's lead at the last save.
     index = Index()
     owner = company_names.owner_words()
-    for touch in touches:  # Never a round label, the owner's name or a tool, even from old data.
-        if touch.company and not company_names.is_company(touch.company, owner):
+    everyone = {p.name for t in touches for p in t.people if len(p.name.split()) >= 2}
+    for touch in touches:  # Never a round label, the owner's name, a tool or a person, even from old data.
+        if touch.company and (not company_names.is_company(touch.company, owner)
+                              or company_names.is_person(touch.company, [p.name for p in touch.people], everyone)):
             touch.company, touch.company_how = "", ""
+        elif touch.company:
+            touch.company = company_names.display(touch.company, owner) or touch.company
     for touch in sorted(touches, key=lambda t: (t.at, t.id)):
         if overrides.dismissed(touch):
             touch.lead_id = ""
@@ -701,6 +715,7 @@ def graph(leads: list[Lead], now: datetime) -> dict[str, Any]:
         recent = sum(1 for t in lead.touches if t.at <= now and now - t.at <= EXPIRE_AFTER)
         out.append({
             "id": lead.id, "company": lead.company, "company_how": lead.company_how, "role": lead.role,
+            "agency": lead.agency, "agency_only": lead.agency_only,
             "domain": lead.domain,
             "stage": lead.stage, "stage_manual": lead.stage_manual, "status": lead.status, "temperature": lead.temperature,
             "band": lead.band, "waiting_on": lead.waiting_on, "waiting_reason": lead.waiting_reason,

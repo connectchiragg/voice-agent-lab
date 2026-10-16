@@ -645,9 +645,9 @@ async def resolve_touches(connection: Any, touches: list[Touch], resolver: compa
         ev = touch_evidence(touch, owners, texts.get(touch.id, ""))
         decision = await resolver.resolve(connection, ev)
         baseline = touch.stated or touch.company  # Repairs compare against the original name.
-        if not company_resolver.keep_or_change(baseline, decision, resolver.agencies):
+        if not company_resolver.keep_or_change(baseline, decision, resolver.agencies, resolver.everyone):
             resolver.kept += 1
-            kept = names_clean(baseline) if company_names.is_company(names_clean(baseline)) else ""
+            kept = company_names.display(baseline)  # Kept, but normalised ("Cermati.com" -> "Cermati").
             decision = company_resolver.Decision(kept, "", company_resolver.EXISTING, "existing",
                                                  "kept the earlier name" if kept else "")
         if decision.company:  # One spelling per company: "Chasi" -> "Chasi AI", "Fourkites" -> "FourKites".
@@ -718,7 +718,8 @@ async def repair_recordings(connection: Any, resolver: company_resolver.Resolver
             people=[(n, "") for n in store.names({"interviewers": people})], stated=company or event_company or "")
         decision = await resolver.resolve(connection, ev, entity_id=f"interview:{provider}:{external_id}")
         old = company or event_company or ""
-        if decision.source != "override" and not company_resolver.keep_or_change(old, decision, resolver.agencies):
+        if decision.source != "override" and not company_resolver.keep_or_change(old, decision, resolver.agencies,
+                                                                                  resolver.everyone):
             resolver.kept += 1
             continue
         if decision.company and decision.source != "override":
@@ -731,6 +732,75 @@ async def repair_recordings(connection: Any, resolver: company_resolver.Resolver
                     "WHERE provider = %s AND external_id = %s",
                     (decision.company, decision.how[:200], provider, external_id))
     return changes
+
+
+async def transcript_companies(dry_run: bool = False, verbose: bool = False,
+                               max_model_calls: int = 100) -> dict[str, Any]:
+    """`python -m app.lead_worker transcript-companies [--dry-run] [--verbose]`: recordings still
+    without a company get one Haiku review of the call's first two minutes (introductions like
+    "I'm X from Y"), with the title and invitees. The transcript comes from the meeting VALR
+    stores sealed, else from the notetaker; it is held in memory only and never logged or kept.
+    Cached by evidence; the month cap and max_model_calls apply. Prints names only."""
+    from app.notetakers import store
+    resolver = company_resolver.default_resolver(owner_emails())
+    resolver.verbose, resolver.daily_cap, resolver.max_calls = verbose, False, max_model_calls
+    out: list[str] = []
+    missing = 0
+    async with await connect() as connection:
+        await store.setup(connection)
+        await company_resolver.setup(connection)
+        cursor = await connection.execute(
+            "SELECT provider, external_id, title, event_title, company, company_domain, interviewers "
+            "FROM notetaker_recordings")
+        for provider, external_id, title, event_title, company, domain, people in await cursor.fetchall():
+            if company and company_names.display(company):
+                continue
+            beat()
+            meeting = await notetakers_meeting(connection, provider, external_id, title or "")
+            text, speakers = company_resolver.intro(meeting)
+            if not text:
+                missing += 1
+                continue
+            names_ = store.names({"interviewers": people})
+            ev = company_resolver.Evidence(
+                kind="recording", title=event_title or title or "", domains=[domain] if domain else [],
+                people=[(n, "") for n in names_ + speakers], transcript=text)
+            decision = await resolver.resolve(connection, ev, entity_id=f"interview:{provider}:{external_id}")
+            if not decision.company:
+                out.append(f"{provider}:{external_id}: still not identified")
+                continue
+            how = ("AI review of the call's opening: " + decision.how.removeprefix("AI review: "))[:200] \
+                if decision.source == "llm" else decision.how
+            out.append(f"{provider}:{external_id}: -> {decision.company}")
+            if not dry_run:
+                await connection.execute(
+                    "UPDATE notetaker_recordings SET company = %s, company_how = %s "
+                    "WHERE provider = %s AND external_id = %s", (decision.company, how, provider, external_id))
+    return {"dry_run": dry_run, "model_calls": resolver.calls, "usd": round(resolver.usd, 4),
+            "no_transcript": missing, "model_path": resolver.skips, "recordings": out,
+            **({"model_path_per_entity": resolver.trace} if verbose else {})}
+
+
+async def notetakers_meeting(connection: Any, provider: str, external_id: str, title: str) -> dict | None:
+    """The normalised meeting: sealed in Postgres when VALR still has it, else from the notetaker."""
+    from app import notetakers
+    from app.notetakers import base, store
+    key = notetakers.token_key()
+    if key:
+        sealed = await store.sealed_meeting(connection, key, provider, external_id)
+        if sealed:
+            return sealed
+    api = await notetakers.api_key(connection, provider)
+    if not api:
+        return None
+    try:
+        async with notetakers.http_client() as http:
+            found = await notetakers.PROVIDERS[provider].get_recording(api, external_id, http,
+                                                                       listed=base.Recording(provider, external_id, title))
+        return found.meeting
+    except Exception as error:  # noqa: BLE001 - counted as no transcript; nothing about it is logged.
+        logger.warning("VALR transcript pass: %s fetch failed (%s)", provider, type(error).__name__)
+        return None
 
 
 async def repair_companies(dry_run: bool = False, verbose: bool = False, max_model_calls: int = 500) -> dict[str, Any]:
@@ -806,6 +876,11 @@ async def cli(command: str) -> None:
     from dataclasses import asdict
     from temporalio.client import Client
     from app.lead_workflow import SYNC_WORKFLOW_ID, TASK_QUEUE, GmailSyncWorkflow, GmailWatchWorkflow
+    if command.startswith("transcript-companies"):
+        cap = re.search(r"--max-model-calls[= ](\d+)", command)
+        print(json.dumps(await transcript_companies(dry_run="--dry-run" in command, verbose="--verbose" in command,
+                                                    max_model_calls=int(cap.group(1)) if cap else 100), indent=2))
+        return
     if command.startswith("repair-companies"):
         cap = re.search(r"--max-model-calls[= ](\d+)", command)
         print(json.dumps(await repair_companies(dry_run="--dry-run" in command, verbose="--verbose" in command,
@@ -842,7 +917,7 @@ if __name__ == "__main__":
     import sys
     from dotenv import load_dotenv
     load_dotenv(Path(__file__).resolve().parent.parent / ".env")
-    if sys.argv[1:2] not in (["sync"], ["watch"], ["stats"], ["repair-companies"]):
+    if sys.argv[1:2] not in (["sync"], ["watch"], ["stats"], ["repair-companies"], ["transcript-companies"]):
         sys.exit("usage: python -m app.lead_worker sync|watch|stats|"
-                 "repair-companies [--dry-run] [--verbose] [--max-model-calls N]")
+                 "repair-companies|transcript-companies [--dry-run] [--verbose] [--max-model-calls N]")
     asyncio.run(cli(" ".join(sys.argv[1:6])))
