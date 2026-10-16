@@ -27,6 +27,8 @@ class Settings:
     profile_path: Path
     evaluation_path: Path
     scores_path: Path
+    performance_path: Path
+    performance_csv: Path
     compensation_path: Path
     cache_dir: Path
     candidate_name: str
@@ -40,6 +42,9 @@ def settings() -> Settings:
         evaluation_path=_path("VALR_EVALUATION_PATH", "data/evaluation.json"),
         # Dated score table for a dashboard chart; a .json twin is written next to it.
         scores_path=_path("VALR_SCORES_PATH", "data/interview_scores.csv"),
+        # Schema v2 (granular rubric, chart-ready trends): see app/profile/performance.py.
+        performance_path=_path("VALR_PERFORMANCE_PATH", "data/performance.json"),
+        performance_csv=_path("VALR_PERFORMANCE_CSV", "data/performance_scores.csv"),
         compensation_path=_path("VALR_COMPENSATION_PATH", "data/compensation.json"),
         cache_dir=_path("VALR_RECORDINGS_CACHE", "data/raw_recordings"),
         candidate_name=os.getenv("VALR_CANDIDATE_NAME", "Chirag"),
