@@ -485,6 +485,42 @@ To roll back: set `VALR_AUTH_MODE=access` (today's behaviour) and restore the Ac
 
 ## Updating and rolling back
 
+**Deploy: `bash deploy/deploy-all.sh`**, from the Mac. About 1–1.5 minutes
+when only code changed (it was about 6). In plain words:
+
+1. It sends the branch's files to the VM, next to the live copy. The VM's own
+   `.env` files are copied over; no secret leaves the VM.
+2. The VM builds both images in one go (`docker buildx bake`, BuildKit). The
+   Python packages sit in their own cached layers, so a code change only
+   rebuilds the small layers holding the code: seconds, not minutes. The live
+   app keeps serving while it builds.
+3. It waits until no call is live, swaps the app, and rolls it back by itself
+   if the new one is not healthy. Then the research worker and, if needed, the
+   callbacks worker restart; it runs the checks and prints rollback commands.
+
+`--dry-run` prints the steps and runs nothing; `DRY_RUN=1` builds and stops
+before the swap.
+
+**Once, before the first such deploy:** install BuildKit on the VM (the
+Dockerfile's pip cache needs it). From the repo root on the Mac:
+`ssh -i ~/.ssh/voice-agent-lab_ed25519 ubuntu@<vm-ip> 'sh -s' < deploy/vm-buildx.sh`.
+The first BuildKit build then reinstalls the Python packages once (the old
+builder's cache is not shared): several minutes, more with few CPU credits.
+
+| Change | Build on the VM | Whole deploy |
+|---|---|---|
+| Code only (`app/`, `static/`) | about 10–30 s | about 1–1.5 min |
+| One lock file (`requirements*.lock`) | about 2–5 min (that image only; wheels come from the pip cache) | about 3–6 min |
+| Cold (first BuildKit build) | about 5–10 min, longer at 0 CPU credits | add about 1 min |
+
+Optional, not enabled: `.github/workflows/images.yml` builds the images on
+GitHub's arm64 runner and pushes them to GHCR; `bash deploy/deploy-pull.sh`
+then only pulls them. It needs the repo on GitHub (history scrubbed first), a
+manual "Run workflow" per commit, and a read-only GHCR token on the VM. On a
+private repo it uses the plan's Actions minutes and GHCR storage quota.
+
+The manual steps behind the script:
+
 Ship the source to a fresh directory, keep `.env`, rebuild only the app
 container, and tag the running image first so it can be restored:
 
@@ -493,7 +529,7 @@ git archive <branch> | ssh ubuntu@<vm-ip> 'mkdir ~/voice-agent-lab.new && tar -x
 ssh ubuntu@<vm-ip>
 cp -p ~/voice-agent-lab/.env ~/voice-agent-lab.new/ && mv ~/voice-agent-lab ~/voice-agent-lab.old && mv ~/voice-agent-lab.new ~/voice-agent-lab
 sudo docker tag voice-agent-lab:latest voice-agent-lab:rollback
-cd ~/voice-agent-lab && sudo docker build -t voice-agent-lab:latest .
+cd ~/voice-agent-lab && sudo docker buildx build -t voice-agent-lab:latest .
 sudo docker rm -f voice-agent-lab
 sudo docker run -d --name voice-agent-lab --restart unless-stopped --env-file .env --network voice-agent-lab -p 127.0.0.1:7860:7860 voice-agent-lab:latest
 ```
