@@ -290,7 +290,8 @@ async def telegram_code(request: Request) -> JSONResponse:
         code = await telegram_api.new_code(connection)
     logger.info("VALR Telegram link code issued from the dashboard")
     minutes = int(telegram_api.CODE_TTL.total_seconds() // 60)
-    return JSONResponse({"ok": True, "command": f"/start {code}", "expires_minutes": minutes,
+    link = telegram_api.start_link(await telegram_api.username(), code)
+    return JSONResponse({"ok": True, "command": f"/start {code}", "expires_minutes": minutes, "link": link,
                          "message": f"Send /start {code} to the VALR bot within {minutes} minutes."},
                         headers=NO_CACHE)
 

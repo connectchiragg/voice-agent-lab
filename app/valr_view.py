@@ -625,6 +625,12 @@ async def collect(pool: Any, now: datetime | None = None) -> dict[str, Any]:
             logger.warning("Calendar state unavailable: %s", type(error).__name__)
             calendar = {"channel": "unknown"}
         telegram = await telegram_view(connection)
+        try:
+            from app import notetakers
+            notetaker_status = await notetakers.status_view(connection)
+        except Exception as error:  # noqa: BLE001
+            logger.warning("VALR notetakers unavailable: %s", type(error).__name__)
+            notetaker_status = {}
     # telegram: a heads-up at T-30 and calls only on request; call: the automatic T-30 dial.
     view["mode"] = "call" if telegram_api.auto_dial() else "telegram"
     # The next T-30 step (a heads-up, or the dial; VALR_BRIEFING_DIAL=0 stops only the dial).
@@ -635,7 +641,9 @@ async def collect(pool: Any, now: datetime | None = None) -> dict[str, Any]:
                    "age_days": google.get("age_days"), "expires_soon": bool(google.get("expires_soon")),
                    "last_ok_at": iso(google.get("last_ok_at")),
                    "configured": google_oauth.OAuthSettings.from_env() is not None},
-        "fathom": {"configured": bool(os.getenv("FATHOM_API_KEY", "").strip())},
+        "fathom": {"configured": bool(os.getenv("FATHOM_API_KEY", "").strip()) or
+                   (notetaker_status.get("fathom") or {}).get("state") == "connected"},
+        "notetakers": notetaker_status,
         "calendar": calendar,
         "telegram": telegram,
     }

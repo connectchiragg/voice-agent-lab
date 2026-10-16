@@ -237,3 +237,40 @@ ul, ol { margin: 0; }
 .q-good .mono { color: var(--ok); }
 .q-improve .mono { color: var(--warn); }
 .card-score h4 .muted { margin-left: 8px; font-weight: 400; }
+
+/* Set-up steps: every action is a link or button; notetaker cards with their forms. */
+.step-title .chip { margin-left: 8px; vertical-align: 2px; }
+.step-action { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.step-action .btn .dot { margin-right: 8px; }
+.dot.ok { background: var(--ok); }
+.dot.bad { background: var(--bad); }
+.dot.muted { background: var(--mute); }
+.btn.ghost { background: transparent; border-color: transparent; color: var(--ash); }
+.pop { flex-basis: 100%; }
+.pop > summary { list-style: none; display: inline-flex; cursor: pointer; }
+.pop > summary::-webkit-details-marker { display: none; }
+.pop[open] > p { border-left: 2px solid var(--signal); padding: 6px 12px; margin: 10px 0 0; max-width: 62ch; }
+.nt-grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr)); }
+.nt-card { border: 1px solid var(--hairline); background: var(--graphite); padding: 16px; display: grid; gap: 6px; align-content: start; }
+.nt-card:target { border-color: var(--signal); }
+.nt-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.nt-head h3 { font-size: var(--fs-md); margin: 0; }
+.nt-card p { margin: 0; }
+.nt-video { color: var(--ice); }
+.nt-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
+.nt-form { display: grid; gap: 6px; border-top: 1px solid var(--hairline); padding-top: 10px; margin-top: 6px; }
+.nt-form[hidden] { display: none; }
+.nt-form input[type="password"], .nt-form input[type="file"] { font: inherit; font-size: var(--fs-sm); color: var(--bone);
+  background: var(--char); border: 1px solid var(--hairline-strong); padding: 9px 10px; min-width: 0; width: 100%; }
+.nt-form input:focus-visible { outline: 2px solid var(--signal); outline-offset: 1px; }
+.tg-open { margin-left: 4px; }
+
+/* A past interview's recording. */
+.recording .player { position: relative; aspect-ratio: 16 / 9; background: var(--char); border: 1px solid var(--hairline); margin: 10px 0; }
+.recording .player iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; }
+.recording .watch { margin: 6px 0 4px; }
+.moments { list-style: none; padding: 0; display: grid; gap: 6px; font-size: var(--fs-sm); }
+.moments li { display: flex; gap: 10px; align-items: baseline; }
+.moments .mono { flex: none; min-width: 4.5ch; }
+.card-badges { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.nt-hint { color: var(--ash); }

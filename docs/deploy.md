@@ -411,6 +411,17 @@ anonymised caller hashes, never numbers.
   `deploy/install-telegram.sh` on the Mac (prompts for the @BotFather token, generates
   TELEGRAM_WEBHOOK_SECRET, writes both to `.env`, restarts the app and the worker, calls
   setWebhook), then link the chat with the dashboard's `/start <code>`.
+- Notetakers (app/notetakers): keys are pasted on the dashboard ("Get set up") and stored
+  Fernet-encrypted in Postgres with VALR_TOKEN_KEY; nothing to deploy for that. Webhooks
+  need two more exact-path POST bypasses on `valr.haciensus.com`, each verified in the
+  app: `/hooks/fathom` (FATHOM_WEBHOOK_SECRET, Standard Webhooks) and `/hooks/granola`
+  (GRANOLA_WEBHOOK_SECRET, Standard Webhooks). Fireflies is a one-time history import
+  (no webhook). An unset secret answers 503. Register them
+  at each provider: Fathom Settings → API Access → Add Webhook (or `POST /webhooks`) with
+  destination `https://valr.haciensus.com/hooks/fathom`, "my recordings", transcript and
+  summary on, and its `whsec_` secret in `.env`; Granola Settings → Connectors → Webhooks
+  (`note.generated`, Business plan and up). Everything else (`/valr/api/notetakers/*`,
+  `/valr/api/recording`) stays behind Access.
 - The app container now runs with the data mount:
   `sudo docker run -d --name voice-agent-lab --restart unless-stopped --env-file .env --network voice-agent-lab -v /srv/valr-data:/data:ro -p 127.0.0.1:7860:7860 voice-agent-lab:latest`
 - Check: `sudo docker exec voice-research python -m app.research_worker blocks` (dry run)
