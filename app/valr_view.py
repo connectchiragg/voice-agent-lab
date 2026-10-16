@@ -352,6 +352,7 @@ def performance(perf: dict[str, Any] | None) -> dict[str, Any]:
             "id": scrub(iv.get("interview_id")), "date": str(iv.get("date") or "")[:10],
             "company": company_name(iv.get("company")), "stage": stage(iv.get("company_stage")),
             "round": ROUNDS.get(iv.get("round_type") or "", label(iv.get("round_type") or "unknown")),
+            "round_key": str(iv.get("round_type") or "unknown"),
             "outcome": iv.get("outcome") if iv.get("outcome") in ("advanced", "rejected") else "unknown",
             "outcome_evidence": scrub(iv.get("outcome_evidence") or ""),
             "overall": number(iv.get("overall_score")),
@@ -411,6 +412,10 @@ def _text(value: Any, limit: int = 600) -> str:
     return scrub(value if isinstance(value, str) else "")[:limit]
 
 
+def count(value: Any) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+
 def impression_view(raw: Any) -> dict[str, Any] | None:
     """One interview's interviewer impression (performance.json schema 3), for display."""
     if not isinstance(raw, dict) or raw.get("coverage") not in ("transcript", "derived"):
@@ -430,6 +435,9 @@ def impression_view(raw: Any) -> dict[str, Any] | None:
             "talk_share": share, "next_step": NEXT_STEP.get(raw.get("next_step") or "none", ""),
             "leaned_in": _text(raw.get("leaned_in")), "disengaged": _text(raw.get("disengaged")),
             "follow_ups": metrics.get("follow_ups") if isinstance(metrics.get("follow_ups"), int) else None,
+            "follow_up_rate": number(metrics.get("follow_up_rate")),
+            "answer_seconds": number(metrics.get("avg_answer_seconds")),
+            "warm": count(metrics.get("warm_acknowledgements")), "flat": count(metrics.get("flat_acknowledgements")),
             "length_vs_slot": number(metrics.get("length_vs_slot")), "cues": cues[:14]}
 
 
@@ -454,7 +462,7 @@ def coach_view(raw: Any) -> dict[str, Any] | None:
                      "example": _quote(w.get("example"))} for w in rows("whats_working")][:3],
         "costing": [{k: _text(c.get(k)) for k in ("headline", "plain_meaning", "why_it_matters", "what_happened",
                                                    "do_instead", "model_rephrase")}
-                    | {"example": _quote(c.get("example"))} for c in rows("whats_costing_you")][:2],
+                    | {"example": _quote(c.get("example"))} for c in rows("whats_costing_you")][:3],
         "focus": [{k: _text(f.get(k)) for k in ("drill", "how", "done_when")} for f in rows("this_weeks_focus")][:3],
         "negotiation": {"read": _text(neg.get("read")),
                         "scripts": [{"moment": _text(x.get("moment"), 120), "say": _text(x.get("say"))}

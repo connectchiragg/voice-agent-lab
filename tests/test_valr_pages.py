@@ -263,15 +263,22 @@ def test_old_anchor_links_resolve_to_the_new_pages(client):
     assert "#past-([A-Za-z0-9-]+)" in script and "/valr/interviews/past/${past[1]}" in script
 
 
-def test_performance_leads_with_the_coach(client):
+def test_performance_trends_first_then_insights_then_folds(client):
     page = html.unescape(client.get("/valr/performance", headers=GOOD).text)
-    order = [page.index(x) for x in ("Where you stand", "What's working", "What's costing you", "This week's focus",
-                                     "Salary conversations", "Post-call reports", "The numbers behind this", 'id="perf-chart"')]
+    order = [page.index(x) for x in ('id="trends-title"', 'id="chart-overall"', 'id="chart-skills"', 'id="chart-reactions"',
+                                     'id="chart-talk"', 'id="chart-funnel"', "What it means", "Where you stand",
+                                     "What's working", "This week's focus", "What's costing you",
+                                     "Salary conversations", "Recent interviews", "All the numbers", "Post-call reports")]
     assert order == sorted(order)
-    assert '<details class="numbers" id="numbers">' in page  # Folded when the coach has written.
-    assert "You give ground too fast when challenged" in page and "Pushback reps" in page
-    assert "What band have you set for it?" in page and "VALR never writes your numbers" in page
-    assert "1 post-call report pending" in page and "Interviewer impression by outcome" in page
+    assert page.count('<figure class="tc') >= 5 and page.count('<table class="sr-only">') >= 5
+    assert '<details class="card neg fold" id="salary">' in page  # The scripts start folded.
+    assert '<details class="numbers" id="numbers">' in page and '<details class="numbers" id="recent">' in page
+    assert page.count('type="checkbox" data-focus=') == 3
+    assert "You give ground too fast when challenged" in page and "Say instead" in page
+    assert "1 post-call report pending" in page
+    text = re.sub(r"<script.*?</script>|<[^>]+>", " ", page, flags=re.S)
+    for jargon in ("r =", "r=", "rubric", "schema", "stddev", "Correlation"):
+        assert jargon not in text, jargon
     plain = client.box["view"]
 
     def no_coach():
@@ -279,8 +286,8 @@ def test_performance_leads_with_the_coach(client):
         v["performance"]["coach"] = None
         return v
     client.box["view"] = no_coach
-    page = client.get("/valr/performance", headers=GOOD).text
-    assert "Focus this week" in page and '<details class="numbers" id="numbers" open>' in page
+    page = html.unescape(client.get("/valr/performance", headers=GOOD).text)
+    assert "This week's focus" in page and "The coach's full read appears here" in page and "Where you stand" not in page
     client.box["view"] = plain
 
 

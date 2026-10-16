@@ -1,7 +1,7 @@
 """The frame around every VALR page: top bar, navigation, the needs-attention badge,
 light/dark, a slim banner for anything broken, the footer and the mobile tab bar.
 
-Server-rendered; static/valr.js (countdowns, actions, refresh, chart) and
+Server-rendered; static/valr.js (countdowns, actions, refresh, focus ticks) and
 static/valr-app.js (theme, globe, filters, the attention popover) and static/valr-player.js
 (past interviews: the recording player and key moments) enhance it.
 """
@@ -125,6 +125,7 @@ def layout(view: dict[str, Any], email: str, csrf: str, active: str, title: str,
 <link rel="icon" href="{ICON}">{THEME_BOOT}{FONTS}
 <link rel="stylesheet" href="{asset('theme.css')}"><link rel="stylesheet" href="{asset('valr.css')}">
 <link rel="stylesheet" href="{asset('valr-app.css')}"><link rel="stylesheet" href="{asset('valr-auth.css')}">
+<link rel="stylesheet" href="{asset('valr-perf.css')}">
 <script type="module" src="{asset('valr.js')}"></script>
 <script type="module" src="{asset('valr-app.js')}"></script>
 <script type="module" src="{asset('valr-player.js')}"></script>
