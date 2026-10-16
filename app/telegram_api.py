@@ -6,7 +6,7 @@ store and type modules.
 
 The owner design (2026-10-16): 30 minutes before each interview block VALR sends one
 Telegram message (the interviews' calendar titles and times, and a one- or two-line
-teaser of the brief) with three buttons: [📞 Call me now] [⏰ In 10 min] [Skip]. No
+teaser from public research only, see `public_teaser`) with three buttons: [📞 Call me now] [⏰ In 10 min] [Skip]. No
 reply means no call; the phone call is on demand only.
 
 Secrets: TELEGRAM_BOT_TOKEN (Bot API) and TELEGRAM_WEBHOOK_SECRET (Telegram sends it
@@ -274,8 +274,37 @@ def teaser(spoken: str | None, limit: int = TEASER_CHARS) -> str:
     return out if len(out) <= limit else out[:limit - 1].rsplit(" ", 1)[0] + "…"
 
 
-def heads_up_text(events: list[SlotEvent], spoken: dict[str, str], now: datetime) -> str:
-    """ "<b>Kestrel: screening call at 4:00 PM IST</b>, in 30 min." plus the teaser(s)."""
+# The teaser uses public research only (owner's decision, 2026-10-16): the company
+# researcher's summary (R3), else the round researcher's (R2); never the spoken brief or
+# the private part (R1: his email and recordings). Sentences that mention pay, an email
+# address or a phone number are dropped; nothing usable leaves just the title and time.
+PRIVATE_HINT = re.compile(r"[₹$€£]|\bLPA\b|\blakhs?\b|\bcrores?\b|\bCTC\b|salar|compensation|"
+                          r"\bpay\b|\bbonus|\bequity\b|\bESOPs?\b|\bRSUs?\b|\bOTE\b|@|"
+                          r"\+?\d[\d\s().-]{7,}\d|\b(?:e-?mail|inbox|recruiter said|you wrote)\b", re.I)
+
+
+def public_teaser(slot: dict[str, Any] | None, company: dict[str, Any] | None = None) -> str:
+    """One or two public sentences about the company or the round, or ""."""
+    parts = (slot or {}).get("parts") or {}
+    for part in (parts.get("company") or company, parts.get("round")):
+        if not isinstance(part, dict) or not part.get("ok"):
+            continue
+        found = part.get("findings")
+        summary = found.get("summary") if isinstance(found, dict) else None
+        if not isinstance(summary, str):
+            continue
+        sentences = [x for x in re.split(r"(?<=[.!?])\s+", " ".join(summary.split()))
+                     if x and not PRIVATE_HINT.search(x)]
+        if sentences:
+            return teaser(" ".join(sentences))
+    return ""
+
+
+def heads_up_text(events: list[SlotEvent], teasers: dict[str, str], ready: set[str],
+                  now: datetime) -> str:
+    """ "<b>Kestrel screening call</b> at 4:00 PM IST, in 30 min." plus public teasers.
+
+    `teasers`: event key -> a public teaser (may be empty); `ready`: keys with a brief."""
     first = datetime.fromisoformat(events[0].start_utc)
     minutes = max(round((first - now).total_seconds() / 60), 0)
     lines = []
@@ -283,17 +312,18 @@ def heads_up_text(events: list[SlotEvent], spoken: dict[str, str], now: datetime
         when = clock(datetime.fromisoformat(event.start_utc))
         lead = f", in {minutes} min" if index == 0 else ""
         lines.append(f"<b>{e(event_label(event))}</b> at {e(when)}{lead}.")
-    ready = [teaser(spoken.get(event.key)) for event in events]
-    ready = [line for line in ready if line]
-    if len(ready) == len(events):
+    done = [event for event in events if event.key in ready]
+    if len(done) == len(events):
         lines.append("Your briefing is ready.")
-    elif ready:
+    elif done:
         lines.append("Part of your briefing is ready.")
     else:
         lines.append("Your briefing is still being prepared.")
-    if ready:
+    shown = [teasers.get(event.key, "") for event in events]
+    shown = [line for line in shown if line]
+    if shown:
         lines.append("")
-        lines += [f"<i>{e(line)}</i>" for line in ready[:2]]
+        lines += [f"<i>{e(line)}</i>" for line in shown[:2]]
     lines.append("")
     lines.append("Want a call? No reply means no call.")
     return "\n".join(lines)

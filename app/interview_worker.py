@@ -476,11 +476,16 @@ class InterviewActivities:
             events = [snapshots[key] for key in request.slot_keys
                       if key in snapshots and interview_types.briefable(snapshots[key])]
             slots = await interview_store.load_slots(connection, [e.key for e in events])
+            companies = {}
+            for key in {slot.get("company_key") for slot in slots} - {None, ""}:
+                companies[key] = await interview_store.company(connection, key)
         if not events:
             return "no interviews left in this block"
-        spoken = {slot["key"]: slot.get("spoken") or "" for slot in slots
-                  if slot.get("status") in ("done", "partial")}
-        text = telegram_api.heads_up_text(events, spoken, datetime.now(timezone.utc))
+        # Public research only in Telegram: no spoken brief, no private (email) part, no pay.
+        ready = {slot["key"] for slot in slots if slot.get("status") in ("done", "partial")}
+        teasers = {slot["key"]: telegram_api.public_teaser(slot, companies.get(slot.get("company_key")))
+                   for slot in slots}
+        text = telegram_api.heads_up_text(events, teasers, ready, datetime.now(timezone.utc))
         try:
             message_id = await bot.send(chat, text, telegram_api.keyboard(request.block_id))
         except telegram_api.TelegramError as error:
