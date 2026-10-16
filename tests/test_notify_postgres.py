@@ -46,9 +46,17 @@ def test_notification_store_sql():
             assert len(await store.listing(True, now - timedelta(days=1))) == 1
             assert await store.mark_read([first], now) == 1 and await store.unread_count(now - timedelta(days=1)) == 0
             assert await store.mark_read(None, now) == 0
-            await store.save_lead_states({"a": ("screening", "you"), "b": ("applied", "them")})
-            await store.save_lead_states({"a": ("interviewing", "nobody")})
-            assert await store.lead_states() == {"a": ("interviewing", "nobody")}
+            # Items of the removed (inferred) kinds stored by an older version: hidden.
+            for kind in n.REMOVED:
+                await store.insert({"source_id": f"{kind}:x", "kind": kind, "importance": "digest", "title": "old"})
+            assert await store.unread_count(now - timedelta(days=1)) == 0
+            assert await store.listing(False, now - timedelta(days=1)) != []
+            assert all(r["kind"] not in n.REMOVED for r in await store.listing(False, now - timedelta(days=1)))
+            assert all(r["kind"] not in n.REMOVED for r in await store.pending() + await store.push_pending())
+            await store.setup()
+            cursor = await c.execute("SELECT count(*) FROM notifications WHERE kind = ANY(%s) AND (read_at IS NULL "
+                                     "OR tg_state = 'pending' OR push_state = 'pending')", (list(n.REMOVED),))
+            assert (await cursor.fetchone())[0] == 0
             assert (await store.switches()).digest is True
             await store.save_switches(digest=False)
             await store.save_switches(last_digest_on=now.date())

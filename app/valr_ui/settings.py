@@ -236,8 +236,8 @@ def alerts_row() -> str:
         f'<label class="switch notif-switch"><input type="checkbox" data-notif-switch="{key}" disabled>'
         f'<span class="switch-ui" aria-hidden="true"></span><span><span class="switch-title">{e(title)}</span>'
         f'<span class="field-help">{e(help_)}</span></span></label>'
-        for key, title, help_ in (("immediate", "Immediate alerts", "Offers, interview invites and replies that need you"),
-                                  ("digest", "Daily digest at 09:00", "Rejections, new leads, stage changes and other updates"),
+        for key, title, help_ in (("immediate", "Immediate alerts", "Offers, interview invites, replies that need you and calendar changes in the next 48 hours"),
+                                  ("digest", "Daily digest at 09:00", "Rejections, other replies and later calendar changes"),
                                   ("quiet", "Quiet hours 23:00–08:00", "Only interviews in the next 12 hours get through")))
     return row("alerts", "Telegram alerts", "bell", "", f'<div class="notif-switches">{switches}</div>')
 

@@ -6,16 +6,24 @@ Where they come from (all in the research worker):
   the classifier's decision. Dropped mail, newsletters, job-board alerts, his own sent mail and
   automatic "application received" receipts never notify. Only incremental passes notify
   (never the first backfill), and only for mail under VALR_NOTIFY_MAX_AGE_HOURS (48) old;
-- a lead rebuild (`after_rebuild`, end of `leads_refresh`): a forward stage change, a lead
-  becoming "waiting on you", and a lead gone quiet for 14 days. The first rebuild only
-  remembers the leads (`notify_lead_state`), so turning this on sends nothing old.
+- a processed call recording (`from_recording`);
+- a calendar change (`from_calendar`, called by the calendar sync in app/interview_worker.py):
+  an interview-like event added, moved (its time changed) or cancelled. The first sync (no
+  stored snapshots yet) only seeds them, silently, like the email backfill.
 
-Kinds and Telegram routing (the PM spec, 2026-10-17):
+Only concrete new events notify (the owner, 2026-10-17: "only new events, not what the LLM
+thinks needs attention"). Nothing inferred from a lead rebuild (stage changes, "your move",
+gone quiet, new lead) and no pinned action items: `after_rebuild` only links email
+notifications to their lead. Rows of those REMOVED kinds stored before are marked read at
+`setup` and left out of every list, count, push and digest.
+
+Kinds and Telegram routing:
 
     immediate (sent within ~2 minutes): offer, interview (invite, reschedule, cancel),
-        reply_needed (a recruiter asks him for something), take_home
-    digest (one message at 09:00 IST, only when there is something): rejection, new_lead,
-        reply (no answer needed), stage, waiting, quiet
+        reply_needed (a recruiter asks him for something), take_home, recording,
+        calendar (when the interview is within 48 hours)
+    digest (one message at 09:00 IST, only when there is something): rejection, reply
+        (no answer needed, or a first email from a recruiter), update, calendar (later)
 
 Quiet hours 23:00-08:00 (VALR_NOTIFY_QUIET, in ASSISTANT_TIMEZONE, default Asia/Kolkata):
 immediate items wait until 08:00, except one tied to an interview in the next
@@ -55,22 +63,24 @@ logger = logging.getLogger("valr")
 
 DEDUPE = timedelta(minutes=10)
 KEEP_FOR = timedelta(days=30)
-QUIET_AFTER = timedelta(days=14)
+CALENDAR_SOON = timedelta(hours=48)  # A calendar change this close is immediate.
 LOCK = 7_202_610_31
 
 IMMEDIATE = ("offer", "interview", "reply_needed", "take_home", "recording")
-DIGEST = ("rejection", "new_lead", "reply", "update", "stage", "waiting", "quiet")
-KINDS = IMMEDIATE + DIGEST
+DIGEST = ("rejection", "reply", "update")
+KINDS = IMMEDIATE + DIGEST + ("calendar",)  # calendar: immediate within 48 hours, else digest.
+# Inferred, not events: never created now; stored ones are hidden (`hide_removed`, `VISIBLE`).
+REMOVED = ("stage", "waiting", "quiet", "new_lead")
+VISIBLE = "NOT (kind = ANY(%s))"
 LABELS = {"offer": "Offer", "interview": "Interview invite", "reply_needed": "Asked for something",
-          "take_home": "Take-home", "rejection": "Not moving forward", "new_lead": "New lead",
-          "reply": "Reply", "update": "Update", "stage": "Stage change", "waiting": "Your move", "quiet": "Gone quiet",
-          "recording": "Call recording"}
+          "take_home": "Take-home", "rejection": "Not moving forward", "reply": "Reply", "update": "Update",
+          "recording": "Call recording", "calendar": "Calendar"}
 RANK = {"immediate": 2, "digest": 1}
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS notifications (
     id           bigserial PRIMARY KEY,
-    source_id    text UNIQUE,                     -- gmail:<message>, stage:<lead>:<stage>, ...
+    source_id    text UNIQUE,                     -- gmail:<message>, calendar:<event>:<change>, ...
     kind         text NOT NULL,
     importance   text NOT NULL,                   -- immediate | digest
     title        text NOT NULL,
@@ -89,12 +99,6 @@ CREATE TABLE IF NOT EXISTS notifications (
 );
 CREATE INDEX IF NOT EXISTS notifications_by_created ON notifications (created_at DESC);
 CREATE INDEX IF NOT EXISTS notifications_by_thread ON notifications (thread_id, created_at);
-CREATE TABLE IF NOT EXISTS notify_lead_state (
-    lead_id      text PRIMARY KEY,
-    stage        text NOT NULL,
-    waiting_on   text NOT NULL,
-    updated_at   timestamptz NOT NULL DEFAULT now()
-);
 CREATE TABLE IF NOT EXISTS notify_settings (
     id              int PRIMARY KEY DEFAULT 1 CHECK (id = 1),
     immediate       boolean,
@@ -211,9 +215,7 @@ def email_kind(category: str, action_requested: bool | None, stage_hint: str, ne
         # "We received your application": the lead updates silently. Any other update from a
         # company is still worth a dot (the owner: "any emails should show red dot").
         return None if AUTO_RECEIPT.search(text) else "update"
-    if new_thread and category in ("recruiter_outreach", "other"):
-        return "new_lead"
-    return "reply"
+    return "reply"  # A first email from a recruiter too: the email is the event, not a "new lead".
 
 
 def importance(kind: str) -> str:
@@ -226,12 +228,14 @@ def name_of(company: str) -> str:
     return shown if shown and shown != company_names.NOT_IDENTIFIED else ""
 
 
-def email_title(kind: str, company: str, action: str = "") -> str:
+def email_title(kind: str, company: str, action: str = "", new_thread: bool = False) -> str:
     who = name_of(company) or "A recruiter"
+    if kind == "reply" and new_thread:
+        return f"{who} emailed you"
     return {"offer": f"{who} sent an offer", "interview": f"{who} wants to schedule an interview",
             "reply_needed": f"{who} asked you to {plain_action(action)}" if action else f"{who} asked you for something",
             "take_home": f"{who} sent a take-home", "rejection": f"{who}: not moving forward",
-            "new_lead": f"New: {who} reached out", "reply": f"{who} replied", "update": f"{who} sent an update"}[kind]
+            "reply": f"{who} replied", "update": f"{who} sent an update"}[kind]
 
 
 def plain_action(action: str) -> str:
@@ -270,23 +274,21 @@ def telegram_text(note: dict[str, Any]) -> str:
     if kind == "reply_needed":
         action = scrub(plain_action(note.get("action") or ""))
         what = f"recruiter asked you to {action}" if action and action != "reply" else "recruiter asked you for something"
-    elif kind == "stage" or kind == "offer" and str(note.get("source_id") or "").startswith("stage:"):
-        what = "moved to the offer stage"
+    elif kind == "calendar":
+        return f"📅 {html.escape(scrub(note.get('title') or ''))}. Open: {html.escape(absolute(note.get('link') or '/valr'))}"
     else:
         what = IMMEDIATE_PHRASE.get(kind) or LABELS.get(kind, "update").lower()
     return f"📩 {html.escape(who)} — {html.escape(what)}. Open: {html.escape(absolute(note.get('link') or '/valr'))}"
 
 
-DIGEST_PHRASE = {"rejection": "said no", "new_lead": "is new", "reply": "replied", "waiting": "is waiting on you",
-                 "quiet": "has been quiet for 14 days", "offer": "sent an offer", "interview": "wants an interview",
+DIGEST_PHRASE = {"rejection": "said no", "reply": "replied", "recording": "call recording is ready", "offer": "sent an offer", "interview": "wants an interview",
                  "reply_needed": "asked you for something", "take_home": "sent a take-home", "update": "sent an update"}
 
 
 def digest_line(note: dict[str, Any]) -> str:
     who = scrub(name_of(note.get("company") or "")) or "A recruiter"
-    if note["kind"] == "stage":
-        stage = str(note.get("action") or "").replace("-", " ")
-        return f"{who} moved to {stage.capitalize() or 'a new stage'}"
+    if note["kind"] == "calendar":
+        return scrub(note.get("title") or "") or "A calendar change"
     return f"{who} {DIGEST_PHRASE.get(note['kind'], 'has an update')}"
 
 
@@ -333,52 +335,6 @@ def digest_due(now: datetime, switches: Switches) -> bool:
     return switches.digest and today.time() >= digest_at() and switches.last_digest_on != today.date()
 
 
-# Lead events (pure).
-
-@dataclass
-class LeadEvent:
-    source_id: str
-    kind: str
-    lead_id: str
-    company: str
-    title: str
-    body: str = ""
-    action: str = ""
-    interview_at: datetime | None = None
-
-
-def lead_events(leads: list[Any], before: dict[str, tuple[str, str]], now: datetime) -> list[LeadEvent]:
-    """Stage moves forward (or closes as won), "waiting on you" turning on, gone quiet 14 days.
-    `before`: lead id -> (stage, waiting_on) at the last rebuild; a lead not in it is new (its
-    email already said so)."""
-    from app.leads import FORWARD
-    out = []
-    for lead in leads:
-        if lead.status == "expired":
-            continue
-        name = name_of(lead.company) or lead.company
-        soon = lead.next_step_at if lead.next_step_at and lead.next_step_at > now else None
-        old = before.get(lead.id)
-        if old is not None:
-            stage, waiting = old
-            moved = (lead.stage in FORWARD and stage in FORWARD and FORWARD.index(lead.stage) > FORWARD.index(stage)) \
-                or (lead.stage == "closed-won" and stage != "closed-won")
-            if moved and not lead.stage_manual:
-                kind = "offer" if lead.stage == "offer" else "stage"
-                out.append(LeadEvent(f"stage:{lead.id}:{lead.stage}", kind, lead.id, lead.company,
-                                     f"{name} moved to {lead.stage.replace('-', ' ').capitalize()}",
-                                     action=lead.stage, interview_at=soon))
-            if lead.waiting_on == "you" and waiting != "you":
-                since = lead.waiting_since.date().isoformat() if lead.waiting_since else now.date().isoformat()
-                out.append(LeadEvent(f"waiting:{lead.id}:{since}", "waiting", lead.id, lead.company,
-                                     f"Your move: {name}", body=lead.waiting_reason[:160], interview_at=soon))
-        if lead.waiting_on == "them" and lead.waiting_since and now - lead.waiting_since >= QUIET_AFTER:
-            out.append(LeadEvent(f"quiet:{lead.id}:{lead.waiting_since.date().isoformat()}", "quiet", lead.id,
-                                 lead.company, f"{name} has been quiet for {(now - lead.waiting_since).days} days",
-                                 body="A short follow-up keeps it warm."))
-    return out
-
-
 # The store (Postgres). Tests use an in-memory stand-in with the same methods.
 
 class Store:
@@ -387,6 +343,16 @@ class Store:
 
     async def setup(self) -> None:
         await self.c.execute(SCHEMA)
+        await self.hide_removed()
+
+    async def hide_removed(self) -> None:
+        """Stored items of the REMOVED kinds: read, and never sent anywhere."""
+        await self.c.execute(
+            "UPDATE notifications SET read_at = coalesce(read_at, now()), "
+            "tg_state = CASE WHEN tg_state = 'pending' THEN 'skipped' ELSE tg_state END, "
+            "push_state = CASE WHEN push_state = 'pending' THEN 'skipped' ELSE push_state END "
+            "WHERE kind = ANY(%s) AND (read_at IS NULL OR tg_state = 'pending' OR push_state = 'pending')",
+            (list(REMOVED),))
 
     async def recent_for_thread(self, thread_id: str, since: datetime) -> dict[str, Any] | None:
         cursor = await self.c.execute(
@@ -422,19 +388,21 @@ class Store:
 
     async def pending(self) -> list[dict[str, Any]]:
         cursor = await self.c.execute(
-            f"SELECT {', '.join(FIELDS)} FROM notifications WHERE tg_state = 'pending' ORDER BY created_at")
+            f"SELECT {', '.join(FIELDS)} FROM notifications WHERE tg_state = 'pending' AND {VISIBLE} "
+            "ORDER BY created_at", (list(REMOVED),))
         return [dict(zip(FIELDS, row)) for row in await cursor.fetchall()]
 
     async def listing(self, unread_only: bool, since: datetime, limit: int = 100) -> list[dict[str, Any]]:
-        where = "created_at >= %s" + (" AND read_at IS NULL" if unread_only else "")
+        where = f"created_at >= %s AND {VISIBLE}" + (" AND read_at IS NULL" if unread_only else "")
         cursor = await self.c.execute(
             f"SELECT {', '.join(FIELDS)} FROM notifications WHERE {where} ORDER BY created_at DESC LIMIT %s",
-            (since, limit))
+            (since, list(REMOVED), limit))
         return [dict(zip(FIELDS, row)) for row in await cursor.fetchall()]
 
     async def unread_count(self, since: datetime) -> int:
         cursor = await self.c.execute(
-            "SELECT count(*) FROM notifications WHERE read_at IS NULL AND created_at >= %s", (since,))
+            f"SELECT count(*) FROM notifications WHERE read_at IS NULL AND created_at >= %s AND {VISIBLE}",
+            (since, list(REMOVED)))
         return int((await cursor.fetchone())[0])
 
     async def mark_read(self, ids: list[int] | None, now: datetime) -> int:
@@ -461,22 +429,10 @@ class Store:
     async def purge(self, before: datetime) -> None:
         await self.c.execute("DELETE FROM notifications WHERE created_at < %s", (before,))
 
-    async def lead_states(self) -> dict[str, tuple[str, str]]:
-        cursor = await self.c.execute("SELECT lead_id, stage, waiting_on FROM notify_lead_state")
-        return {r[0]: (r[1], r[2]) for r in await cursor.fetchall()}
-
-    async def save_lead_states(self, states: dict[str, tuple[str, str]]) -> None:
-        async with self.c.transaction():
-            await self.c.execute("DELETE FROM notify_lead_state WHERE NOT (lead_id = ANY(%s))", (list(states),))
-            for lead_id, (stage, waiting) in states.items():
-                await self.c.execute(
-                    "INSERT INTO notify_lead_state (lead_id, stage, waiting_on) VALUES (%s, %s, %s) "
-                    "ON CONFLICT (lead_id) DO UPDATE SET stage = excluded.stage, waiting_on = excluded.waiting_on, "
-                    "updated_at = now()", (lead_id, stage, waiting))
-
     async def push_pending(self) -> list[dict[str, Any]]:
         cursor = await self.c.execute(
-            f"SELECT {', '.join(FIELDS)} FROM notifications WHERE push_state = 'pending' ORDER BY created_at")
+            f"SELECT {', '.join(FIELDS)} FROM notifications WHERE push_state = 'pending' AND {VISIBLE} "
+            "ORDER BY created_at", (list(REMOVED),))
         return [dict(zip(FIELDS, row)) for row in await cursor.fetchall()]
 
     async def switches(self) -> Switches:
@@ -545,7 +501,8 @@ async def from_email(store: Any, email: Any, decision: Any, touch: Any, new_thre
                       email.subject, decision.summary)
     if kind is None:
         return None
-    note = {"source_id": f"gmail:{email.id}", "kind": kind, "title": email_title(kind, touch.company, decision.action),
+    note = {"source_id": f"gmail:{email.id}", "kind": kind,
+            "title": email_title(kind, touch.company, decision.action, new_thread),
             "body": (decision.summary or "")[:240], "company": (touch.company or "")[:120],
             "link": lead_link(""), "gmail_url": touch.url or "", "thread_id": email.thread_id,
             "action": (decision.action or "")[:120]}
@@ -553,8 +510,8 @@ async def from_email(store: Any, email: Any, decision: Any, touch: Any, new_thre
 
 
 async def after_rebuild(store: Any, leads: list[Any], now: datetime) -> int:
-    """After `leads_refresh`: link email notifications to their lead, then the lead events.
-    -> how many new notifications."""
+    """After `leads_refresh`: link email notifications to their lead (the red dots on Leads).
+    Creates nothing: stage changes, "your move" and gone-quiet are not notifications. -> 0."""
     by_thread = {t.thread: lead for lead in leads for t in lead.touches if getattr(t, "thread", "")}
     for note in await store.unlinked():
         lead = by_thread.get(note["thread_id"])
@@ -563,24 +520,49 @@ async def after_rebuild(store: Any, leads: list[Any], now: datetime) -> int:
         soon = lead.next_step_at if lead.next_step_at and lead.next_step_at > now else None
         await store.update(note["id"], lead_id=lead.id, link=lead_link(lead.id),
                            interview_at=note.get("interview_at") or soon)
-    before = await store.lead_states()
-    states = {lead.id: (lead.stage, lead.waiting_on) for lead in leads}
-    if not before:  # The first rebuild: remember, notify nothing.
-        await store.save_lead_states(states)
-        return 0
-    added = 0
-    for event in lead_events(leads, before, now):
-        if event.kind == "waiting" or event.kind == "offer":
-            told = await store.recent_for_lead(event.lead_id, now - DEDUPE)
-            if any(n["source_id"] and str(n["source_id"]).startswith("gmail:") for n in told):
-                continue  # The email that caused it already notified.
-        new = await add(store, {"source_id": event.source_id, "kind": event.kind, "title": event.title,
-                                "body": event.body, "company": event.company[:120], "link": lead_link(event.lead_id),
-                                "lead_id": event.lead_id, "action": event.action,
-                                "interview_at": event.interview_at}, now)
-        added += new is not None
-    await store.save_lead_states(states)
-    return added
+    return 0
+
+
+# Calendar changes (app/interview_worker.py, after each calendar sync).
+
+CALENDAR_CHANGES = ("added", "moved", "cancelled")
+
+
+def when_text(start_utc: str) -> str:
+    """"Mon 19 Oct, 6:00 PM" in ASSISTANT_TIMEZONE."""
+    at = local(datetime.fromisoformat(start_utc))
+    return f"{at:%a} {at.day} {at:%b}, {at.strftime('%I:%M %p').lstrip('0')}"
+
+
+def calendar_title(change: str, company: str, start_utc: str, before_utc: str = "") -> str:
+    who = f"Interview with {name_of(company)}" if name_of(company) else "Interview"
+    if change == "added":
+        return f"{who} added: {when_text(start_utc)}"
+    if change == "moved":
+        return f"{who} moved to {when_text(start_utc)}"
+    return f"{who} cancelled: {when_text(before_utc or start_utc)}"
+
+
+async def from_calendar(store: Any, event: Any, change: str, now: datetime, before_utc: str = "") -> int | None:
+    """One calendar change (`change`: added, moved or cancelled) of an interview-like event ->
+    one notification. Deduped per event, change and (for a move) the new time. The caller
+    decides what is interview-like (app/interview_types.looks_like_interview) and skips the
+    first, seeding sync."""
+    from app.interview_types import slot_workflow_id
+    if change not in CALENDAR_CHANGES:
+        return None
+    start = datetime.fromisoformat(event.start_utc if change != "cancelled" else (before_utc or event.start_utc))
+    if start < now:
+        return None  # Already over (or in progress): not news.
+    source = f"calendar:{event.key}:{change}" + (f":{event.start_utc}" if change == "moved" else "")
+    note = {"source_id": source, "kind": "calendar",
+            "importance": "immediate" if start - now <= CALENDAR_SOON else "digest",
+            "title": calendar_title(change, event.company, event.start_utc, before_utc),
+            "body": f"Was {when_text(before_utc)}." if change == "moved" and before_utc else "",
+            "company": (event.company or "")[:120],
+            "link": "/valr/interviews" if change == "cancelled" else f"/valr/interviews/{slot_workflow_id(event.key)}",
+            "gmail_url": "", "thread_id": None, "action": change, "interview_at": start}
+    return await add(store, note, now)
 
 
 # Phone push (pure text, then the pass).
@@ -597,11 +579,14 @@ def push_message(note: dict[str, Any], unread: int | None = None) -> dict[str, A
     urgent = note.get("importance") == "immediate"
     if kind == "reply_needed" and plain_action(note.get("action") or "") != "reply":
         body = f"{who} asked you to {plain_action(note.get('action') or '')}."
-    elif kind == "stage" or kind == "offer" and str(note.get("source_id") or "").startswith("stage:"):
-        body = digest_line({**note, "kind": "stage"}) + "."
+    elif kind == "calendar":
+        body = (scrub(note.get("title") or "") or "A calendar change") + "."
     else:
         body = f"{who} {PUSH_PHRASE.get(kind, 'has an update')}."
-    title = f"Action needed · {who}" if urgent else f"{LABELS.get(kind, 'Update')} · {who}"
+    if kind == "calendar":
+        title = "Calendar" + (f" · {scrub(name_of(note.get('company') or ''))}" if name_of(note.get("company") or "") else "")
+    else:
+        title = f"Action needed · {who}" if urgent else f"{LABELS.get(kind, 'Update')} · {who}"
     link = note.get("link") or "/valr"
     return webpush.payload(title, body, link if link.startswith("/") else "/valr",
                            webpush.tag_for(note.get("thread_id"), note.get("lead_id"), note.get("source_id")),

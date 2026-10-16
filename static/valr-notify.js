@@ -1,13 +1,13 @@
 // The notification bell, the Telegram alert switches and the phone-recordings card.
 //
-// Bell (app/valr_ui/shell.bell): the count is unread notifications + pinned action items, asked
-// for every 60 s (/valr/api/notifications?unread=1). Opening the panel loads the list, grouped
+// Bell (app/valr_ui/shell.bell): the count is unread notifications (new emails, call recordings
+// and calendar changes only), asked for every 60 s (/valr/api/notifications?unread=1). Opening the panel loads the list, grouped
 // by day (Today, Yesterday, Earlier), several items of one company in a day folded into one
 // row. Opening does not mark anything read: clicking an item does (then it opens its page);
 // "Mark all read" marks everything. Built with DOM calls only; pure parts are exported.
-// The same rule holds for the server-rendered items (Home's "New" strip and the panel's first
-// list, app/valr_ui/shell.note_item): a red dot stays until that item is clicked. Every
-// [data-notif-count] on the page (the bell's badge, the strip's count) shows one number.
+// The same rule holds for the server-rendered items (the panel's first list,
+// app/valr_ui/shell.note_item): a red dot stays until that item is clicked. Every
+// [data-notif-count] on the page (the bell's badge) shows one number.
 
 export const POLL_MS = 60000;
 
@@ -118,9 +118,8 @@ function startBell() {
   const bell = document.querySelector("[data-notif]");
   if (!bell) return;
   const box = bell.querySelector("[data-notif-list]");
-  const actions = Number(bell.dataset.actionCount || 0);
   const show = unread => {
-    const text = badgeCount(unread, actions);
+    const text = badgeCount(unread, 0);
     document.querySelectorAll("[data-notif-count]").forEach(node => { node.textContent = text; });
     bell.classList.toggle("has-unread", Boolean(text));
   };
@@ -134,7 +133,7 @@ function startBell() {
     }
     if (href) location.href = href;
   };
-  // Server-rendered items (Home's strip, the panel before it loads): the same click rule.
+  // Server-rendered items (the panel before it loads): the same click rule.
   document.addEventListener("click", event => {
     const link = event.target.closest("[data-notif-item]");
     if (!link || link.closest("[data-notif-list]")?.dataset.loaded) return;
@@ -144,7 +143,6 @@ function startBell() {
     open(item, link.getAttribute("href"));
   });
   document.addEventListener("click", event => {
-    if (event.target.closest("[data-notif-show]")) { bell.open = true; bell.querySelector("summary")?.focus(); }
     if (event.target.closest("[data-notif-close]")) { bell.open = false; bell.querySelector("summary")?.focus(); }
   });
   const load = async () => {

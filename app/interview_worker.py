@@ -3,8 +3,9 @@
 - `calendar_sync`: pull the calendar (Google incremental with the stored syncToken, a
   full resync after a 410; the ICS URL when OAuth is not connected), diff each event
   against its snapshot, signal the slot workflows, recompute the blocks and start,
-  update or cancel their call workflows, and renew the push channel when due.
-  One sync at a time (a Postgres advisory lock).
+  update or cancel their call workflows, and renew the push channel when due. An
+  interview-like event added, moved or cancelled also becomes one bell notification
+  (`notify_calendar`; the first sync only seeds). One sync at a time (a Postgres advisory lock).
 - `slot_plan`: the cache decisions and the job booking (interview limits).
 - `interview_part`: one researcher (R1 private, R2 round, R2 interviewers, R3 company);
   interviewers go through the HR guard and the classifier first.
@@ -108,6 +109,58 @@ async def gmail_access(connection: Any, http: httpx.AsyncClient) -> tuple[str | 
         return None, f"unavailable ({type(error).__name__})"
 
 
+def calendar_change(event: SlotEvent, change: Any, before: dict[str, SlotEvent], full: bool,
+                    now: datetime) -> tuple[str, str] | None:
+    """(added | moved | cancelled, the previous start) for the bell, or None.
+
+    Silent: the first sync (nothing stored before: it only seeds, like the email backfill);
+    on a full listing, an event that is merely entering the 14-day window (it was not new,
+    just not stored yet)."""
+    if not before:
+        return None
+    old = before.get(event.key)
+    kinds = change.kinds
+    if "cancelled" in kinds:
+        if old is None or old.status == "cancelled" or old.declined:
+            return None  # Never seen, or cancelled already.
+        return "cancelled", old.start_utc
+    if "new" in kinds:
+        if old is None and full and \
+                datetime.fromisoformat(event.start_utc) > now + calendar_sync.WINDOW_AFTER - timedelta(days=1):
+            return None
+        return "added", ""
+    if "time" in kinds and old is not None and old.start_utc != event.start_utc:
+        return "moved", old.start_utc
+    return None
+
+
+async def stored_snapshots(connection: Any) -> dict[str, SlotEvent]:
+    """The snapshots before this sync, for the bell; {} (no notifications) if unreadable."""
+    try:
+        return await calendar_sync.snapshots(connection)
+    except Exception as error:  # noqa: BLE001 - the bell must never fail the sync
+        logger.warning("VALR calendar snapshots unreadable for notifications: %s", type(error).__name__)
+        return {}
+
+
+async def notify_calendar(connection: Any, pairs: list[Any], before: dict[str, SlotEvent], full: bool,
+                          now: datetime, owners: set[str]) -> None:
+    """Interview-like calendar changes -> the bell (app/notifications.py). Never fails the sync."""
+    from app import notifications
+    try:
+        store = None
+        for event, change in pairs:
+            found = calendar_change(event, change, before, full, now)
+            if found is None or not interview_types.looks_like_interview(event, owners):
+                continue
+            if store is None:
+                store = notifications.Store(connection)
+                await store.setup()
+            await notifications.from_calendar(store, event, found[0], now, found[1])
+    except Exception as error:  # noqa: BLE001 - a missed notification must not fail the sync
+        logger.warning("VALR calendar notification not created: %s", type(error).__name__)
+
+
 class InterviewActivities:
     def __init__(self, client: Client, http: httpx.AsyncClient | None = None) -> None:
         self.client = client
@@ -155,7 +208,9 @@ class InterviewActivities:
             response.raise_for_status()
             events = calendar_sync.from_ics_text(response.text, owners)
             full, summary.source = True, f"ics (Google {status})"
+        before = await stored_snapshots(connection)
         pairs = await calendar_sync.changes(connection, events, cancelled, full, now, owners)
+        await notify_calendar(connection, pairs, before, full, now, owners)
         await calendar_sync.save_state(
             connection, source=summary.source, last_sync_at=now, last_error=None,
             **({"sync_token": next_token} if token else {}),

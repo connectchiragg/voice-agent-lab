@@ -1,24 +1,20 @@
 """Home: "what now", on a stage with the leads globe as the hero.
 
-At the very top, "New": the latest unread notifications (five at most, newest first), each
-with a red dot until it is opened, and "See all" for the bell's panel; one quiet line when
-nothing is unread.
-
 Desktop: one dark stage. On the left, what matters in the first five seconds: the next
 interview (company, round, time with a countdown, the panel, prep progress, the reminder
 line and "Open briefing") and "Your move" (who is waiting on you, three at most). On the
 right, the 3D leads globe with its legend. Phone: the next interview first, then Your move,
 then the globe, smaller. Below the stage: the other interviews still ahead.
 
-Anything broken shows as one line above the stage; everything else (a reconnect due next
-week, feedback ready) lives in the notification bell.
+Anything broken shows as one line above the stage (and on Settings). New events (emails,
+call recordings, calendar changes) are in the notification bell, not on Home.
 """
 import json
 from typing import Any
 
 from app.valr_page import Clock, countdown, e
 from app.valr_ui import attention, wording
-from app.valr_ui.shell import STATIC, alert_strip, asset, empty_state, icon, note_item
+from app.valr_ui.shell import STATIC, alert_strip, asset, empty_state, icon
 
 
 def globe_src() -> str:
@@ -234,28 +230,9 @@ def coming_up(view: dict[str, Any], clock: Clock) -> str:
             f'<ul class="rows card">{rows}</ul></section>')
 
 
-def news_strip(notes: dict[str, Any] | None, clock: Clock, limit: int = 5) -> str:
-    """The latest unread notifications; "You're all caught up" when there are none."""
-    notes = notes or {}
-    unread = int(notes.get("unread") or 0)
-    items = [n for n in notes.get("items") or [] if not n.get("read")][:limit]
-    if not unread or not items:
-        return (f'<p class="notif-strip is-clear" data-notif-strip>{icon("check-circle", 16)}'
-                '<span>You\'re all caught up.</span></p>')
-    rows = "".join(note_item(n, clock.now) for n in items)
-    return f"""
-<section class="notif-strip" aria-labelledby="new-title" data-notif-strip>
-  <div class="strip-head"><h2 class="strip-title" id="new-title"><span class="strip-dot" aria-hidden="true"></span>New
-    <span class="count" data-notif-count>{unread}</span></h2>
-    <button class="card-link" type="button" data-notif-show>See all{icon("arrow-right", 14)}</button></div>
-  <ul class="notif-items strip-list">{rows}</ul>
-</section>"""
-
-
 def page(view: dict[str, Any], clock: Clock, items: list[dict[str, Any]], leads: dict[str, Any],
          notes: dict[str, Any] | None = None) -> str:
     return f"""{alert_strip(items)}
-{news_strip(notes, clock)}
 <section class="stage hero-globe" aria-label="Right now">
   <div class="stage-now">
     {next_card(view, clock)}

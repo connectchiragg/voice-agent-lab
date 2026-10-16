@@ -221,3 +221,16 @@ INTERVIEW = re.compile(r"interview|round|screen|technical|coding|system design|"
 def event_noun(title: str) -> str:
     """ "interview", or "meeting" for an event whose title says it is something else."""
     return "meeting" if NOT_INTERVIEW.search(title) and not INTERVIEW.search(title) else "interview"
+
+
+def looks_like_interview(event: SlotEvent, owners: set[str] | frozenset[str] = frozenset()) -> bool:
+    """An interview, by the rule the leads use for calendar events (app/lead_worker.py,
+    `calendar_to_touches`): a timed event whose title says interview, round, technical,
+    coding... (and not "post-offer connect" or "sync"), with a company or an outside person."""
+    if event.all_day or not INTERVIEW.search(event.title) or event_noun(event.title) != "interview":
+        return False
+    everyone = list(event.attendees)
+    if event.organizer_email:
+        everyone.append(Person(event.organizer_email, event.organizer_name, organizer=True))
+    outside = any(attendee_role(p, owners) in ("candidate", "recruiter") for p in everyone)
+    return bool(event.company) or outside

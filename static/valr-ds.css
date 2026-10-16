@@ -340,24 +340,7 @@ section.card, article.card, details.card { padding: var(--s5) var(--s6); }
 .notif-fold > details > summary.unread::before { content: ""; position: absolute; left: 16px; top: 17px; width: 8px; height: 8px;
   border-radius: 50%; background: var(--dot); }
 .notif-fold .notif-items { padding-left: var(--s4); }
-.notif-action { display: flex; align-items: center; gap: var(--s3); margin: 0 var(--s1); padding: 10px var(--s3); border-radius: var(--r-md);
-  background: var(--warn-soft); color: var(--warn); }
-.notif-action.lvl-bad { background: var(--bad-soft); color: var(--bad); }
-.notif-action-text { flex: 1; display: grid; min-width: 0; }
-.notif-action .notif-title { color: var(--text); font-weight: 600; }
 .notif-empty { padding: var(--s8) var(--s4); text-align: center; color: var(--text-3); }
-.notif-strip { margin-bottom: var(--s5); padding: var(--s4) var(--s5) var(--s3); background: var(--surface); border: 1px solid var(--line);
-  border-radius: var(--r-lg); box-shadow: var(--e1); }
-.notif-strip.is-clear { display: flex; align-items: center; gap: 8px; padding: 10px var(--s4); color: var(--text-3);
-  font-size: var(--fs-14); box-shadow: none; background: transparent; border-style: dashed; }
-.notif-strip.is-clear .i { color: var(--ok); }
-.strip-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: var(--s1); }
-.strip-title { display: flex; align-items: center; gap: 8px; font: 600 var(--fs-base)/1.2 var(--font-ui); }
-.strip-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--dot); box-shadow: 0 0 0 3px color-mix(in oklab, var(--dot) 18%, transparent); }
-.strip-title .count { background: color-mix(in oklab, var(--dot) 14%, transparent); color: var(--dot); }
-.strip-list { grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); column-gap: var(--s4); margin: 0 calc(-1 * var(--s3)); }
-.strip-list .notif-body { display: none; }
-.strip-list .notif-gmail { display: none; }
 .notif-switches { display: grid; gap: var(--s4); margin-top: var(--s1); }
 .notif-token { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2); margin: var(--s3) 0; padding: var(--s3);
   border-radius: var(--r-md); background: var(--surface-2); }
@@ -851,9 +834,6 @@ details.fold:not(.card):not(.inline) { padding: var(--s4) var(--s6); border: 1px
   /* The top bar's backdrop-filter makes it the containing block: full width, just under it. */
   .notif-pop { position: fixed; top: 100%; left: 0; right: 0; bottom: auto; height: calc(100dvh - var(--topbar)); width: auto; max-height: none; border-radius: 0;
     border: 0; padding-bottom: calc(var(--s8) + env(safe-area-inset-bottom)); }
-  .strip-list { grid-template-columns: 1fr; }
-  .strip-list > li:nth-child(n+4) { display: none; }
-  .notif-strip { padding: var(--s3) var(--s4) var(--s2); margin-bottom: var(--s3); }
   .filters .tabs { width: 100%; }
   .filters .tabs a { flex: 1; justify-content: center; padding: 6px 8px; font-size: var(--fs-sm); }
   .filter-tools .search { flex: 1 1 100%; order: -1; }

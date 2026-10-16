@@ -9,7 +9,7 @@ Home's "New" strip, read on click) and static/valr-player.js (past interviews) e
 static/valr-ds.css (the design system) and static/leads.css (bands and the globe stage).
 """
 import hashlib
-from datetime import datetime, timedelta
+from datetime import datetime
 from functools import cache
 from pathlib import Path
 from typing import Any
@@ -104,8 +104,10 @@ def fix_control(fix: dict[str, Any] | None, small: bool = True) -> str:
 
 
 def alert_strip(items: list[dict[str, Any]]) -> str:
-    """Only what is broken right now ("bad"), one line each, with its fix. Silence = healthy."""
-    bad = [i for i in items if i["level"] == "bad"]
+    """Only what is broken right now, one line each, with its fix. Silence = healthy. "bad"
+    items, plus the broken connections that are only "warn" (a failed calendar sync, a
+    notetaker that stopped syncing): the bell no longer pins them, so they show here."""
+    bad = [i for i in items if i["level"] == "bad" or i["key"] == "calendar" or i["key"].startswith("notetaker-")]
     if not bad:
         return ""
     rows = "".join(f'<li class="alert">{icon("alert", 16)}<span class="alert-text"><b>{e(i["title"])}</b> '
@@ -204,7 +206,7 @@ def call_button() -> str:
 # The notification bell (data and API: app/notifications.py, valr-notify).
 
 KIND_TONE = {"offer": "ok", "interview": "accent", "reply_needed": "warn", "take_home": "warn", "rejection": "bad",
-             "new_lead": "info", "reply": "info", "update": "info", "stage": "accent", "waiting": "warn", "quiet": "muted"}
+             "reply": "info", "update": "info", "recording": "info", "calendar": "accent"}
 
 
 def ago(iso: str, now: datetime) -> str:
@@ -237,40 +239,23 @@ def note_item(n: dict[str, Any], now: datetime, tag: str = "li") -> str:
             + f'</a>{gmail}</{tag}>')
 
 
-def action_title(item: dict[str, Any], clock: Clock) -> str:
-    """"Reconnect Google tomorrow" -> "Reconnect Google by Sun to keep email and calendar updating"."""
-    if item["key"] == "google_expiring":
-        days = {"today": 0, "tomorrow": 1}.get(item["title"].removeprefix("Reconnect Google ").strip())
-        if days is None and item["title"].startswith("Reconnect Google in "):
-            days = int("".join(ch for ch in item["title"] if ch.isdigit()) or 2)
-        due = clock.now + timedelta(days=days or 0)
-        return f"Reconnect Google by {due.strftime('%a')} to keep email and calendar updating"
-    return item["title"]
-
-
 def bell(notes: dict[str, Any], items: list[dict[str, Any]], clock: Clock) -> str:
     """The bell: a red badge with the unread count; its panel (a drawer on desktop, full screen
-    on a phone) pins what needs fixing on top, then the notifications by day. Opening the panel
+    on a phone) lists the notifications by day: new events only (emails, call recordings,
+    calendar changes). Broken connections are not here: Home's alert line and Settings show
+    them. `items` is unused (kept for the callers). Opening the panel
     reads nothing; clicking an item does. static/valr-notify.js loads the full list on open."""
-    from app.valr_ui import attention as attn
     unread = int(notes.get("unread") or 0)
-    actions = [i for i in attn.counted(items) if i["key"] not in ("paused",)]
-    pinned = "".join(
-        f'<li class="notif-action lvl-{e(i["level"])}">{icon("alert", 16)}<span class="notif-action-text">'
-        f'<span class="notif-title">{e(action_title(i, clock))}</span>'
-        + (f'<span class="notif-meta">{e(i["detail"])}</span>' if i["key"] != "google_expiring" else "")
-        + f'</span>{fix_control(i["fix"])}</li>' for i in actions)
     first = "".join(note_item(n, clock.now) for n in (notes.get("items") or [])[:12])
     body = (f'<ul class="notif-items">{first}</ul>' if first else
             '<p class="notif-empty">You\'re all caught up.</p>')
     label = f"Notifications, {unread} unread" if unread else "Notifications"
-    return f"""<details class="notif-bell{' has-unread' if unread else ''}" data-popover data-notif data-action-count="0">
+    return f"""<details class="notif-bell{' has-unread' if unread else ''}" data-popover data-notif>
   <summary class="icon-btn" aria-label="{e(label)}">{icon('bell', 18)}<span class="notif-count num" data-notif-count>{unread or ''}</span></summary>
   <div class="notif-pop" role="region" aria-label="Notifications">
     <div class="notif-head"><h2 class="notif-heading">Notifications</h2>
       <button class="btn ghost sm" type="button" data-notif-all>Mark all read</button>
       <button class="icon-btn" type="button" data-notif-close aria-label="Close notifications">{icon('x', 18)}</button></div>
-    {f'<p class="notif-group">Needs you</p><ul class="notif-items">{pinned}</ul>' if pinned else ''}
     <div class="notif-list" data-notif-list>{body}</div>
   </div>
 </details>"""
