@@ -11,7 +11,7 @@ from pathlib import Path
 from app.profile.config import settings
 
 HEADER = ("Private candidate context for this prep call (do not read figures aloud unless "
-          "Chirag asks about compensation):")
+          "the candidate asks about compensation):")
 
 
 def _read(path: Path) -> dict | None:

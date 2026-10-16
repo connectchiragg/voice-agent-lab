@@ -15,6 +15,7 @@ Standard library only, so Temporal workflow code and both images can import it.
 Attendee emails stay in memory and in the owner's Postgres; they are never logged.
 """
 import hashlib
+import os
 import re
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
@@ -292,8 +293,15 @@ TITLE_COMPANY = [
     re.compile(r"\)\s*-\s*(?P<c>[A-Z][\w.&' -]{1,30}?)\s+interview", re.I),
     re.compile(r"-\s*(?P<c>[A-Z][\w.&' -]{1,30}?)\s*$"),
 ]
-NOT_COMPANIES = frozenset("chirag goel me you round r1 r2 r3 interview call meeting min and with "
+NOT_COMPANIES = frozenset("me you round r1 r2 r3 interview call meeting min and with "
                           "screen intro".split())
+
+
+
+def not_company_words() -> frozenset[str]:
+    """Generic title words, plus the owner's own name (VALR_OWNER_NAME / VALR_CANDIDATE_NAME)."""
+    own = {w.lower() for key in ("VALR_OWNER_NAME", "VALR_CANDIDATE_NAME") for w in os.getenv(key, "").split()}
+    return NOT_COMPANIES | own
 
 
 def company_name(event: CalEvent) -> str:
@@ -303,7 +311,7 @@ def company_name(event: CalEvent) -> str:
         if match:
             name = match.group("c").strip(" -|:,.")
             name = re.sub(r"\s+(Software )?(Private|Pvt\.?)( Limited| Ltd\.?)?$", "", name, flags=re.I)
-            if len(name) >= 2 and not set(name.lower().split()) <= NOT_COMPANIES:
+            if len(name) >= 2 and not set(name.lower().split()) <= not_company_words():
                 return name
     domain = company_domain(event)
     if domain:

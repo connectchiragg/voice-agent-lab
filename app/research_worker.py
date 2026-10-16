@@ -12,6 +12,9 @@ Activities:
 - `research_synthesize`: the spoken answer and notes, plus the claim check.
 - `research_finish`: saves the result and the job's duration to `research_jobs`.
 
+Background task: the post-call report loop (app/post_call.py; VALR_POST_CALL=0 turns it
+off): queued recordings -> scores, interviewer cues and a Telegram report.
+
 The callback itself is the existing CallbackWorkflow, on the callback worker's queue.
 """
 import asyncio
@@ -326,6 +329,8 @@ async def main() -> None:
     llm_gateway.shared()  # Logs the gateway it uses.
     from app.interview_worker import InterviewActivities
     from app.interview_workflow import BlockCallWorkflow, CalendarSyncWorkflow, InterviewSlotWorkflow
+    from app.lead_worker import LeadActivities, ensure_lead_schedules
+    from app.lead_workflow import GmailSyncWorkflow, GmailWatchWorkflow
     address = os.getenv("TEMPORAL_ADDRESS", "localhost:7233")
     namespace = os.getenv("TEMPORAL_NAMESPACE", "default")
     async with await connect() as connection:
@@ -335,8 +340,9 @@ async def main() -> None:
     # Researchers of one job at a time, plus synthesis, saving and the calendar bookkeeping.
     worker = Worker(client, task_queue=TASK_QUEUE,
                     workflows=[ResearchCallbackWorkflow, InterviewSlotWorkflow, BlockCallWorkflow,
-                               CalendarSyncWorkflow],
-                    workflow_runner=workflow_runner(), activities=ACTIVITIES + interviews.all(),
+                               CalendarSyncWorkflow, GmailSyncWorkflow, GmailWatchWorkflow],
+                    workflow_runner=workflow_runner(),
+                    activities=ACTIVITIES + interviews.all() + LeadActivities().all(),
                     activity_executor=ThreadPoolExecutor(6), max_concurrent_activities=6)
     logger.info("VALR research worker on %s, namespace %s, task queue %s; topic research limits %s; interview "
                 "limits %s", address, namespace, TASK_QUEUE, asdict(research_jobs.Limits.from_env()),
@@ -346,7 +352,14 @@ async def main() -> None:
         await ensure_sweep(client)
     else:
         logger.info("VALR interview briefings are off (VALR_BRIEFINGS=0 or no calendar source)")
-    await worker.run()
+    await ensure_lead_schedules(client)
+    from app import post_call
+    reports = asyncio.create_task(post_call.loop(connect)) if post_call.enabled() else None
+    try:
+        await worker.run()
+    finally:
+        if reports:
+            reports.cancel()
 
 
 USAGE = ('usage: python -m app.research_worker [test "<topic>" | sync | blocks | '

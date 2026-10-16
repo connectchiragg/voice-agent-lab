@@ -14,7 +14,8 @@
 #     when the lock files are unchanged).
 #  4. Waits (up to WAIT_S, default 900) until no call is live: no established connection to
 #     the app's port 7860 inside its container, twice, 10 s apart. Else stops, changing nothing.
-#  5. Makes .next the live tree (the old one becomes ~/voice-agent-lab.prev-<stamp>), swaps
+#  5. Makes .next the live tree (the old one becomes ~/voice-agent-lab.prev-<stamp>), makes
+#     sure the worker's writable data dir exists (deploy/valr-data-live.sh setup), swaps
 #     the app container and waits for it to be healthy (rolls the app back if it is not).
 #  6. Runs deploy/research-setup.sh (voice-research); restarts voice-callbacks only if its
 #     code (app/callback_worker.py, app/callback_workflow.py) or the app's packages changed.
@@ -102,13 +103,15 @@ set -euo pipefail
 mv ~/voice-agent-lab ~/voice-agent-lab.prev-$STAMP
 mv ~/voice-agent-lab.next ~/voice-agent-lab
 cd ~/voice-agent-lab
+# The worker's writable data dir (/srv/valr-data-live): created and seeded once, idempotent.
+sudo sh deploy/valr-data-live.sh setup
 sudo docker tag voice-agent-lab:next voice-agent-lab:latest
 sudo docker tag voice-agent-lab-worker:next voice-agent-lab-worker:latest
 run_app() {
   sudo docker rm -f voice-agent-lab >/dev/null
   sudo docker run -d --name voice-agent-lab --restart unless-stopped --env-file .env \
     --network voice-agent-lab -p 127.0.0.1:7860:7860 \
-    $( [ -d /srv/valr-data ] && echo "-v /srv/valr-data:/data:ro" ) "$1" >/dev/null
+    $(sh deploy/valr-data-live.sh app) "$1" >/dev/null
 }
 run_app voice-agent-lab:latest
 for _ in $(seq 1 24); do
@@ -170,9 +173,9 @@ cat <<EOF
 
 == Rollback (on the VM: ssh -i $KEY $VM), only what you need:
   # app
-  sudo docker rm -f voice-agent-lab && sudo docker run -d --name voice-agent-lab --restart unless-stopped --env-file ~/voice-agent-lab.prev-$STAMP/.env --network voice-agent-lab -p 127.0.0.1:7860:7860 -v /srv/valr-data:/data:ro voice-agent-lab:rollback-$STAMP-voice-agent-lab
+  sudo docker rm -f voice-agent-lab && sudo docker run -d --name voice-agent-lab --restart unless-stopped --env-file ~/voice-agent-lab.prev-$STAMP/.env --network voice-agent-lab -p 127.0.0.1:7860:7860 -v /srv/valr-data:/data:ro -v /srv/valr-data-live:/data-live:ro -e VALR_PERFORMANCE_PATH=/data-live/performance.json -e VALR_PERFORMANCE_CSV=/data-live/performance_scores.csv voice-agent-lab:rollback-$STAMP-voice-agent-lab
   # research worker
-  sudo docker rm -f voice-research && sudo docker run -d --name voice-research --restart unless-stopped --network voice-agent-lab --env-file ~/voice-agent-lab.prev-$STAMP/.env --env-file ~/voice-agent-lab.prev-$STAMP/.env.research --memory 768m --no-healthcheck -v /srv/valr-data:/data:ro voice-agent-lab-worker:rollback-$STAMP-voice-research
+  sudo docker rm -f voice-research && sudo docker run -d --name voice-research --restart unless-stopped --network voice-agent-lab --env-file ~/voice-agent-lab.prev-$STAMP/.env --env-file ~/voice-agent-lab.prev-$STAMP/.env.research --memory 768m --no-healthcheck -v /srv/valr-data:/data:ro -v /srv/valr-data-live:/data-live -e VALR_PERFORMANCE_PATH=/data-live/performance.json -e VALR_PERFORMANCE_CSV=/data-live/performance_scores.csv -e VALR_PERFORMANCE_FALLBACK=/data/performance.json voice-agent-lab-worker:rollback-$STAMP-voice-research
   # callbacks (only if it was restarted)
   sudo docker rm -f voice-callbacks && sudo docker run -d --name voice-callbacks --restart unless-stopped --env-file ~/voice-agent-lab.prev-$STAMP/.env --network voice-agent-lab --no-healthcheck voice-agent-lab:rollback-$STAMP-voice-callbacks python -m app.callback_worker
   # source tree

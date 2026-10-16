@@ -10,7 +10,6 @@ read as a task for the owner ("Reconnect Google in 2 days") rather than a fault.
 Plain words only: no env vars, workflows or codes. Pure; tested in tests/test_valr_pages.py.
 """
 import math
-import re
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -184,10 +183,14 @@ def todos(view: dict[str, Any], attention: list[dict[str, Any]],
             if slot.get("brief"):
                 out.append({"title": f"Read your {name} briefing", "href": f"/valr/interviews/{slot['ref']}",
                             "kind": "prep"})
-            prep = [p for p in slot["detail"].get("prep") or [] if wording.good_prep(p)]
+            prep = prep_lines(slot)
             if prep:
-                out.append({"title": f"Go through your {name} prep: {len(prep)} item{'s' if len(prep) != 1 else ''}",
-                            "href": f"/valr/interviews/{slot['ref']}#prep", "kind": "prep"})
+                done = prep_done(slot, prep)
+                title = (f"{name} prep: all {len(prep)} done" if done == len(prep) else
+                         f"Go through your {name} prep: {done} of {len(prep)} done" if done else
+                         f"Go through your {name} prep: {len(prep)} item{'s' if len(prep) != 1 else ''}")
+                out.append({"title": title, "href": f"/valr/interviews/{slot['ref']}#prep", "kind": "prep",
+                            "done": done == len(prep)})
     out += [{"title": i["title"], "fix": i["fix"], "kind": "fix"} for i in attention if i.get("todo")]
     for lead in (leads or {}).get("leads") or []:
         if lead.get("waiting_on_you"):
@@ -203,5 +206,19 @@ def todos(view: dict[str, Any], attention: list[dict[str, Any]],
     return out[:limit]
 
 
+def prep_lines(slot: dict[str, Any]) -> list[str]:
+    return [p for p in (slot.get("detail") or {}).get("prep") or [] if wording.good_prep(p)]
+
+
+def prep_done(slot: dict[str, Any], lines: list[str]) -> int:
+    """How many of these prep lines are ticked (server-side, app/interview_store.prep_checks)."""
+    from app.interview_store import prep_item
+    ticked = set(slot.get("prep_done") or [])
+    return sum(1 for line in lines if prep_item(line) in ticked)
+
+
 def past_slug(interview: dict[str, Any]) -> str:
-    return re.sub(r"[^A-Za-z0-9-]+", "-", str(interview.get("id") or interview.get("date") or "interview")).strip("-")
+    """"fathom:1000" -> "fathom-1000": every character but a letter or digit becomes "-", the
+    same rule as the old /valr#past-<provider>-<id> anchors, so those resolve one to one."""
+    raw = str(interview.get("id") or interview.get("date") or "interview")
+    return "".join(ch if ch.isascii() and ch.isalnum() else "-" for ch in raw)[:80]

@@ -398,6 +398,22 @@ anonymised caller hashes, never numbers.
   `/data/pronounce.json`); never committed. It is mounted read-only
   as `/data` into `voice-agent-lab` and `voice-research`
   (`-v /srv/valr-data:/data:ro`; `deploy/research-setup.sh` adds it when the dir exists).
+- Worker data (writable): the research worker's post-call loop rewrites `performance.json`
+  and `performance_scores.csv` after each scored interview, so those two live in
+  `/srv/valr-data-live` (owner 1000:1000, the image's `app` user; 0750; files 0600),
+  mounted read-write at `/data-live` in `voice-research` only and read-only at `/data-live`
+  in `voice-agent-lab`, so the pages show the fresh scores. `/data` stays read-only.
+  Both containers get `VALR_PERFORMANCE_PATH=/data-live/performance.json` and
+  `VALR_PERFORMANCE_CSV=/data-live/performance_scores.csv` as `-e` options (they override
+  `.env`); the worker also gets `VALR_PERFORMANCE_FALLBACK=/data/performance.json`, read
+  while the live file does not exist yet. `deploy/valr-data-live.sh` holds all of it:
+  `sudo sh deploy/valr-data-live.sh setup` creates the dir and seeds it from
+  `/srv/valr-data` with `cp -n` (never overwrites; `deploy/deploy-all.sh` runs it on every
+  deploy), and `sh deploy/valr-data-live.sh app|worker` prints the docker run options
+  (just the `/data` mount when the live dir does not exist). After re-running the profile
+  import offline, copy the new `performance.json` into `/srv/valr-data-live` too (it is
+  not re-seeded over an existing file). `evaluation.json` and `profile.json` stay in
+  `/data`: nothing in the containers writes them.
 - `.env`: VALR_OWNER_PHONE, VALR_OWNER_EMAILS, VALR_PROFILE_PATH=/data/profile.json,
   VALR_EVALUATION_PATH=/data/evaluation.json, VALR_CALENDAR_ICS_URL, VALR_TOKEN_KEY (a
   Fernet key), VALR_GMAIL_ACCOUNT, GOOGLE_OAUTH_CLIENT_ID/SECRET, VALR_CONTEXT_TOKEN.
@@ -411,8 +427,31 @@ anonymised caller hashes, never numbers.
   `deploy/install-telegram.sh` on the Mac (prompts for the @BotFather token, generates
   TELEGRAM_WEBHOOK_SECRET, writes both to `.env`, restarts the app and the worker, calls
   setWebhook), then link the chat with the dashboard's `/start <code>`.
-- The app container now runs with the data mount:
-  `sudo docker run -d --name voice-agent-lab --restart unless-stopped --env-file .env --network voice-agent-lab -v /srv/valr-data:/data:ro -p 127.0.0.1:7860:7860 voice-agent-lab:latest`
+- Notetakers (app/notetakers): keys are pasted on the dashboard ("Get set up") and stored
+  Fernet-encrypted in Postgres with VALR_TOKEN_KEY; nothing to deploy for that. Webhooks
+  need two more exact-path POST bypasses on `valr.haciensus.com`, each verified in the
+  app: `/hooks/fathom` (FATHOM_WEBHOOK_SECRET, Standard Webhooks) and `/hooks/granola`
+  (GRANOLA_WEBHOOK_SECRET, Standard Webhooks). Fireflies is a one-time history import
+  (no webhook). An unset secret answers 503. Register them
+  at each provider: Fathom Settings → API Access → Add Webhook (or `POST /webhooks`) with
+  destination `https://valr.haciensus.com/hooks/fathom`, "my recordings", transcript and
+  summary on, and its `whsec_` secret in `.env`; Granola Settings → Connectors → Webhooks
+  (`note.generated`, Business plan and up). Everything else (`/valr/api/notetakers/*`,
+  `/valr/api/recording`) stays behind Access.
+- Lead tracker (docs/leads.md): `valr.haciensus.com/hooks/gmail` (exact path, POST) is
+  bypassed (Pub/Sub cannot log in); the app accepts only Pub/Sub's OIDC token for the push
+  service account and audience. `.env` (read by both containers): VALR_LEADS=1,
+  VALR_GMAIL_TOPIC, VALR_GMAIL_SUBSCRIPTION, VALR_GMAIL_PUSH_SA, VALR_GMAIL_PUSH_AUDIENCE.
+  GCP (project framer-511620, the OAuth client's project): Pub/Sub API, topic `valr-gmail`
+  (gmail-api-push@system.gserviceaccount.com is Publisher), push subscription
+  `valr-gmail-push` with OIDC. Check: `sudo docker exec voice-research python -m app.lead_worker stats`.
+- The app container runs with the data mounts (from `~/voice-agent-lab`):
+  `sudo docker run -d --name voice-agent-lab --restart unless-stopped --env-file .env --network voice-agent-lab $(sh deploy/valr-data-live.sh app) -p 127.0.0.1:7860:7860 voice-agent-lab:latest`
+- Turning the lead tracker on and deploying, from the Mac at the repo root:
+  `bash deploy/enable-leads-and-deploy.sh` (sets the five lead settings in the VM `.env`
+  without printing it, sets up `/srv/valr-data-live`, runs `deploy/deploy-all.sh`, then
+  prints `/healthz`, the worker's lead/post-call log lines, the two Gmail schedules and
+  the lead counts).
 - Check: `sudo docker exec voice-research python -m app.research_worker blocks` (dry run)
   or `... sync` (sync now, then the blocks and their workflows).
 

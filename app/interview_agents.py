@@ -134,6 +134,8 @@ class PrivateInputs:
     gmail_token: str | None = None
     gmail_status: str = ""
     pushed_texts: list[str] = field(default_factory=list)
+    fathom_key: str | None = None  # Decrypted from the dashboard's store (app/notetakers), or None.
+    granola_key: str | None = None
 
 
 def names_line(people: list[Person]) -> str:
@@ -169,11 +171,12 @@ def interview_tools(part: str, ctx: Ctx, event: SlotEvent, interviewers: list[Pe
 
         @tool("past_rounds")
         def rounds_tool(company: str) -> str:
-            """Earlier rounds with this company: Fathom recordings, the analysed interview
-            history and any pushed email context. Call once."""
+            """Earlier rounds with this company: Fathom recordings, Granola notes, the analysed
+            interview history and any pushed email context. Call once."""
             def fetch() -> tuple[str, list[str]]:
                 terms = search_terms(event, interviewers) + [company]
-                pieces = [private_sources.fathom_search(_private_http(), terms),
+                pieces = [private_sources.fathom_search(_private_http(), terms, private.fathom_key),
+                          private_sources.granola_search(_private_http(), terms, private.granola_key),
                           private_sources.history(event.company or company, terms),
                           private_sources.pushed(private.pushed_texts)]
                 return "\n\n".join(text for text, _ in pieces if text), \
@@ -343,10 +346,16 @@ def classify_people(people: list[Person], evidence: str, meter: Meter,
 
 # Synthesis for one interview.
 
-SLOT_HOW = """You prepare a phone briefing for Chirag, a candidate, about one upcoming interview.
+def owner() -> str:
+    """The owner's first name for the briefing prompt (as app/interviews.owner_name)."""
+    name = os.getenv("VALR_OWNER_NAME", "").strip() or os.getenv("VALR_CANDIDATE_NAME", "").strip()
+    return name.split()[0] if name else "the candidate"
+
+
+SLOT_HOW = """You prepare a phone briefing for {owner}, a candidate, about one upcoming interview.
 Interview: {subject}
 Write two things.
-1. spoken: 120 to 190 words that the assistant will say to Chirag on a phone call, in three
+1. spoken: 120 to 190 words that the assistant will say to {owner} on a phone call, in three
    beats it can pause between:
    (a) the company in a sentence or two, with its one standout fact;
    (b) the logistics: when and how long, the format, who he's meeting and their roles, and what
@@ -354,7 +363,7 @@ Write two things.
        the history of reschedules);
    (c) how to win: what this round likely covers, the one part of his background that fits it
        best (use the candidate profile below), the market pay range if found (only the market
-       range: never Chirag's own figures), and one personal tip from his self-evaluation below.
+       range: never {owner}'s own figures), and one personal tip from his self-evaluation below.
    Write for the ear, as a friend briefing him: talk to him as "you", use contractions and short
    sentences (mostly under fifteen words), and link the beats with natural spoken transitions
    ("Now, who you're meeting.", "So, how to win this one."). Never enumerate ("first", "second",
@@ -441,7 +450,7 @@ def synthesize_slot(event: SlotEvent, interviewers: list[Person], parts: dict[st
                   backstory="You write for the ear and never add facts beyond the research.",
                   llm=llm, max_iter=2, max_execution_time=int(seconds), allow_delegation=False,
                   verbose=False, cache=False)
-    description = (SLOT_HOW.format(subject=subject(event, interviewers), notes_max=NOTES_MAX)
+    description = (SLOT_HOW.format(subject=subject(event, interviewers), notes_max=NOTES_MAX, owner=owner())
                    + f"\nCandidate profile (data):\n{clip(profile_text, 1500)}"
                    + f"\nHis self-evaluation (data):\n{clip(evaluation_text, 1500)}"
                    + "\nResearch:\n" + research_block(parts))

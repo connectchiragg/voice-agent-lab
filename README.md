@@ -701,7 +701,9 @@ gathers, `app/valr_page.py` renders, `static/valr.js` adds the live parts). Writ
 user who did not build VALR: plain words, every time as "11:15 AM IST" (ASSISTANT_TIMEZONE)
 with a relative "in 2 h 25 min". Top to bottom: what VALR does, the next briefing call and
 the three actions (call VALR now, pause or resume calls, sync the calendar); set-up steps
-until Google, Fathom, the phone number and a test call are done; the week's interviews,
+until Google, a notetaker, Telegram, the phone number and a test call are done, each step a
+link or button that does it (Google consent, the notetaker key forms, a t.me link that sends
+the `/start` code, the phone check explained, a `tel:` link to VALR); the week's interviews,
 each opening a detail view (the briefing, who you're meeting, what this round is like,
 likely questions, the pay band against your target, a prep checklist, what your emails
 and past rounds say, the company); performance (scorecards out of 10, a trend with
@@ -719,6 +721,26 @@ VALR_BRIEFING_DIAL=0 stays the hard off). Performance reads `interview_scorecard
 `VALR_DEV_PREVIEW=1 python scripts/preview_ui.py` serves both pages with made-up data at
 http://127.0.0.1:8090 (`/valr?scenario=empty`, `error`, `down` for the other states).
 
+**Notetakers** (`app/notetakers/`): Fathom, Fireflies and Granola behind one interface
+(verify a key, list recordings in a date range, one recording's transcript and summary in
+the profile importer's meeting shape, its share and embed links). The owner connects each
+on the dashboard ("Get set up"): the key is posted to the server, checked with one call,
+stored Fernet-encrypted (VALR_TOKEN_KEY) and never shown again; an environment key
+(FATHOM_API_KEY...) still works. New recordings arrive by webhook (`/hooks/fathom`,
+`/hooks/granola`, both signed; Access bypasses in docs/deploy.md) or "Check for new
+recordings" (Fireflies, no longer used, is a one-time history import), are matched to a calendar event (time window + attendee
+emails) and handed to the per-interview evaluation through VALR_EVAL_HOOK
+(`app/notetakers/pipeline.py` documents the interface; without one they wait, listed by
+`python -m app.notetakers pending`). Granola keeps no audio: notes only, by API key
+(Business plan and up) or an uploaded export. A past interview's detail view (and each
+scorecard's "Watch recording") shows a "Watch on Fathom" deep link and key moments as
+`?timestamp=` links; the recording is embedded (`fathom.video/embed/<token>`) only when its
+share link opens without a login (checked, cached 12 h), so a private recording never
+shows a broken player. Fireflies documents no embed or timestamp links, so it links out.
+R1 (interview research) reads the stored Fathom and Granola keys. `GET
+/valr/api/past-interviews?days=60` lists past interviews with their matched recordings
+(for the Past Interviews page).
+
 **Context push (optional).** A Mac-side job (not built) may POST per-interview email
 context to `/valr/context` (JSON {event_key?, company?, subject?, summary?, excerpt?, notes?},
 8 KB) with an Access service token plus `Authorization: Bearer VALR_CONTEXT_TOKEN`;
@@ -728,6 +750,19 @@ it is stored encrypted and R1 reads it for that event or company.
 briefs (about 2,500 tokens in all); Groq's free tier allows 8,000 input tokens a minute,
 so long quiz sessions lean on the gpt-oss-20b hedge. ICS keys are mapped to Google's ids,
 but switching sources can make a recurring event look new once (a cache hit if unchanged).
+
+### Lead tracker (owner only)
+
+Every email about the owner's own job search becomes part of a **lead**: one per company or
+opportunity, merged with his calendar interviews, Fathom recordings and interview scores.
+Gmail pushes through Cloud Pub/Sub to `/hooks/gmail` (Pub/Sub's OIDC token verified), with
+a 30-minute safety poll and a daily watch renewal (Temporal Schedules). Cheap heuristics
+drop job alerts and bulk mail; Claude Haiku decides the rest (25/25 on a synthetic eval set,
+$0.00017 per call, about $0.25 a month). Only decisions, metadata and 20-word summaries are
+stored, never bodies. Each lead has a stage, expires after 30 quiet days, and has a 0-100
+temperature with its parts shown: recency, stage, momentum and quality. `/valr/leads` draws
+the leads as a 3D globe, coloured from cold blue to hot orange, with a list fallback. Details,
+data model, formula and the embeddable globe API: [docs/leads.md](docs/leads.md).
 
 ## Run locally
 
@@ -746,7 +781,7 @@ To test over the public internet, see [docs/deploy.md](docs/deploy.md).
 
 ```sh
 python -m pytest
-node --test tests/audio-player.test.mjs
+node --test tests/audio-player.test.mjs tests/leads-globe.test.mjs
 node tests/audio-worklet.test.mjs
 ```
 
