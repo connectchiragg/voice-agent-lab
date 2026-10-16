@@ -135,7 +135,7 @@ def header(view: dict[str, Any], clock: Clock, email: str) -> str:
 <header class="topbar">
   <a class="brand" href="#top"><span class="brand-dot" aria-hidden="true"></span>valr<span class="brand-sub">/ interview copilot</span></a>
   <nav class="nav" aria-label="Sections">
-    <a href="#upcoming">Interviews</a><a href="#performance">Performance</a><a href="#system">System</a>
+    <a href="#upcoming">Interviews</a><a href="#performance">Performance</a><a href="/valr/leads">Leads</a><a href="#system">System</a>
   </nav>
   <p class="tz mono" title="Signed in as {e(email)}"><span class="live-dot" aria-hidden="true"></span>
     Times in {e(clock.abbr)} · updated <span data-updated>{clock.time(view['generated_at'], zone=False)}</span></p>
