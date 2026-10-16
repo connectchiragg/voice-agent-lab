@@ -78,6 +78,22 @@ class MemoryStore:
     async def unread_count(self, since):
         return sum(1 for r in self.rows if not r["read_at"] and r["created_at"] >= since and r["kind"] not in n.REMOVED)
 
+    async def email_items(self, since):
+        return {r["source_id"].removeprefix("gmail:"): {"id": r["id"], "read_at": r["read_at"]} for r in self.rows
+                if str(r["source_id"]).startswith("gmail:") and r["created_at"] >= since}
+
+    async def mark_read(self, ids, now):
+        hit = [r for r in self.rows if not r["read_at"] and (ids is None or r["id"] in ids)]
+        for r in hit:
+            r["read_at"] = now
+        return len(hit)
+
+    async def mark_unread(self, ids):
+        hit = [r for r in self.rows if r["read_at"] and r["id"] in ids]
+        for r in hit:
+            r["read_at"] = None
+        return len(hit)
+
     async def switches(self):
         return n.Switches.from_row(self.settings or None)
 
@@ -458,3 +474,97 @@ def test_a_processed_call_recording_is_one_immediate_item_linking_to_its_past_in
     assert run(n.from_recording(store, "phone", "ab12", "Northwind Labs", "Sam", NOW)) is None  # Once per recording.
     run(n.from_recording(store, "phone", "cd34", "", "Sam", NOW))
     assert store.rows[-1]["title"] == "Call with Sam is ready"
+
+
+# Unread mail: every kept inbound job email still unread in Gmail is in the bell.
+
+def kept_touch(message_id, at, thread=None, category="interviewer_followup", direction="in", company="Acme",
+               action_requested=None, action="", lead_id=""):
+    from app.leads import Touch
+    return Touch(id=f"gmail:{message_id}", kind="email", at=at, company=company, title="Next steps",
+                 summary="Recruiter follow-up.", direction=direction, thread=thread or f"t-{message_id}",
+                 url=f"https://mail.google.com/mail/#all/t-{message_id}", category=category,
+                 action_requested=action_requested, action=action, lead_id=lead_id)
+
+
+def test_unread_kept_emails_appear_and_read_ones_do_not():
+    store = MemoryStore()
+    kept = [kept_touch("u1", NOW - timedelta(days=3), lead_id="lead-acme"),
+            kept_touch("u2", NOW - timedelta(days=12), category="application_update", company="Tessel"),
+            kept_touch("r1", NOW - timedelta(days=2)),                       # Read in Gmail.
+            kept_touch("o1", NOW - timedelta(days=1), direction="out"),     # His own mail.
+            kept_touch("n1", NOW - timedelta(days=1), category="newsletter")]
+    out = run(n.sync_unread(store, kept, {"u1", "u2", "o1", "n1", "x9"}, True, {}, NOW, {"gmail:u2"}))
+    assert out == {"added": 2, "read": 0, "unread": 0}
+    rows = {r["source_id"]: r for r in store.rows}
+    assert set(rows) == {"gmail:u1", "gmail:u2"}
+    assert rows["gmail:u1"]["created_at"] == NOW - timedelta(days=3)  # Dated when it arrived: grouped by day.
+    assert rows["gmail:u1"]["lead_id"] == "lead-acme" and rows["gmail:u1"]["link"] == "/valr/leads?lead=lead-acme"
+    assert rows["gmail:u2"]["kind"] == "update" and rows["gmail:u2"]["title"] == "Tessel sent an update"
+    assert run(store.unread_count(NOW - n.KEEP_FOR)) == 2  # The bell's count.
+    days = [n.view(r, NOW)["day"] for r in run(store.listing(True, NOW - n.KEEP_FOR))]
+    assert days == ["Earlier", "Earlier"]
+    assert run(n.sync_unread(store, kept, {"u1", "u2"}, True, {}, NOW, set()))["added"] == 0  # Once each.
+
+
+def test_the_unread_backfill_is_silent_no_push_no_telegram_no_digest():
+    store, bot, sender = MemoryStore(), Bot(), PushSender()
+    kept = [kept_touch("u1", NOW - timedelta(hours=2), category="offer"), kept_touch("u2", NOW - timedelta(days=4))]
+    run(n.sync_unread(store, kept, {"u1", "u2"}, True, {}, NOW, set()))
+    assert len(store.rows) == 2 and all(not r["read_at"] for r in store.rows)
+    for at in (NOW, ist(9, 5)):  # A normal pass and the digest hour.
+        result = run(n.dispatch(store, at, bot, chat=1, sender=sender))
+        assert result["sent"] == result["digest"] == result["pushed"] == 0
+    assert bot.sent == [] and sender.sent == []
+
+
+def test_reading_in_gmail_reads_the_item_and_marking_unread_brings_it_back():
+    store = MemoryStore()
+    kept = [kept_touch("u1", NOW - timedelta(days=1)), kept_touch("u2", NOW - timedelta(days=2)),
+            kept_touch("u3", NOW - timedelta(days=3))]
+    run(n.sync_unread(store, kept, {"u1", "u2", "u3"}, True, {}, NOW, set()))
+    row = lambda i: store.by_source(f"gmail:{i}")  # noqa: E731
+    # The unread list no longer has u1: read in Gmail.
+    assert run(n.sync_unread(store, kept, {"u2", "u3"}, True, {}, NOW, set()))["read"] == 1
+    assert row("u1")["read_at"] and not row("u2")["read_at"]
+    # A cut-short list reads nothing it does not see; the history's labelRemoved still reads.
+    assert run(n.sync_unread(store, kept, {"u3"}, False, {"u2": False}, NOW, set()))["read"] == 1
+    assert row("u2")["read_at"] and not row("u3")["read_at"]
+    # No list at all (rate limited): the history alone.
+    assert run(n.sync_unread(store, kept, None, False, {"u3": False}, NOW, set()))["read"] == 1
+    # Marked unread again in Gmail (labelAdded UNREAD): the dot comes back.
+    assert run(n.sync_unread(store, kept, {"u1"}, True, {"u1": True}, NOW, set()))["unread"] == 1
+    assert not row("u1")["read_at"]
+    # Read in VALR while still unread in Gmail: stays read.
+    run(store.mark_read([row("u1")["id"]], NOW))
+    run(n.sync_unread(store, kept, {"u1"}, True, {}, NOW, set()))
+    assert row("u1")["read_at"]
+
+
+def test_new_mail_still_pushes_and_is_not_doubled_by_the_unread_pass():
+    store, bot, sender = MemoryStore(), Bot(), PushSender()
+    mail = email("m1", "t-m1", at=NOW - timedelta(minutes=5))
+    run(n.from_email(store, mail, decision("scheduling"), touch(), False, NOW))
+    kept = [kept_touch("m1", mail.at, thread="t-m1", category="scheduling")]
+    assert run(n.sync_unread(store, kept, {"m1"}, True, {}, NOW, set()))["added"] == 0
+    result = run(n.dispatch(store, NOW, bot, chat=1, sender=sender))
+    assert result["pushed"] == 1 and result["sent"] == 1 and len(store.rows) == 1
+
+
+def test_new_mail_already_read_in_gmail_is_not_pushed():
+    store, sender = MemoryStore(), PushSender()
+    mail = email("m1", "t-m1", at=NOW - timedelta(minutes=5))
+    run(n.from_email(store, mail, decision("scheduling"), touch(), False, NOW))
+    run(n.sync_unread(store, [kept_touch("m1", mail.at, thread="t-m1")], set(), True, {}, NOW, set()))
+    assert run(n.dispatch(store, NOW, None, None, sender=sender))["pushed"] == 0 and sender.sent == []
+
+
+def test_max_age_push_48_hours_bell_30_days():
+    store, sender = MemoryStore(), PushSender()
+    three_days = email("m3", "t-m3", at=NOW - timedelta(days=3))
+    assert run(n.from_email(store, three_days, decision("scheduling"), touch(), False, NOW)) is None  # No push.
+    kept = [kept_touch("m3", three_days.at, category="scheduling"), kept_touch("m29", NOW - timedelta(days=29)),
+            kept_touch("m31", NOW - timedelta(days=31))]
+    run(n.sync_unread(store, kept, {"m3", "m29", "m31"}, True, {}, NOW, set()))
+    assert {r["source_id"] for r in store.rows} == {"gmail:m3", "gmail:m29"}  # In the bell, silently.
+    assert run(n.dispatch(store, NOW, None, None, sender=sender))["pushed"] == 0

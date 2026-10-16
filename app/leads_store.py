@@ -262,6 +262,24 @@ async def touches(connection: Any) -> list[Touch]:
     return [touch_from_row(*row) for row in await cursor.fetchall()]
 
 
+async def kept_inbound(connection: Any, since: datetime) -> list[Touch]:
+    """Kept inbound email touchpoints since `since` (the bell's unread pass)."""
+    cursor = await connection.execute(
+        "SELECT id, kind, at, lead_id, data FROM lead_touchpoints WHERE kind = 'email' AND at >= %s "
+        "AND data->>'direction' = 'in' ORDER BY at", (since,))
+    return [touch_from_row(*row) for row in await cursor.fetchall()]
+
+
+async def thread_starters(connection: Any, threads: list[str]) -> set[str]:
+    """The touch ids of the first kept email of each of these Gmail threads."""
+    if not threads:
+        return set()
+    cursor = await connection.execute(
+        "SELECT DISTINCT ON (data->>'thread') id FROM lead_touchpoints WHERE kind = 'email' "
+        "AND data->>'thread' = ANY(%s) ORDER BY data->>'thread', at", (list(set(threads)),))
+    return {row[0] for row in await cursor.fetchall()}
+
+
 # Leads.
 
 async def save_leads(connection: Any, leads: list[Lead], all_touches: list[Touch], now: datetime) -> None:

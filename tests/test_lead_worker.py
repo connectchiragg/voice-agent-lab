@@ -99,6 +99,8 @@ class FakeGmail:
         self.history_gone = False
         self.calls: list[str] = []
         self.gets_allowed: int | None = None  # Then every messages.get is rate limited.
+        self.unread: set[str] = set()  # What "is:unread newer_than:30d" lists.
+        self.label_events: list[dict] = []  # Extra history items (labelsAdded / labelsRemoved).
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path.removeprefix("/gmail/v1/users/me")
@@ -110,6 +112,8 @@ class FakeGmail:
         if path == "/profile":
             return httpx.Response(200, json={"emailAddress": OWNER, "historyId": str(self.history_id)})
         if path == "/messages":
+            if request.url.params.get("q", "").startswith("is:unread"):
+                return httpx.Response(200, json={"messages": [{"id": i} for i in sorted(self.unread)]})
             return httpx.Response(200, json={"messages": [{"id": i} for i in self.messages]})
         if path.startswith("/messages/"):
             found = self.messages.get(path.rsplit("/", 1)[1])
@@ -118,7 +122,7 @@ class FakeGmail:
             if self.history_gone:
                 return httpx.Response(404)
             return httpx.Response(200, json={"historyId": str(self.history_id), "history": [
-                {"id": "1", "messagesAdded": [{"message": {"id": i}} for i in self.history]}]})
+                {"id": "1", "messagesAdded": [{"message": {"id": i}} for i in self.history]}, *self.label_events]})
         if path == "/watch":
             return httpx.Response(200, json={"historyId": str(self.history_id), "expiration": str(int((NOW + timedelta(days=7)).timestamp() * 1000))})
         return httpx.Response(404)
@@ -170,7 +174,7 @@ def world(monkeypatch, tmp_path):
         async with await connect() as connection:
             await connection.execute("DROP TABLE IF EXISTS gmail_state, lead_emails, lead_touchpoints, leads, "
                                      "lead_overrides, research_spend, research_jobs, calendar_events, "
-                                     "calendar_state, oauth_tokens, telegram_link")
+                                     "calendar_state, oauth_tokens, telegram_link, notifications, notify_settings")
     asyncio.run(reset())
     return gmail, activities, connect, key
 
@@ -353,3 +357,31 @@ def test_each_run_fetches_at_most_the_per_run_cap(world, monkeypatch):
     assert [p[1] for p in passes] == expected and all(p[0] == "backfill" for p in passes)
     assert len(gets(gmail)) == len(EMAILS) == len(set(gets(gmail)))
     assert asyncio.run(rows(connect, "SELECT backfill_done_at IS NOT NULL FROM gmail_state")) == [(True,)]
+
+
+@needs_postgres
+def test_the_bell_follows_gmail_unread_mail_silently_and_new_mail_still_notifies(world):
+    gmail, activities, connect, _ = world
+    now = datetime.now(timezone.utc)
+    inbound = next(e for e, item in EMAILS if item["step"] == "model" and item["expect"] == "keep")
+    for message_id, age in (("nw1", timedelta(days=5)), ("nw2", timedelta(days=6))):
+        gmail.messages[message_id] = raw_message(dataclasses.replace(inbound, id=message_id, thread_id=f"t-{message_id}",
+                                                                     at=now - age))
+    gmail.unread = {"nw1"}  # nw2 was read already.
+
+    first = asyncio.run(activities.gmail_sync(GmailSyncInput("poll")))
+    assert first.mode == "backfill"
+    bell = asyncio.run(rows(connect, "SELECT source_id, read_at, push_state, tg_state, created_at FROM notifications"))
+    assert [(r[0], r[1], r[2], r[3]) for r in bell] == [("gmail:nw1", None, "skipped", "skipped")]  # Silent.
+    assert abs(bell[0][4] - (now - timedelta(days=5))) < timedelta(seconds=1)  # Dated when it arrived.
+
+    # Next pass: he read nw1 in Gmail (labelRemoved UNREAD); a new email arrives, unread.
+    gmail.messages["nw3"] = raw_message(dataclasses.replace(inbound, id="nw3", thread_id="t-nw3",
+                                                            at=now - timedelta(minutes=3)))
+    gmail.history, gmail.history_id, gmail.unread = ["nw3"], 5100, {"nw3"}
+    gmail.label_events = [{"id": "2", "labelsRemoved": [{"message": {"id": "nw1"}, "labelIds": ["UNREAD"]}]}]
+    second = asyncio.run(activities.gmail_sync(GmailSyncInput("push", 5100)))
+    assert second.mode == "history"
+    bell = {r[0]: r[1:] for r in asyncio.run(rows(connect, "SELECT source_id, read_at IS NOT NULL, push_state "
+                                                            "FROM notifications"))}
+    assert bell == {"gmail:nw1": (True, "skipped"), "gmail:nw3": (False, "pending")}  # Read; the new one pushes.

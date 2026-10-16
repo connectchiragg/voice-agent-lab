@@ -58,6 +58,11 @@ def test_notification_store_sql():
                                      "OR tg_state = 'pending' OR push_state = 'pending')", (list(n.REMOVED),))
             assert (await cursor.fetchone())[0] == 0
             assert (await store.switches()).digest is True
+            # The unread pass: items by Gmail message id; read, then unread again.
+            items = await store.email_items(now - timedelta(days=1))
+            assert set(items) == {"1"} and items["1"]["read_at"] is not None
+            assert await store.mark_unread([items["1"]["id"]]) == 1
+            assert (await store.email_items(now - timedelta(days=1)))["1"]["read_at"] is None
             await store.save_switches(digest=False)
             await store.save_switches(last_digest_on=now.date())
             switches = await store.switches()

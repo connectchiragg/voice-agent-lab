@@ -31,6 +31,9 @@ def pool():
     return research.pool
 
 
+LIST_MAX = 500
+
+
 @router.get("/valr/api/notifications")
 async def listing(request: Request, unread: int = 0) -> JSONResponse:
     await valr_dashboard.owner(request)
@@ -39,7 +42,7 @@ async def listing(request: Request, unread: int = 0) -> JSONResponse:
     async with pool().connection() as connection:
         store = notifications.Store(connection)
         await store.setup()
-        rows = await store.listing(bool(unread), since)
+        rows = await store.listing(bool(unread), since, LIST_MAX)  # Every unread item of 30 days fits.
         count = await store.unread_count(since)
         switches = await store.switches()
     return JSONResponse({"ok": True, "unread": count, "items": [notifications.view(r, now) for r in rows],

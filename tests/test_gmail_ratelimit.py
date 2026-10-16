@@ -125,3 +125,31 @@ def test_list_and_history_calls_are_paced_too(clock):
     asyncio.run(gmail_api.history(http, TOKEN, 1))
     asyncio.run(gmail_api.search(http, TOKEN, "q", 10))
     assert clock.slept == pytest.approx([0.5, 0.2])  # list: 5 units at 10/s; then history: 2 units.
+
+
+def test_history_reports_unread_label_changes_and_the_unread_list(clock):
+    seen = []
+
+    def handler(request):
+        seen.append(request.url)
+        if request.url.path.endswith("/history"):
+            return httpx.Response(200, json={"historyId": "12", "history": [
+                {"id": "10", "messagesAdded": [{"message": {"id": "new1", "labelIds": ["UNREAD", "INBOX"]}}]},
+                {"id": "11", "labelsRemoved": [{"message": {"id": "a"}, "labelIds": ["UNREAD"]},
+                                               {"message": {"id": "b"}, "labelIds": ["INBOX"]}]},
+                {"id": "12", "labelsAdded": [{"message": {"id": "c"}, "labelIds": ["UNREAD"]}]}]})
+        if request.url.params.get("pageToken"):
+            return httpx.Response(200, json={"messages": [{"id": "u3"}, {"id": "u4"}]})
+        return httpx.Response(200, json={"messages": [{"id": "u1"}, {"id": "u2"}], "nextPageToken": "p2"})
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    gmail_api._pacer = gmail_api.Pacer(1e9, clock=clock, sleep=clock.sleep)
+    changes = {}
+    refs, latest = asyncio.run(gmail_api.history(http, TOKEN, 1, unread=changes))
+    assert [r["id"] for r in refs] == ["new1"] and latest == 12
+    assert changes == {"a": False, "c": True}
+    assert seen[0].params.get_list("historyTypes") == ["messageAdded", "labelAdded", "labelRemoved"]
+    ids, complete = asyncio.run(gmail_api.unread_ids(http, TOKEN, cap=10))
+    assert ids == {"u1", "u2", "u3", "u4"} and complete
+    assert seen[-1].params["q"] == "is:unread newer_than:30d"
+    ids, complete = asyncio.run(gmail_api.unread_ids(http, TOKEN, cap=3))
+    assert len(ids) == 3 and not complete  # Cut short: the caller reads nothing by absence.
