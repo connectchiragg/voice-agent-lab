@@ -309,10 +309,11 @@ def test_telegram_mode_tile_statuses_and_start_code(client, monkeypatch):
     monkeypatch.setattr(telegram_api, "setup", none)
     monkeypatch.setattr(telegram_api, "new_code", new_code)
     page = client.get("/valr", headers=GOOD).text
-    assert "Next Telegram heads-up" in page and "Telegram heads-up at" in page
+    assert "Next heads-up on Telegram" in page and "Heads-up at <time" in page and "Telegram heads-up at" in page
+    assert "tries again" not in page and "messages you on Telegram" in page
     assert "Calling at 4:10 PM" in page and "Pause heads-ups" in page
     assert "Connect Telegram" in page and 'data-action="tgcode"' in page
-    assert "Telegram is not connected" in page and "not connected (send the /start code)" in page
+    assert "isn't connected yet" in page and "not connected (send the /start code)" in page
     csrf = token(client)
     headers = {**GOOD, "Content-Type": "application/json", "X-CSRF-Token": csrf}
     monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)

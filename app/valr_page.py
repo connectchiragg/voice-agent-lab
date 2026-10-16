@@ -26,7 +26,7 @@ CALL_STATUS = {
     "scheduled": ("Scheduled", "info"), "waiting": ("Scheduled", "info"),
     "waiting_for_call_end": ("After your current call", "info"),
     "waiting_for_research": ("Waiting for research", "info"), "calling": ("Calling you", "accent"),
-    "briefed": ("You were briefed", "ok"), "unanswered": ("Missed: no answer after 3 tries", "warn"),
+    "briefed": ("You were briefed", "ok"), "unanswered": ("Missed: no answer", "warn"),
     "missed": ("Too late to call", "warn"), "refused": ("Skipped: daily call limit", "bad"),
     "cancelled": ("Cancelled", "muted"), "paused": ("Skipped while paused", "warn"),
     "heads_up_sent": ("Heads-up sent", "ok"), "heads_up_failed": ("Heads-up not sent", "bad"),
@@ -154,10 +154,17 @@ def heads_up_card(view: dict[str, Any], clock: Clock) -> str:
                 '<p class="feature-big">Paused</p><p class="muted">VALR keeps researching but won\'t message you before '
                 'interviews. "Call me now" still works.</p>'
                 '<button class="btn" type="button" data-action="dials" data-paused="false">Resume heads-ups</button></div>')
-    warn = "" if tg.get("linked") else ('<p class="small tone-warn">Telegram is not connected: heads-ups '
-                                         'can\'t be sent. See "Get set up".</p>')
+    if tg.get("linked"):
+        warn = '<p class="small muted"><span class="dot live"></span> Telegram connected</p>'
+    elif tg.get("configured"):
+        warn = ('<p class="small tone-warn">Telegram isn\'t connected yet, so no heads-up can be sent. '
+                'Send the bot this code:</p><p><button class="btn small" type="button" data-action="tgcode">'
+                'Show /start code</button><code class="mono" data-tg-code hidden></code></p>')
+    else:
+        warn = ('<p class="small tone-warn">Telegram isn\'t set up yet, so no heads-up can be sent '
+                '(the owner runs deploy/install-telegram.sh with the bot token).</p>')
     if not nxt:
-        return ('<div class="feature"><p class="mono label">Next Telegram heads-up</p><p class="feature-big">None yet</p>'
+        return ('<div class="feature"><p class="mono label">Next heads-up</p><p class="feature-big">None yet</p>'
                 '<p class="muted">No interviews in the next 8 days. VALR messages you on Telegram 30 minutes '
                 f'before each one; tap 📞 to get the briefing call.</p>{warn}</div>')
     block = next((b for b in view["blocks"] if b["id"] == nxt["block"]), None)
@@ -165,8 +172,8 @@ def heads_up_card(view: dict[str, Any], clock: Clock) -> str:
     who = ", ".join(dict.fromkeys(s["company"] or s["title"] for s in block["slots"])) if block else nxt["label"]
     return f"""
 <div class="feature">
-  <p class="mono label"><span class="dot live"></span>Next Telegram heads-up</p>
-  <p class="feature-big num">{clock.time(nxt['at'])}</p>
+  <p class="mono label"><span class="dot live"></span>Next heads-up on Telegram</p>
+  <p class="feature-big num">Heads-up at {clock.time(nxt['at'])}</p>
   <p class="feature-rel">{e(clock.day(nxt['at']))} · {countdown(nxt['at'])}</p>
   <p>Before your {'interview' if n == 1 else f'{n} back-to-back interviews'} with <b>{e(who)}</b>.</p>
   <p class="muted small">Tap 📞 Call me now or ⏰ In 10 min for the briefing call. No reply, no call.</p>{warn}
@@ -194,12 +201,7 @@ def next_call_card(view: dict[str, Any], clock: Clock) -> str:
     block = next((b for b in view["blocks"] if b["id"] == nxt["block"]), None)
     n = len(block["slots"]) if block else 1
     who = ", ".join(dict.fromkeys(s["company"] or s["title"] for s in block["slots"])) if block else nxt["label"]
-    retry = ""
-    if block and nxt["attempt"] < 3:
-        start = datetime.fromisoformat(block["start"])
-        later = [start - timedelta(minutes=m) for m in (10, 5)][nxt["attempt"] - 1:]
-        retry = ("If you miss it, VALR tries again at "
-                 + " and ".join(clock.time(t.isoformat()) for t in later) + ".")
+    retry = "One call, no retries: if you miss it, call VALR or tap \"Call me now\"."
     return f"""
 <div class="feature">
   <p class="mono label"><span class="dot live"></span>Next briefing call</p>
@@ -217,8 +219,8 @@ def hero(view: dict[str, Any], clock: Clock) -> str:
     pause = ("" if not view.get("dial_env") and not telegram_mode(view) else
              f'<button class="btn" type="button" data-action="dials" data-paused="{"false" if paused else "true"}" '
              f'aria-pressed="{"true" if paused else "false"}">{"Resume " + noun if paused else "Pause " + noun}</button>')
-    lede = ("VALR messages you on Telegram 30 minutes before each interview with a researched briefing ready: "
-            "who you're meeting, what this round is like, the pay band, and what to practise. Tap 📞 and it calls you."
+    lede = ("VALR messages you on Telegram 30 minutes before each interview; tap to get a briefing call: "
+            "who you're meeting, what this round is like, the pay band, and what to practise."
             if telegram_mode(view) else
             "VALR calls you 30 minutes before each interview with a researched briefing: who you're meeting, "
             "what this round is like, the pay band, and what to practise.")
