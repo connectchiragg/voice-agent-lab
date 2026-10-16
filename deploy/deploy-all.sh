@@ -27,7 +27,7 @@ KEY=${KEY:-$HOME/.ssh/voice-agent-lab_ed25519}
 BRANCH=${BRANCH:-valr-interviews}
 WAIT_S=${WAIT_S:-900}
 STAMP=$(date -u +%Y%m%d-%H%M)
-REPO=$(git rev-parse --show-toplevel)
+REPO=$(git -C "$(dirname "$0")" rev-parse --show-toplevel)
 COMMIT=$(git -C "$REPO" rev-parse --short "$BRANCH")
 ssh_vm() { ssh -i "$KEY" -o ConnectTimeout=15 -o BatchMode=yes "$VM" "$@"; }
 say() { printf '\n== %s\n' "$*"; }
