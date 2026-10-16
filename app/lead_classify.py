@@ -7,7 +7,9 @@ Two steps, cheapest first:
    you a message", "interested in your profile"); Gmail's Promotions tab; other bulk mail
    (List-Unsubscribe, List-Id, Precedence bulk/list/junk, the Social/Forums tabs) unless its
    subject carries a strong process word (interview, assessment, offer letter, your
-   application); and anything with no job-search word at all. ATS and scheduling mail (Greenhouse,
+   application); and anything with no job-search word at all. His own outgoing mail
+   (`own_mail`) never reaches the model: in a thread already on a lead it is kept as a
+   touchpoint, otherwise skipped. ATS and scheduling mail (Greenhouse,
    Lever, Ashby...), and replies in a thread already on a lead, always go to step 2.
 2. `classify` (Claude Haiku through app/llm_gateway.py): keep or drop, a category, a
    confidence, a short reason, and what the lead tracker needs (company, role, the
@@ -252,9 +254,23 @@ def classify(email: Email, owner_emails: set[str], client: Any, model: str = MOD
     return decision
 
 
+def own_mail(email: Email, owner_emails: set[str], known_thread: bool) -> Decision | None:
+    """His own outgoing mail: skipped, unless the thread already belongs to a lead; then it
+    is a touchpoint with no model call. None for anyone else's mail."""
+    if email.from_email.lower() not in owner_emails:
+        return None
+    if known_thread and not set(email.labels) & DROP_LABELS:
+        return Decision(True, "own_reply_in_lead_thread", 1.0, "heuristic", "own_reply",
+                        summary="You replied in this thread.")
+    return Decision(False, "own_mail", 1.0, "heuristic", "own_reply")
+
+
 def decide(email: Email, owner_emails: set[str], known_thread: bool,
            ask: Callable[[Email], Decision] | None) -> Decision:
-    """Heuristics, then the model when allowed (`ask` None: over budget -> deferred)."""
+    """His own mail, heuristics, then the model when allowed (`ask` None: over budget -> deferred)."""
+    mine = own_mail(email, owner_emails, known_thread)
+    if mine is not None:
+        return mine
     early = prefilter(email, known_thread)
     if early is not None:
         return early

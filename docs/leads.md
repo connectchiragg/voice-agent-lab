@@ -55,6 +55,10 @@ daily (Schedule valr-gmail-watch) ──> GmailWatchWorkflow: users.watch again 
    These always go to the model: mail from ATS and scheduling tools (Greenhouse, Lever,
    Ashby, Calendly...) and replies in a thread that is already on a lead.
 
+   His **own outgoing mail** never goes to the model. In a thread that is already on a
+   lead (or kept in the same pass), it is kept as a touchpoint ("You replied in this
+   thread."). Otherwise it is skipped.
+
    The model is Claude Haiku 5.5 through `app/llm_gateway.py` (OpenRouter BYOK, with
    Anthropic direct as the fallback), with thinking off. It returns a decision, a
    category, a confidence and a reason. It also extracts the company, the role, the
@@ -71,6 +75,7 @@ daily (Schedule valr-gmail-watch) ──> GmailWatchWorkflow: users.watch again 
    next pass retries up to 40 deferred messages.
 4. **Merge** (`app/leads.py`). Leads are rebuilt from all touchpoints, in time order, on
    every refresh. The result is the same whatever order the sources arrived in.
+   - A later message in a Gmail thread that is already on a lead stays on that lead.
    - A touchpoint that names a company joins the lead with that company. Names match
      fuzzily: legal suffixes are removed, then either the difflib ratio is 0.88 or more,
      or one name is the start of the other ("Juniper" matches "Juniper Robotics").
@@ -80,8 +85,14 @@ daily (Schedule valr-gmail-watch) ──> GmailWatchWorkflow: users.watch again 
      email addresses, then by a person's name.
    - So an agency recruiter who pitches two companies **links** the two leads instead of
      merging them.
-   - Emails and calendar interviews can start a lead. Recordings and scores only attach
-     to an existing lead.
+   - Emails and calendar events can start a lead. Recordings and scores only attach to
+     an existing lead.
+   - Calendar events count when:
+     - the title says interview, round, technical, coding and so on, with a company or
+       an outside attendee (stage hint: interviewing);
+     - the title says intro, recruiter or screen, with an outside attendee (a recruiter
+       chat; stage hint: screening);
+     - the organizer or an attendee is already a contact on a Gmail lead (screening).
 5. **Stage, expiry and next step.**
    - The stage moves only forward: sourced → applied → screening → interviewing → offer.
    - A touchpoint can close a lead: closed-won or closed-lost.
@@ -92,6 +103,20 @@ daily (Schedule valr-gmail-watch) ──> GmailWatchWorkflow: users.watch again 
      (archived and hidden by default). Any new touchpoint revives it.
    - The next step is the next calendar interview, else the latest email's next step
      from the last 14 days.
+
+### Corrections (the lead panel's "Correct this lead")
+
+The owner's corrections are stored in `lead_overrides` and applied by every rebuild,
+on the page and in the worker.
+- **Dismiss** hides the lead. Its touchpoints and Gmail threads, as they were at that
+  moment, never count again: a new message in the same thread does not bring it back.
+  A new thread or calendar event can start it again.
+- **Set stage** fixes the stage until it is set back to "Automatic stage". The
+  temperature uses it, and the stage part says "(set by you)".
+- **Merge into** folds the lead, with its touchpoints and people, into another lead.
+
+API: `POST /valr/api/leads/<id>/override` {action: dismiss | stage | merge, stage?, into?}.
+It needs the owner, the CSRF token and a same-origin JSON request.
 
 ### Temperature (0–100)
 
@@ -111,9 +136,10 @@ maximum and a one-line reason), and the panel shows them as bars. Example: an em
 
 | Table | What | Not stored |
 |---|---|---|
-| `gmail_state` (one row) | account, last processed `history_id`, `watch_expires`, last push, last sync, backfill start, end and count, last error (class name) | tokens |
+| `gmail_state` (one row) | account, last processed `history_id`, `watch_expires`, last push, last sync, backfill start, end and count, last error (class name), `reconnect_alerted_for` (the expired token's connected_at, so the alert goes once) | tokens |
 | `lead_emails` | one row per message ever looked at: message and thread id, received time, **sender domain**, decision (keep/drop/deferred), method (heuristic/llm/deferred), reason, category, confidence, $ | subject, addresses, any text |
-| `lead_touchpoints` | id (`gmail:<msg>`, `cal:<event>`, `fathom:<recording>`, `perf:<interview>`), kind, time, lead id, `data` jsonb: company, domain, people [{email, name, role}], title, **derived summary** (≤ 24 words), direction, sentiment, cue, stage hint, next step, Gmail/Fathom link, interview-detail link, score, role; `snippet_enc`: the Gmail snippet (≤ 200 characters), Fernet-encrypted with VALR_TOKEN_KEY, never shown | message bodies |
+| `lead_touchpoints` | id (`gmail:<msg>`, `cal:<event>`, `fathom:<recording>`, `perf:<interview>`), kind, time, lead id, `data` jsonb: company, domain, people [{email, name, role}], title, **derived summary** (≤ 24 words), direction, sentiment, cue, stage hint, next step, Gmail/Fathom link, interview-detail link, score, role, Gmail thread id; `snippet_enc`: the Gmail snippet (≤ 200 characters), Fernet-encrypted with VALR_TOKEN_KEY, never shown | message bodies |
+| `lead_overrides` | the owner's corrections, replayed in order: lead id, kind (dismiss, stage, merge), value (the stage, or the lead merged into), the dismissed touchpoint ids and threads, who, when | |
 | `leads` | the last rebuild: company, key, domain, role, stage, status (active/expired), temperature, parts, contacts [{email, name, role}], touch count, last touch, next step, `archived_at` | |
 
 The page rebuilds the leads from the touchpoints on each request, so temperatures are
@@ -133,8 +159,12 @@ the owner's Access login (VALR_ADMIN_EMAILS).
 
 On the page:
 - **Filters**: active, expired or all; stage; minimum temperature.
-- **Globe**: click a lead for its panel (stage, the temperature bars, people, next step,
-  and a timeline with summaries, Gmail and Fathom links and the interview-detail link).
+- **Globe**: click a lead for its panel. It shows:
+  - the stage, the temperature bars, the people and the next step;
+  - a timeline with summaries, Gmail and Fathom links, and the interview-detail link:
+    `/valr#past-<provider>-<id>`, the cockpit's scorecard anchor as valr-eval builds it,
+    or `/valr#performance` when no recording is known;
+  - the corrections.
   Click a person for their leads.
 - **List**: every lead, below the globe. On phones (420 px or narrower) the list comes
   first and the globe appears on a tap. Without WebGL or JavaScript, the list is the page.
@@ -208,6 +238,15 @@ first poll backfills 30 days (at most 500 messages); the first watch turns push 
 To check: `sudo docker exec voice-research python -m app.lead_worker stats` (counts only),
 `... sync` and `... watch`.
 
+**When the Gmail token expires.** If the refresh token is refused (`invalid_grant`: the
+OAuth app's Testing mode lasts 7 days, or access was revoked), the sync stops. VALR sends
+the owner's linked Telegram chat one message per expiry: "Gmail disconnected — reconnect:
+https://valr.haciensus.com/oauth/google/start". A reconnect followed by another expiry
+sends one more message.
+
+A push for another account or subscription is acknowledged and ignored, with one log
+line and no alert.
+
 Settings:
 
 | Variable | Default | |
@@ -225,9 +264,9 @@ Settings:
 **Classifier**, on the 25 synthetic emails in `tests/fixtures/lead_emails.json`
 (`scripts/eval_lead_classifier.py`, real Haiku 5.5 through OpenRouter BYOK, 2026-10-16):
 - **25/25** decisions correct, and stage hints 10/10.
-- The heuristics settled 12 emails without the model; 13 reached it.
+- The heuristics and the own-mail rule settled 13 emails without the model; 12 reached it.
 - Per model call: about 870 input and 170 output tokens, **$0.00017**, latency p50 1.4 s,
-  maximum 2.1 s.
+  maximum 2.5 s.
 - A first run with thinking on hit `max_tokens` on one email. Thinking is now off.
 
 **Monthly cost.** Pub/Sub: a notification is about 1 KB. The 10 GiB monthly free tier
@@ -244,11 +283,11 @@ per email that reaches it:
 
 | File | What it covers | How it runs |
 |---|---|---|
-| `tests/test_leads.py` | merging, stages, expiry, temperature, graph | |
+| `tests/test_leads.py` | merging (threads too), stages, expiry, temperature, graph, corrections | |
 | `tests/test_lead_classify.py` | heuristics on the eval set, reply parsing, contacts | |
-| `tests/test_leads_web.py` | OIDC with generated RSA keys, the webhook's answers, owner-only page and JSON, CSRF | |
+| `tests/test_leads_web.py` | OIDC with generated RSA keys, the webhook's answers, owner-only page and JSON, CSRF, the correction endpoint | |
 | `tests/test_lead_workflow.py` | pokes and the refresh | Temporal test server |
-| `tests/test_lead_worker.py` | backfill, history, recovery, budget deferral, watch, encrypted snippet, no content in the log | fake Gmail, fake model, Postgres via `VALR_TEST_POSTGRES` |
+| `tests/test_lead_worker.py` | calendar rules, scorecard anchors; backfill, history, recovery, his own replies, budget deferral, watch, encrypted snippet, no content in the log, corrections storage, the Telegram alert (once per expiry) | fake Gmail, fake model, Postgres via `VALR_TEST_POSTGRES` |
 | `tests/leads-globe.test.mjs` | the globe's layout | `node --test` |
 
 Preview with made-up data: `VALR_DEV_PREVIEW=1 python scripts/preview_leads.py`, then
@@ -259,5 +298,4 @@ open http://127.0.0.1:8091/valr/leads.
 - A real push end to end: it needs the Access bypass and a deploy.
 - The backfill on the real mailbox.
 - Fathom matching on real recordings.
-- The interview-detail link points at `/valr#performance`; there is no per-interview
-  page yet.
+- The `#past-…` anchors exist only once valr-eval is merged.

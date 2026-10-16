@@ -62,9 +62,49 @@ function panel(lead) {
     ${next}
     <h3 class="sub-title">Why this temperature</h3><ul class="temp-parts">${parts}</ul>${cap}
     <h3 class="sub-title">People</h3><ul class="people">${contacts}</ul>
-    <h3 class="sub-title">Timeline</h3><ol class="timeline">${timeline}</ol>`;
+    <h3 class="sub-title">Timeline</h3><ol class="timeline">${timeline}</ol>
+    ${corrections(lead)}`;
   el.hidden = false;
+  bindCorrections(el, lead);
   $(".panel-close", el).addEventListener("click", () => { panel(null); globe && globe.select(null); });
+}
+
+function corrections(lead) {
+  const stages = data.stages.map((s) => `<option value="${esc(s)}"${lead.stage_manual && lead.stage === s ? " selected" : ""}>${esc(STAGE[s] || s)}</option>`).join("");
+  const others = data.leads.filter((l) => l.id !== lead.id).sort((a, b) => a.company.localeCompare(b.company))
+    .map((l) => `<option value="${esc(l.id)}">${esc(l.company)}</option>`).join("");
+  return `<details class="fix"><summary class="mono label">Correct this lead</summary>
+    <div class="fix-row"><select data-fix-stage aria-label="Stage"><option value=""${lead.stage_manual ? "" : " selected"}>Automatic stage</option>${stages}</select>
+      <button class="btn small" type="button" data-fix="stage">Set stage</button></div>
+    ${others ? `<div class="fix-row"><select data-fix-into aria-label="Merge into">${others}</select>
+      <button class="btn small" type="button" data-fix="merge">Merge into</button></div>` : ""}
+    <div class="fix-row"><button class="btn small danger" type="button" data-fix="dismiss">Dismiss lead</button>
+      <span class="muted small">Hidden for good, with its email threads.</span></div></details>`;
+}
+
+function bindCorrections(el, lead) {
+  for (const button of el.querySelectorAll("[data-fix]")) {
+    button.addEventListener("click", async () => {
+      const action = button.dataset.fix;
+      const body = { action };
+      if (action === "stage") body.stage = $("[data-fix-stage]", el).value;
+      if (action === "merge") body.into = $("[data-fix-into]", el).value;
+      if (action === "dismiss" && !confirm(`Dismiss ${lead.company}? It stays hidden, with its email threads.`)) return;
+      button.setAttribute("aria-busy", "true");
+      try {
+        const response = await fetch(`/valr/api/leads/${encodeURIComponent(lead.id)}/override`, { method: "POST",
+          headers: { "Content-Type": "application/json", "X-CSRF-Token": $("meta[name=csrf-token]").content }, body: JSON.stringify(body) });
+        const reply = await response.json().catch(() => ({}));
+        toast(reply.message || reply.detail || (response.ok ? "Saved." : "Not saved."));
+        if (response.ok) {
+          await refresh();
+          const next = data.leads.find((l) => l.id === (action === "merge" ? body.into : lead.id));
+          panel(action === "dismiss" ? null : next || null);
+          if (globe) globe.select(next && action !== "dismiss" ? next.id : null);
+        }
+      } finally { button.removeAttribute("aria-busy"); }
+    });
+  }
 }
 
 function contactPanel(contact) {

@@ -119,3 +119,27 @@ def test_graph_links_contacts_and_shared_people():
     assert juniper["timeline"][0]["kind"] == "calendar"  # Newest first: the booked panel.
     assert all(t["url"] == "" or t["url"].startswith("https://") for t in juniper["timeline"])
     assert set(view["stages"]) >= {"sourced", "offer", "closed-lost", "ghosted"}
+
+
+def test_later_messages_in_a_thread_stay_on_its_lead():
+    first = Touch("gmail:a", "email", NOW - timedelta(days=3), "Vela", "talentbridge.example", [], thread="t1")
+    reply = Touch("gmail:b", "email", NOW - timedelta(days=2), "", "", [Contact("x@other.example", "X Y")], direction="out", thread="t1")
+    built = leads.build([first, reply], NOW)
+    assert len(built) == 1 and len(built[0].touches) == 2
+
+
+def test_overrides_dismiss_stage_and_merge():
+    touches = sample_touches()
+    ids = {l.company: l for l in leads.build(sample_touches(), NOW)}
+    nimbus, kite, vela = ids["Nimbus"], ids["Kite"], ids["Vela"]
+    o = leads.Overrides(dismissed_touches={t.id for t in nimbus.touches}, dismissed_threads={"t-dismissed"},
+                        stages={kite.id: "offer"}, merges={vela.id: kite.id})
+    touches.append(Touch("gmail:n2", "email", NOW - timedelta(hours=1), "Nimbus", "nimbus.example", [], thread="t-dismissed"))
+    built = by_company(leads.build(touches, NOW, o))
+    assert "Nimbus" not in built  # Dismissed, and a new message in the same thread does not revive it.
+    assert "Vela" not in built and {"gmail:v1", "cal:v2"} <= {t.id for t in built["Kite"].touches}
+    assert built["Kite"].stage == "offer" and built["Kite"].stage_manual
+    assert "set by you" in built["Kite"].parts["stage"]["why"]
+    fresh = touches + [Touch("gmail:n3", "email", NOW - timedelta(hours=1), "Nimbus", "nimbus.example", [], thread="t-new")]
+    assert "Nimbus" in by_company(leads.build(fresh, NOW, o))  # A new thread starts it again.
+    assert leads.Overrides(merges={"a": "b", "b": "a"}).target("a") in ("a", "b")  # No loop.

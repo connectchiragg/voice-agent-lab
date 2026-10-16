@@ -158,3 +158,47 @@ def test_the_cockpit_links_to_leads():
     from app import valr_page
     assert 'href="/valr/leads"' in valr_page.header({"generated_at": NOW.isoformat()},
                                                     valr_page.Clock("UTC", NOW), OWNER)
+
+
+class Pool:
+    def connection(self):
+        class Context:
+            async def __aenter__(self):
+                return object()
+
+            async def __aexit__(self, *exc):
+                return False
+        return Context()
+
+
+def test_overrides_from_the_panel(page, monkeypatch):
+    from app import leads_store
+    stored = []
+
+    async def current(connection, now):
+        return leads.build(sample_touches(), NOW)
+
+    async def add_override(connection, lead_id, kind, value="", touch_ids=None, threads=None, by=""):
+        stored.append((lead_id, kind, value, sorted(touch_ids or []), by))
+
+    monkeypatch.setattr(leads_web, "current", current)
+    monkeypatch.setattr(leads_store, "add_override", add_override)
+    monkeypatch.setattr(research, "pool", Pool())
+    ids = {l.company: l.id for l in leads.build(sample_touches(), NOW)}
+    csrf = page.get("/valr/leads", headers=GOOD).text.split('name="csrf-token" content="', 1)[1].split('"', 1)[0]
+    headers = {**GOOD, "Content-Type": "application/json", "X-CSRF-Token": csrf}
+
+    def send(lead, body):
+        return page.post(f"/valr/api/leads/{lead}/override", headers=headers, content=json.dumps(body))
+
+    assert page.post(f"/valr/api/leads/{ids['Kite']}/override", headers={**GOOD, "Content-Type": "application/json"},
+                     content='{"action": "dismiss"}').status_code == 403  # No CSRF token.
+    assert send(ids["Nimbus"], {"action": "dismiss"}).json()["message"] == "Nimbus dismissed."
+    assert send(ids["Kite"], {"action": "stage", "stage": "offer"}).status_code == 200
+    assert send(ids["Kite"], {"action": "stage", "stage": "hired"}).status_code == 400
+    assert send(ids["Vela"], {"action": "merge", "into": ids["Kite"]}).json()["message"] == "Vela merged into Kite."
+    assert send(ids["Vela"], {"action": "merge", "into": ids["Vela"]}).status_code == 400
+    assert send("lead-nope", {"action": "dismiss"}).status_code == 404
+    assert send(ids["Kite"], {"action": "explode"}).status_code == 400
+    assert [(s[1], s[2]) for s in stored] == [("dismiss", ""), ("stage", "offer"), ("merge", ids["Kite"])]
+    assert stored[0][3] == ["gmail:n1"] and stored[0][4] == OWNER

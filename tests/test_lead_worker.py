@@ -21,24 +21,39 @@ from tests.leads_sample import NOW, fixture_emails
 OWNER, EMAILS = fixture_emails()
 
 
-def test_calendar_interviews_become_touchpoints():
+def test_calendar_interviews_intro_chats_and_known_contacts_become_touchpoints():
     start = NOW + timedelta(days=2)
+
+    def ev(key, title, attendees=(), company="", domain="", **kw):
+        return SlotEvent(key, title, start.isoformat(), (start + timedelta(hours=1)).isoformat(),
+                         attendees=[Person(OWNER, "Me", is_self=True), *attendees], company=company,
+                         company_domain=domain, **kw)
+    ravi = Person("ravi@juniper.example", "Ravi Menon")
+    asha = Person("asha@juniper.example", "Asha (Talent Acquisition)")
     events = [
-        SlotEvent("k1", "Juniper · System design round", start.isoformat(), (start + timedelta(hours=1)).isoformat(),
-                  attendees=[Person(OWNER, "Me", is_self=True), Person("ravi@juniper.example", "Ravi Menon"),
-                             Person("asha@juniper.example", "Asha (Talent Acquisition)"),
-                             Person("room@resource.calendar.google.com", "Room", resource=True)],
-                  company="Juniper", company_domain="juniper.example"),
-        SlotEvent("k2", "Dentist", start.isoformat(), start.isoformat()),
-        SlotEvent("k3", "Kite interview", start.isoformat(), start.isoformat(), status="cancelled", company="Kite"),
-        SlotEvent("k4", "Orbit post offer connect", start.isoformat(), start.isoformat(),
-                  company="Orbit", company_domain="orbit.example"),
+        ev("k1", "Juniper · System design round", [ravi, asha, Person("room@resource.calendar.google.com", "Room", resource=True)],
+           "Juniper", "juniper.example"),
+        ev("k2", "Dentist"),
+        ev("k3", "Kite interview", company="Kite", status="cancelled"),
+        ev("k4", "Orbit post offer connect", [Person("tom@orbit.example", "Tom")], "Orbit", "orbit.example"),
+        ev("k5", "Intro chat", [Person("jo@nimbus.example", "Jo Ibarra")]),  # Intro with an outside attendee.
+        ev("k6", "Intro chat"),  # Nobody from outside: not a lead.
+        ev("k7", "Catch-up", [Person("lena@orbitlabs.example", "Lena Park")]),  # A known Gmail contact.
+        ev("k8", "Recruiter screen", [Person("sam@tessel.example", "Sam")], "Tessel", "tessel.example"),
     ]
-    touches = lead_worker.calendar_to_touches(events, {OWNER})
-    assert [t.id for t in touches] == ["cal:k1", "cal:k4"]
-    people = {p.email: p.role for p in touches[0].people}
-    assert people == {"ravi@juniper.example": "interviewer", "asha@juniper.example": "recruiter"}
-    assert touches[0].stage_hint == "interviewing" and touches[1].stage_hint == ""
+    touches = {t.id: t for t in lead_worker.calendar_to_touches(events, {OWNER}, {"lena@orbitlabs.example"})}
+    assert sorted(touches) == ["cal:k1", "cal:k5", "cal:k7", "cal:k8"]
+    assert {p.email: p.role for p in touches["cal:k1"].people} == {"ravi@juniper.example": "interviewer",
+                                                                 "asha@juniper.example": "recruiter"}
+    assert touches["cal:k1"].stage_hint == "interviewing"
+    assert touches["cal:k5"].stage_hint == touches["cal:k7"].stage_hint == touches["cal:k8"].stage_hint == "screening"
+    assert touches["cal:k5"].summary.startswith("Recruiter chat")
+
+
+def test_interview_detail_anchors_match_the_scorecards():
+    assert lead_worker.detail_url("fathom:1000") == "/valr#past-fathom-1000"
+    assert lead_worker.detail_url("fireflies:ab_9") == "/valr#past-fireflies-ab-9"
+    assert lead_worker.detail_url("") == "/valr#performance"
 
 
 def test_fathom_and_performance_touchpoints():
@@ -54,7 +69,8 @@ def test_fathom_and_performance_touchpoints():
                             "overall_score": 6.5, "outcome": "rejected"}, {"company": "", "date": "x"}]}
     [score] = lead_worker.performance_touches(perf)
     assert score.score == 6.5 and score.stage_hint == "closed-lost" and score.cue == "negative"
-    assert score.title == "System design scored 6.5/10"
+    assert score.title == "System design scored 6.5/10" and score.detail_url == "/valr#past-fathom-77"
+    assert touch.detail_url == "/valr#past-fathom-77"
 
 
 # A fake Gmail.
@@ -139,7 +155,8 @@ def world(monkeypatch, tmp_path):
     async def reset():
         async with await connect() as connection:
             await connection.execute("DROP TABLE IF EXISTS gmail_state, lead_emails, lead_touchpoints, leads, "
-                                     "research_spend, research_jobs, calendar_events, calendar_state")
+                                     "lead_overrides, research_spend, research_jobs, calendar_events, "
+                                     "calendar_state, oauth_tokens, telegram_link")
     asyncio.run(reset())
     return gmail, activities, connect, key
 
@@ -176,9 +193,12 @@ def test_backfill_then_history_then_recovery(world, monkeypatch):
     newsletter = next(e for e, i in EMAILS if i["id"] == "e16")  # Dropped by itself...
     reply = dataclasses.replace(newsletter, id="r1", thread_id="t-e03")  # ...but a reply in a kept thread.
     gmail.messages["r1"] = raw_message(reply)
-    gmail.history, gmail.history_id = ["r1"], 5100
+    sent = next(e for e, i in EMAILS if i["id"] == "e17")  # His own reply: in e03's thread now.
+    gmail.messages["r2"] = raw_message(dataclasses.replace(sent, id="r2", thread_id="t-e03"))
+    gmail.messages["r3"] = raw_message(dataclasses.replace(sent, id="r3", thread_id="t-unknown"))
+    gmail.history, gmail.history_id = ["r1", "r2", "r3"], 5100
     second = asyncio.run(activities.gmail_sync(GmailSyncInput("push", 5100)))
-    assert (second.mode, second.fetched, second.kept, second.llm_calls) == ("history", 1, 1, 1)
+    assert (second.mode, second.fetched, second.kept, second.llm_calls) == ("history", 3, 2, 1)
 
     gmail.history_gone, gmail.history_id = True, 6000
     third = asyncio.run(activities.gmail_sync(GmailSyncInput("poll")))
@@ -191,6 +211,63 @@ def test_backfill_then_history_then_recovery(world, monkeypatch):
     assert "Orbit Labs" in names
     spend = asyncio.run(rows(connect, "SELECT count(*), sum(usd) FROM research_spend WHERE job_id LIKE 'leads-%%'"))
     assert spend[0][0] == model_steps + 1
+    data = asyncio.run(rows(connect, "SELECT data FROM lead_touchpoints WHERE id = 'gmail:r2'"))[0][0]
+    assert data["direction"] == "out" and data["thread"] == "t-e03"
+
+
+@needs_postgres
+def test_overrides_are_stored_and_replayed(world):
+    _, _, connect, _ = world
+
+    async def main():
+        async with await connect() as connection:
+            await leads_store.setup(connection)
+            await leads_store.add_override(connection, "lead-a", "dismiss", touch_ids=["gmail:1"], threads=["t1"])
+            await leads_store.add_override(connection, "lead-b", "stage", "offer")
+            await leads_store.add_override(connection, "lead-c", "stage", "applied")
+            await leads_store.add_override(connection, "lead-c", "stage", "")  # Back to automatic.
+            await leads_store.add_override(connection, "lead-d", "merge", "lead-b")
+            return await leads_store.overrides(connection)
+    o = asyncio.run(main())
+    assert o.dismissed_touches == {"gmail:1"} and o.dismissed_threads == {"t1"}
+    assert o.stages == {"lead-b": "offer"} and o.merges == {"lead-d": "lead-b"}
+
+
+class FakeBot:
+    def __init__(self):
+        self.sent = []
+
+    async def send(self, chat_id, text, keyboard=None):
+        self.sent.append((chat_id, text))
+        return 1
+
+
+@needs_postgres
+def test_an_expired_gmail_token_alerts_once_on_telegram(world, monkeypatch):
+    from app import interview_worker
+    _, activities, connect, _ = world
+    bot = FakeBot()
+    activities._bot = bot
+    monkeypatch.setenv("TELEGRAM_OWNER_CHAT_ID", "4242")
+
+    async def refused(connection, http):
+        return None, "reconnect needed"
+    monkeypatch.setattr(interview_worker, "gmail_access", refused)
+
+    async def token_row(connected_at):
+        async with await connect() as connection:
+            await google_oauth.setup(connection)
+            await connection.execute("DELETE FROM oauth_tokens")
+            await connection.execute(
+                "INSERT INTO oauth_tokens (provider, account, refresh_token, scope, status, connected_at) "
+                "VALUES ('google_gmail', 'me@example.com', 'x', 's', 'reconnect_needed', %s)", (connected_at,))
+    asyncio.run(token_row(NOW - timedelta(days=7)))
+    for _ in range(2):
+        assert asyncio.run(activities.gmail_sync(GmailSyncInput("poll"))).error == "Gmail reconnect needed"
+    assert bot.sent == [(4242, "Gmail disconnected — reconnect: https://valr.haciensus.com/oauth/google/start")]
+    asyncio.run(token_row(NOW))  # Reconnected, then expired again: one more alert.
+    asyncio.run(activities.gmail_sync(GmailSyncInput("poll")))
+    assert len(bot.sent) == 2
 
 
 @needs_postgres
