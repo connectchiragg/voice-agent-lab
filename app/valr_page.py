@@ -442,7 +442,9 @@ def detail(slot: dict[str, Any], view: dict[str, Any], clock: Clock) -> str:
         notes = ""
     people = "".join(
         f'<li class="person"><span class="avatar" aria-hidden="true">{e((p["name"][:1] or "?").upper())}</span>'
-        f'<span class="who">{e(p["name"])}</span>{chip(*PERSON.get(p["status"], (p["status"], "muted")))}</li>'
+        f'<span class="who">{e(p["name"])}</span>'
+        + (f'<a class="mono small email" href="mailto:{e(p["email"])}">{e(p["email"])}</a>' if p.get("email") else "")
+        + f'{chip(*PERSON.get(p["status"], (p["status"], "muted")))}</li>'
         for p in slot["interviewers"]) or '<li class="muted small">No one else is on the invite.</li>'
     questions = "".join(f"<li>{e(q)}</li>" for q in d["likely_questions"])
     perf = view["performance"]

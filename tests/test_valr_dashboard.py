@@ -72,14 +72,16 @@ def test_page_and_state_need_a_verified_access_login(client):
     assert {"blocks", "spend", "dials", "connections", "performance", "jobs"} <= set(state)
 
 
-def test_no_attendee_email_or_phone_number_is_shown(client):
+def test_attendee_emails_are_shown_to_the_owner_and_phone_numbers_are_not(client):
     for text in (client.get("/valr", headers=GOOD).text,
                  client.get("/valr/api/state", headers=GOOD).text):
-        assert "juniper.example\"" not in text and "@juniper.example" not in text
-        assert "greenhouse" not in text.lower() and "555 0134" not in text
-        assert "[phone hidden]" in text and "[email hidden]" in text
+        assert "maya.lin@juniper.example" in text and "talent@juniper.example" in text  # Attendees.
+        assert "greenhouse" not in text.lower() and "555 0134" not in text  # Tools; phone numbers.
+        assert "[phone hidden]" in text
+        assert "[email hidden]" in text and "priya@juniper.example" not in text  # Free text stays scrubbed.
     page = client.get("/valr", headers=GOOD).text
-    assert "Maya Lin" in page and "Recruiter, not researched" in page  # Names and roles, not addresses.
+    assert "Maya Lin" in page and "Recruiter, not researched" in page
+    assert 'href="mailto:maya.lin@juniper.example"' in page
     assert "$180k-$215k" in page and "45–60 LPA" in page  # Pay stays visible to the owner.
     assert "+1 228 888 8007" in page  # VALR's own number, to call it: not an attendee's.
 
@@ -186,10 +188,10 @@ def test_builders():
         Person("b@acme.example", "Ben"), Person("hr@acme.example", "Hana Recruiter"),
         Person("c@acme.example", "", response="declined"), Person("room@resource.calendar.google.com", "Room", resource=True)])
     rows = valr_view.interviewer_rows(event, {"a@acme.example"}, True, {"me@x.com"})
-    assert [(r["name"], r["status"]) for r in rows] == [
-        ("Ana", "researched"), ("Ben", "skipped_classifier"), ("Hana Recruiter", "skipped_hr"),
-        ("Attendee 4", "declined")]
-    assert "@" not in json.dumps(rows)
+    assert [(r["name"], r["email"], r["status"]) for r in rows] == [
+        ("Ana", "a@acme.example", "researched"), ("Ben", "b@acme.example", "skipped_classifier"),
+        ("Hana Recruiter", "hr@acme.example", "skipped_hr"), ("Attendee 4", "c@acme.example", "declined")]
+    assert "me@x.com" not in json.dumps(rows) and "resource.calendar" not in json.dumps(rows)
     blocks = [{"id": "b", "start": start.isoformat(), "state": "waiting", "label": "L"}]
     nxt = valr_view.next_call(blocks, start - timedelta(hours=1), paused=False)
     assert nxt["at"] == (start - timedelta(minutes=30)).isoformat() and nxt["attempt"] == 1

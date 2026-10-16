@@ -2,7 +2,7 @@
 
 Standard library only: Temporal workflow code, the app and the research worker all
 import it. Nothing here logs; attendee emails never leave these structures except
-into the owner's Postgres and the Temporal history on the VM.
+into the owner's Postgres, the Temporal history on the VM and the owner-only dashboard.
 
 - `SlotEvent`: one calendar event (one occurrence) as last seen. Its `key` is stable
   per event: the Google event id (with the instance suffix for a recurring one); from
