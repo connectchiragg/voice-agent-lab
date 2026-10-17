@@ -3,7 +3,7 @@
 //   swift mac/dmg/make_background.swift                 # the shipped design -> mac/dmg/background.tiff
 //   swift mac/dmg/make_background.swift b /tmp/b.tiff   # another variant, elsewhere
 //
-// Variants, both light (VALR's calm grey base from static/valr-ds.css), DEFAULT ships:
+// Variants, both light (VALR's warm porcelain base from static/valr-ds.css), DEFAULT ships:
 //   a  a hairline arrow between the icons
 //   b  Applications sits in a faint dashed drop zone, a quiet chevron points at it
 //
@@ -14,8 +14,9 @@
 // Finder draws the icon names itself, in dark text whenever the window has a background
 // picture, so the design stays light and they read cleanly.
 //
-// Fonts: Instrument Serif and Inter (the site's faces) from mac/dmg/fonts, falling back to
-// New York and SF Pro, the closest system faces.
+// Brand: the lockup top left, the Signal V (scripts/make_icons.py geometry) and "valr" in
+// Instrument Serif, the wordmark's face; the instruction in Source Sans 3, the site's UI face.
+// Both from mac/dmg/fonts (SIL OFL), falling back to New York and SF Pro.
 import CoreGraphics
 import CoreText
 import Foundation
@@ -38,7 +39,7 @@ func rgb(_ hex: UInt32, _ a: CGFloat = 1) -> CGColor {
             blue: CGFloat(hex & 0xFF) / 255, alpha: a)
 }
 // The site's faces ship in mac/dmg/fonts (SIL OFL); register them for this process only.
-for name in ["InstrumentSerif-Regular.ttf", "Inter.ttf"] {
+for name in ["InstrumentSerif-Regular.ttf", "SourceSans3-Regular.ttf"] {
     CTFontManagerRegisterFontsForURL(here.appendingPathComponent("fonts/\(name)") as CFURL, .process, nil)
 }
 let space = CGColorSpace(name: CGColorSpace.sRGB)!
@@ -65,8 +66,8 @@ func serifFont(_ size: CGFloat) -> CTFont {
     }
     return CTFontCreateWithName("Georgia" as CFString, size, nil)
 }
-let serif = serifFont(22)
-let sans = font(["Inter-Regular"], 13, weight: 0)
+let serif = serifFont(26)
+let sans = font(["SourceSans3-Regular"], 13.5, weight: 0)
 
 func line(_ text: String, _ f: CTFont, _ color: CGColor, kern: CGFloat) -> CTLine {
     CTLineCreateWithAttributedString(NSAttributedString(string: text, attributes: [
@@ -95,23 +96,46 @@ func stroke(_ ctx: CGContext, _ path: CGPath, _ color: CGColor, _ width: CGFloat
     ctx.restoreGState()
 }
 
+/// One stroke of VALR's mark in its 100-unit box (scripts/make_icons.py bar_segments).
+func markStroke(_ cx: CGFloat, _ y0: CGFloat, _ y1: CGFloat, w: CGFloat = 10) -> CGPath {
+    let h = y1 - y0, k = w / 2, t = w * 0.2, e = h * 0.2
+    let p = CGMutablePath()
+    p.move(to: CGPoint(x: cx - t, y: y0 + 0.8))
+    p.addQuadCurve(to: CGPoint(x: cx + t, y: y0 + 0.8), control: CGPoint(x: cx, y: y0 - 0.8))
+    p.addCurve(to: CGPoint(x: cx + k, y: y0 + e), control1: CGPoint(x: cx + k * 0.8, y: y0 + e * 0.35), control2: CGPoint(x: cx + k, y: y0 + e * 0.7))
+    p.addLine(to: CGPoint(x: cx + k, y: y1 - e))
+    p.addCurve(to: CGPoint(x: cx + t, y: y1 - 0.8), control1: CGPoint(x: cx + k, y: y1 - e * 0.7), control2: CGPoint(x: cx + k * 0.8, y: y1 - e * 0.35))
+    p.addQuadCurve(to: CGPoint(x: cx - t, y: y1 - 0.8), control: CGPoint(x: cx, y: y1 + 0.8))
+    p.addCurve(to: CGPoint(x: cx - k, y: y1 - e), control1: CGPoint(x: cx - k * 0.8, y: y1 - e * 0.35), control2: CGPoint(x: cx - k, y: y1 - e * 0.7))
+    p.addLine(to: CGPoint(x: cx - k, y: y0 + e))
+    p.addCurve(to: CGPoint(x: cx - t, y: y0 + 0.8), control1: CGPoint(x: cx - k, y: y0 + e * 0.7), control2: CGPoint(x: cx - k * 0.8, y: y0 + e * 0.35))
+    p.closeSubpath()
+    return p
+}
+
 func render(scale: CGFloat) -> CGImage {
     let ctx = CGContext(data: nil, width: Int(W * scale), height: Int(H * scale), bitsPerComponent: 16,
                         bytesPerRow: 0, space: space, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
     ctx.translateBy(x: 0, y: H * scale); ctx.scaleBy(x: scale, y: -scale)   // top-left origin, points
     ctx.setShouldAntialias(true); ctx.setAllowsFontSmoothing(true); ctx.interpolationQuality = .high
 
-    // 1. Off-white to light grey (--surface #fff, --bg #f6f7f9, --surface-2 #f1f3f6), and a
-    //    barely-there indigo glow (--accent #4f46e5) behind the app.
-    ctx.drawLinearGradient(gradient([(0xFFFFFF, 1, 0), (0xF6F7F9, 1, 0.6), (0xF0F2F5, 1, 1)]),
+    // 1. Porcelain (--surface #FBF9F4 to --bg #F4F0E8 to --surface-2 #EEE9DF), and a
+    //    barely-there muted-indigo glow (--accent #4B4C9E) behind the app.
+    ctx.drawLinearGradient(gradient([(0xFBF9F4, 1, 0), (0xF4F0E8, 1, 0.6), (0xEEE9DF, 1, 1)]),
                            start: .zero, end: CGPoint(x: 0, y: H), options: [])
-    ctx.drawRadialGradient(gradient([(0x4F46E5, 0.075, 0), (0x4F46E5, 0.025, 0.55), (0x4F46E5, 0, 1)]),
+    ctx.drawRadialGradient(gradient([(0x4B4C9E, 0.08, 0), (0x4B4C9E, 0.025, 0.55), (0x4B4C9E, 0, 1)]),
                            startCenter: APP, startRadius: 0, endCenter: APP, endRadius: 170, options: [])
 
-    let ink: UInt32 = 0x0E1116    // --text
+    let ink: UInt32 = 0x15172C    // --text, Ink
 
-    // 2. Wordmark, top left: "VALR" in the display serif, near-black at 80 %.
-    text(ctx, "VALR", serif, rgb(ink, 0.80), x: 30, baseline: 44, centred: false, kern: 0.6)
+    // 2. The lockup, top left: the mark (strokes 22 pt tall) and "valr" on one baseline.
+    let base: CGFloat = 46, k: CGFloat = 22 / 82
+    var place = CGAffineTransform(translationX: 30 - 25 * k, y: base - 91 * k).scaledBy(x: k, y: k)
+    let outer = CGMutablePath()
+    outer.addPath(markStroke(30, 9, 61), transform: place); outer.addPath(markStroke(70, 9, 61), transform: place)
+    ctx.addPath(outer); ctx.setFillColor(rgb(ink)); ctx.fillPath()
+    ctx.addPath(markStroke(50, 39, 91).copy(using: &place)!); ctx.setFillColor(rgb(0x4B4C9E)); ctx.fillPath()
+    text(ctx, "valr", serif, rgb(ink), x: 30 + 50 * k + 7, baseline: base, centred: false, kern: 0.26)
 
     // 3. The gesture between the icons, in mid-grey (about 40 % black).
     let gapL = APP.x + ICON / 2 + 30, gapR = APPS.x - ICON / 2 - 30, y = APP.y
@@ -119,7 +143,7 @@ func render(scale: CGFloat) -> CGImage {
     case "b":
         let zone = CGRect(x: APPS.x - 82, y: APPS.y - 82, width: 164, height: 164 + 24)
         let zp = CGPath(roundedRect: zone, cornerWidth: 24, cornerHeight: 24, transform: nil)
-        ctx.addPath(zp); ctx.setFillColor(rgb(0x4F46E5, 0.025)); ctx.fillPath()
+        ctx.addPath(zp); ctx.setFillColor(rgb(0x4B4C9E, 0.03)); ctx.fillPath()
         stroke(ctx, zp, rgb(ink, 0.16), 1, dash: [4, 4])
         for (i, a) in [(0, 0.14), (1, 0.26), (2, 0.40)] as [(CGFloat, CGFloat)] {
             let cx = W / 2 - 12 + i * 12
@@ -140,7 +164,7 @@ func render(scale: CGFloat) -> CGImage {
     }
 
     // 4. The one line of instruction, centred below the icons, in --text-3.
-    text(ctx, "Drag VALR into Applications", sans, rgb(0x5F6875), x: W / 2, baseline: 336, kern: 0.1)
+    text(ctx, "Drag VALR into Applications", sans, rgb(0x5F6072), x: W / 2, baseline: 336, kern: 0.1)
 
     // Drawn at 16 bits per channel (smooth gradients), stored at 8 (a small TIFF).
     let out = CGContext(data: nil, width: Int(W * scale), height: Int(H * scale), bitsPerComponent: 8, bytesPerRow: 0,

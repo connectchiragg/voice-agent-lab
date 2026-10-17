@@ -21,8 +21,8 @@ struct VALRRecorderSyncApp: App {
     }
 }
 
-/// The VALR orb as a monochrome template image (Resources/MenuBarIconTemplate.png and @2x,
-/// 18 pt), so macOS tints it for light and dark menu bars.
+/// VALR's mark, the Signal V, as a monochrome template image (Resources/MenuBarIconTemplate.png
+/// and @2x, 18 pt; scripts/make_icons.py --mac), so macOS tints it for light and dark menu bars.
 enum MenuBarIcon {
     static let mark: NSImage? = {
         guard let image = NSImage(named: "MenuBarIconTemplate") else { return nil }
@@ -30,6 +30,25 @@ enum MenuBarIcon {
         image.size = NSSize(width: 18, height: 18)
         return image
     }()
+}
+
+/// The lockup (the Signal V and the "valr" wordmark) at the top of VALR's windows:
+/// Resources/Lockup-light.png and Lockup-dark.png, rendered from static/icons/valr-lockup-*.svg.
+struct BrandHeader: View {
+    @Environment(\.colorScheme) private var scheme
+
+    var body: some View {
+        HStack {
+            if let image = NSImage(named: scheme == .dark ? "Lockup-dark" : "Lockup-light") {
+                Image(nsImage: image).resizable().interpolation(.high).aspectRatio(contentMode: .fit).frame(height: 24)
+            } else {
+                Text("valr").font(.system(size: 22, design: .serif))
+            }
+            Spacer()
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("VALR")
+    }
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
@@ -99,7 +118,11 @@ final class Windows {
     }
 
     private func make<V: View>(title: String, view: V) -> NSWindow {
-        let window = NSWindow(contentViewController: NSHostingController(rootView: view))
+        let framed = VStack(alignment: .leading, spacing: 0) {
+            BrandHeader().padding(.horizontal, 24).padding(.top, 20).padding(.bottom, 2)
+            view
+        }
+        let window = NSWindow(contentViewController: NSHostingController(rootView: framed))
         window.title = title
         window.styleMask = [.titled, .closable]
         window.isReleasedWhenClosed = false

@@ -21,6 +21,13 @@ DMG="$REPO/mac/dist/VALR-$VERSION.dmg"
 mkdir -p "$OUT"
 find "$OUT" -maxdepth 1 -name 'VALR-*.dmg' ! -name "VALR-$VERSION.dmg" -delete
 cp "$DMG" "$OUT/VALR-$VERSION.dmg"
+# The .dmg file's own Finder icon (resource fork only: the SHA-256 below is unchanged).
+ICNS="$REPO/mac/dist/VALR.app/Contents/Resources/AppIcon.icns"
+if [ -f "$ICNS" ]; then
+  for f in "$DMG" "$OUT/VALR-$VERSION.dmg"; do
+    swift "$REPO/mac/dmg/set_file_icon.swift" "$ICNS" "$f" || echo "    (could not set the .dmg's Finder icon on $f)" >&2
+  done
+fi
 SHA="$(shasum -a 256 "$OUT/VALR-$VERSION.dmg" | cut -d' ' -f1)"
 SIZE="$(stat -f %z "$OUT/VALR-$VERSION.dmg")"
 cat > "$OUT/mac.json" <<JSON
