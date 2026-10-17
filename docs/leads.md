@@ -10,6 +10,7 @@ interviews on his calendar, Fathom recordings and his scored interviews. Every l
 Gmail ──users.watch──> Pub/Sub topic valr-gmail ──push (OIDC)──> POST /hooks/gmail
                                                                   │ verify token, account
 every 30 min (Schedule valr-gmail-poll) ──┐                        ▼
+worker check every 30 s (no push came) ───┤
 "Check Gmail now" on the page ────────────┴──> GmailSyncWorkflow (id valr-gmail-sync)
                                                  1. gmail_sync: history.list from the stored historyId
                                                     (first run: 30-day backfill), then for each new message:
@@ -36,8 +37,9 @@ daily (Schedule valr-gmail-watch) ──> GmailWatchWorkflow: users.watch again 
 2. **Fetch.** The research worker (`app/lead_worker.py`) calls `history.list`
    (messageAdded) from the stored historyId and fetches each new message. If that
    historyId is too old (404), it searches the last 3 days instead. Messages already
-   decided are skipped, so pushes and polls can overlap safely. The safety poll runs
-   every 30 minutes and covers missed pushes. The daily schedule renews the watch.
+   decided are skipped, so pushes and polls can overlap safely. The worker's fast check
+   (one `history.list` every 30 s) starts a sync for mail no push picked up within one
+   interval; the 30-minute poll is the last resort. The daily schedule renews the watch.
 3. **Classify** (`app/lead_classify.py`). Cheap heuristics run first; the model sees only
    what they cannot settle.
 
@@ -347,8 +349,50 @@ Settings:
 | `VALR_LEADS_BACKFILL_DAYS` | `30` | how far the first run reads back |
 | `VALR_LEADS_BACKFILL_MAX` | `500` | most messages the first run reads |
 | `VALR_LEADS_POLL_MINUTES` | `30` | the safety poll |
+| `VALR_GMAIL_CHECK_S` | `30` (`15` without a topic) | the worker's fast check; `0` turns it off |
+| `VALR_LEADS_LLM_RESERVE` | `50` | model calls a day the backfill leaves for new mail (at most a quarter) |
+| `LLM_GATEWAY_402_COOLDOWN_S` | `600` | after an OpenRouter 402, go direct this long |
 | `VALR_PERFORMANCE_PATH` | `/data/performance.json` | interview scores |
 | `FATHOM_API_KEY` | | recordings from the last 60 days, up to 50 |
+
+## Notification latency (the SLA)
+
+The owner's target (2026-10-17): a new job email is in the app's bell **within 10 s at
+p95, 5 s at p50**, measured from Gmail's `internalDate` to the bell item's `created_at`.
+The phone push comes right after and is reported separately (Apple's delivery is outside
+VALR's control).
+
+The path, with what each step took in production on 2026-10-17 (before this change):
+
+| Step | Time |
+|---|---|
+| Gmail -> Pub/Sub -> `POST /hooks/gmail` | 3–6.6 s (Google's side) |
+| a 2 s "settle" sleep in the workflow | 2 s (removed) |
+| token, `history.list`, `messages.get` | under 1 s |
+| the model (Haiku via OpenRouter; a 402 cost a failed round trip first) | 1.5–3 s (now after the bell item) |
+| the push: at the dispatch loop's next tick | 0–60 s (now immediate) |
+| a push arriving during the ~20 s lead rebuild | lost until the next push or poll (seen: 4 min) |
+
+Now:
+- a message the heuristics do not settle (possible job mail) gets an **`incoming`** bell
+  item from its headers ("Sender: Subject") before the model runs. It is never pushed.
+  The model's decision then turns it into the real item (same place in the bell, pushed at
+  once) or **retracts** it (not job mail). Mail settled by the heuristics (newsletters, job
+  boards, his own mail) never shows;
+- no settle sleep; a push during the rebuild makes another pass right after it;
+- the push (and an immediate Telegram alert) is sent as soon as the batch is recorded;
+- an OpenRouter 402 sends calls straight to Anthropic for 10 minutes;
+- the fast check catches a push that never came within about 60 s;
+- missed mail is caught up: new mail during a backfill notifies, and an unread recent
+  kept email with no item is pushed ("caught up").
+
+Expected: about 4–8 s to the bell (Google's 3–6.6 s plus under 1 s), about 1.5–3 s more to
+the push. Measured live: each item stores `arrived_at`; the worker logs "VALR notification
+latency: email in the bell N s after it arrived" and, hourly, "VALR notification SLA (24 h):
+... p50, p95"; `GET /valr/api/notifications/latency` returns the 24-hour figures.
+
+Without Pub/Sub (`VALR_GMAIL_TOPIC` unset) the SLA cannot be met: the worker logs an
+error at start and checks Gmail every 15 s instead.
 
 ## Measurements and cost
 
@@ -389,6 +433,6 @@ http://127.0.0.1:8090/valr/leads: about 115 fictional leads (70 live) shaped lik
 
 ## Not yet verified
 
-- A real push end to end: it needs the Access bypass and a deploy.
+- The new latency figures in production (the SLA log line after a deploy).
 - The backfill on the real mailbox.
 - Fathom matching on real recordings.

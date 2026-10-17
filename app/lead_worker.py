@@ -8,7 +8,11 @@
   again). Gmail calls are paced (gmail_api, VALR_GMAIL_RPS); a rate limit that outlasts the
   retries ends the run successfully as mode "paused-ratelimit" (last_error "rate limited,
   resuming") and the workflow resumes it ~2 minutes later. While the backfill is not done, a
-  push only records last_push_at. Each new message: heuristics, then Claude Haiku
+  push only records last_push_at; each backfill run first looks at the mail that arrived since
+  it started (`live_first`, from its baseline historyId), which notifies, then older mail
+  (which never does). The backfill leaves VALR_LEADS_LLM_RESERVE (50) model calls of the day
+  for new mail. A recent email the classifier failed on makes the workflow run again in ~30 s.
+  Each new message: heuristics, then Claude Haiku
   within the day's budget (VALR_LEADS_LLM_PER_DAY) and the research month cap; the decision
   is logged without content; a kept one becomes a touchpoint. A historyId that is too old
   (404) falls back to a 3-day search. One pass at a time (a Postgres advisory lock).
@@ -16,8 +20,14 @@
   and scored interviews (performance.json) become touchpoints; then every lead is rebuilt
   (app/leads.build) and saved.
 - `gmail_watch`: users.watch on VALR_GMAIL_TOPIC, daily.
-- Notifications (app/notifications.py): a kept inbound email in an incremental pass becomes a
-  bell item (`notify_email`); after every sync, the bell is matched to Gmail's unread job mail
+- `GmailCheck` / `check_loop` (a research-worker task, every VALR_GMAIL_CHECK_S=30 s): one
+  history.list from the stored historyId; new mail still undecided at the next tick (no push
+  came) starts the sync. Pub/Sub stays the fast path, the 30-minute poll the last resort.
+- Notifications (app/notifications.py): a kept inbound email in an incremental pass (or new
+  mail during a backfill) becomes a bell item (`notify_email`), pushed right after its batch.
+  Possible job mail (not settled by the heuristics) is in the bell before the model runs
+  (`notify_incoming`, kind "incoming", never pushed) and is then settled or retracted
+  (`retract_incoming`). After every sync, the bell is matched to Gmail's unread job mail
   (`notify_unread`: one messages.list "is:unread newer_than:30d" plus the history's UNREAD
   label changes; older unread mail is added silently, mail read in Gmail is read in VALR);
   after each rebuild, email notifications are linked to their lead and anything due goes out
@@ -30,7 +40,7 @@
 
 Settings: VALR_LEADS=1 turns the schedules on; VALR_GMAIL_TOPIC; VALR_LEADS_BACKFILL_DAYS (30),
 VALR_LEADS_BACKFILL_MAX (500), VALR_LEADS_LLM_PER_DAY (300), VALR_LEADS_POLL_MINUTES (30),
-VALR_LEADS_FETCH_PER_RUN (150), VALR_GMAIL_RPS (4).
+VALR_LEADS_FETCH_PER_RUN (150), VALR_GMAIL_RPS (4), VALR_LEADS_LLM_RESERVE (50), VALR_GMAIL_CHECK_S (30).
 Nothing here logs an address, a subject or an email's text.
 """
 from __future__ import annotations
@@ -160,25 +170,54 @@ def email_touch(email: Email, decision: Decision, owners: set[str]) -> Touch:
 NOTIFY_MODES = ("history", "recovery")
 
 
-async def notify_email(connection: Any, email: Email, decision: Decision, touch: Touch, new_thread: bool) -> None:
-    """A kept email -> the bell (app/notifications.py). Never fails the sync."""
+async def notify_email(connection: Any, email: Email, decision: Decision, touch: Touch, new_thread: bool) -> bool:
+    """A kept email -> the bell (app/notifications.py); True when an item was stored. Never
+    fails the sync (the unread pass catches a missed one up)."""
     from app import notifications
     try:
         store = notifications.Store(connection)
         await store.setup()
-        await notifications.from_email(store, email, decision, touch, new_thread, datetime.now(timezone.utc))
+        return await notifications.from_email(store, email, decision, touch, new_thread,
+                                              datetime.now(timezone.utc)) is not None
     except Exception as error:  # noqa: BLE001 - a missed notification must not lose the email
         logger.warning("VALR notification not created: %s", type(error).__name__)
+        return False
+
+
+async def notify_incoming(connection: Any, emails: list[Email]) -> int:
+    """New possible job mail -> `incoming` bell items now, before the model classifies it
+    (notifications.from_incoming). Never fails the sync."""
+    if not emails:
+        return 0
+    from app import notifications
+    try:
+        store = notifications.Store(connection)
+        await store.setup()
+        now = datetime.now(timezone.utc)
+        return sum([await notifications.from_incoming(store, e, now) is not None for e in emails])
+    except Exception as error:  # noqa: BLE001
+        logger.warning("VALR incoming notification not created: %s", type(error).__name__)
+        return 0
+
+
+async def retract_incoming(connection: Any, email_id: str) -> None:
+    """Dropped (or kept but not news): its `incoming` bell item goes. Never fails the sync."""
+    from app import notifications
+    try:
+        await notifications.retract_incoming(notifications.Store(connection), email_id)
+    except Exception as error:  # noqa: BLE001
+        logger.warning("VALR incoming notification not retracted: %s", type(error).__name__)
 
 
 UNREAD_CAP = 1000  # Unread messages listed per sync (10 list pages at most).
 
 
 async def notify_unread(connection: Any, http: httpx.AsyncClient, token: str, changes: dict[str, bool],
-                        now: datetime) -> dict[str, int]:
-    """The bell matched to Gmail's unread job mail (notifications.sync_unread). Never fails the
-    sync: a rate limit or an error only skips the list this time (the history's label changes
-    still apply)."""
+                        now: datetime, live_since: datetime | None = None) -> dict[str, int]:
+    """The bell matched to Gmail's unread job mail (notifications.sync_unread; recent mail that
+    arrived after `live_since` and was missed is pushed, "caught_up"). Never fails the sync: a
+    rate limit or an error only skips the list this time (the history's label changes still
+    apply)."""
     from app import notifications
     try:
         unread, complete = await gmail_api.unread_ids(http, token, UNREAD_CAP)
@@ -195,14 +234,28 @@ async def notify_unread(connection: Any, http: httpx.AsyncClient, token: str, ch
         kept = [t for t in await leads_store.kept_inbound(connection, now - notifications.KEEP_FOR)
                 if t.id not in hidden.dismissed_touches and t.thread not in hidden.dismissed_threads]
         firsts = await leads_store.thread_starters(connection, [t.thread for t in kept if t.thread])
-        result = await notifications.sync_unread(store, kept, unread, complete, changes, now, firsts)
+        result = await notifications.sync_unread(store, kept, unread, complete, changes, now, firsts, live_since)
     except Exception as error:  # noqa: BLE001 - the bell catches up on the next sync
         logger.warning("VALR notifications: unread pass failed (%s)", type(error).__name__)
-        return {"added": 0, "read": 0, "unread": 0}
+        return {"added": 0, "read": 0, "unread": 0, "caught_up": 0}
     if any(result.values()):
-        logger.info("VALR notifications: unread mail %d added (silently), %d read in Gmail, %d unread again",
-                    result["added"], result["read"], result["unread"])
+        logger.info("VALR notifications: unread mail %d added (silently), %d missed and caught up, "
+                    "%d read in Gmail, %d unread again", result["added"], result.get("caught_up", 0),
+                    result["read"], result["unread"])
     return result
+
+
+def live_since(state: dict[str, Any]) -> datetime | None:
+    """From when mail is news: when the (first) backfill started. Mail older than that is history
+    (never pushed); mail that arrives during or after the backfill is."""
+    return state.get("backfill_started_at")
+
+
+def llm_reserve() -> int:
+    """LLM calls a day the backfill leaves for new mail (VALR_LEADS_LLM_RESERVE, 50): a long
+    backfill must not use up the day's budget and defer a recruiter's email until midnight. At
+    most a quarter of the day's budget."""
+    return max(0, min(int(os.getenv("VALR_LEADS_LLM_RESERVE", "50")), llm_per_day() // 4))
 
 
 async def notify_rebuild(connection: Any, built: list[Any], bot: Any = None) -> None:
@@ -229,11 +282,11 @@ def beat() -> None:
 class Budget:
     """LLM calls left today, and the research month cap."""
 
-    def __init__(self, left: int, month_ok: bool) -> None:
-        self.left, self.month_ok = left, month_ok
+    def __init__(self, left: int, month_ok: bool, reserve: int = 0) -> None:
+        self.left, self.month_ok, self.reserve = left, month_ok, reserve
 
     def take(self) -> bool:
-        if self.left <= 0 or not self.month_ok:
+        if self.left <= self.reserve or not self.month_ok:
             return False
         self.left -= 1
         return True
@@ -303,11 +356,22 @@ class LeadActivities:
             await leads_store.save_state(connection, last_sync_at=now, last_error=RATE_LIMITED)
             logger.warning("VALR leads: Gmail rate limited (%s); paused, resuming later", error.reason)
         else:
-            await notify_unread(connection, self.http, token, changes, datetime.now(timezone.utc))
+            caught = await notify_unread(connection, self.http, token, changes, datetime.now(timezone.utc),
+                                         live_since(state))
+            if caught.get("caught_up"):
+                summary.notified += caught["caught_up"]
+                await self.push_now(connection)
         logger.info("VALR leads: Gmail %s (%s): %d new, %d kept, %d dropped, %d deferred, %d model calls, "
-                    "$%.4f, %d left", summary.mode, request.reason, summary.fetched, summary.kept,
-                    summary.dropped, summary.deferred, summary.llm_calls, summary.usd, summary.left)
+                    "$%.4f, %d left, %d notified", summary.mode, request.reason, summary.fetched, summary.kept,
+                    summary.dropped, summary.deferred, summary.llm_calls, summary.usd, summary.left,
+                    summary.notified)
         return summary
+
+    async def push_now(self, connection: Any) -> None:
+        """A new bell item: push it (and an immediate Telegram alert) now, not at the dispatch
+        loop's next tick."""
+        from app import notifications
+        await notifications.dispatch_now(connection, self._bot)
 
     async def backfill(self, connection: Any, token: str, state: dict[str, Any], now: datetime,
                        summary: GmailSyncSummary) -> None:
@@ -323,6 +387,8 @@ class LeadActivities:
                                          backfill_started_at=started)
         elif not state.get("backfill_started_at"):
             await leads_store.save_state(connection, backfill_started_at=started)
+        if state.get("history_id") and state.get("backfill_started_at"):
+            await self.live_first(connection, token, int(state["history_id"]), started, summary)
         days = int(os.getenv("VALR_LEADS_BACKFILL_DAYS", "30"))
         cap = int(os.getenv("VALR_LEADS_BACKFILL_MAX", "500"))
         since = int((started - timedelta(days=days)).timestamp())  # Fixed, so resumed runs list the same mail.
@@ -332,7 +398,7 @@ class LeadActivities:
         todo = [i for i in ids if i not in done]
         work = todo[:per_run()]
         try:
-            await self.process_batches(connection, token, work, summary)
+            await self.process_batches(connection, token, work, summary, live=started)
         finally:
             await leads_store.save_state(connection, backfill_count=len(await leads_store.recorded(connection, ids)))
         summary.left = len(todo) - len(work)
@@ -342,6 +408,22 @@ class LeadActivities:
         else:
             values.update(backfill_done_at=datetime.now(timezone.utc))
         await leads_store.save_state(connection, **values)
+
+    async def live_first(self, connection: Any, token: str, baseline: int, started: datetime,
+                         summary: GmailSyncSummary) -> None:
+        """While a backfill runs (hundreds of older messages, oldest first, 150 a run), the mail
+        that arrived since it started (the history from its baseline historyId) is looked at
+        first and notifies, so a new email is not stuck behind a month of old mail. The stored
+        historyId does not move: the incremental passes after the backfill skip what is seen."""
+        try:
+            refs, _ = await gmail_api.history(self.http, token, baseline, max_pages=2)
+        except (gmail_api.HistoryGone, httpx.HTTPError) as error:
+            logger.info("VALR leads: no live pass during the backfill (%s)", type(error).__name__)
+            return
+        ids = unique_ids(refs)
+        done = await leads_store.recorded(connection, ids)
+        await self.process_batches(connection, token, [i for i in ids if i not in done][:per_run()], summary,
+                                   live=started)
 
     async def incremental(self, connection: Any, token: str, state: dict[str, Any], now: datetime,
                           summary: GmailSyncSummary, changes: dict[str, bool] | None = None) -> None:
@@ -364,29 +446,36 @@ class LeadActivities:
         work = fresh[:limit]
         work += [i for i in await leads_store.deferred(connection, DEFERRED_PER_PASS)
                  if i not in fresh][:max(0, limit - len(work))]
-        await self.process_batches(connection, token, work, summary)
+        await self.process_batches(connection, token, work, summary, live=live_since(state))
         summary.left = max(0, len(fresh) - limit)
         values: dict[str, Any] = {"last_sync_at": now, "last_error": None}
-        if summary.left:
+        if summary.left or summary.retry:
+            # summary.retry: a recent email the classifier failed on; the workflow runs again in
+            # ~30 s (MORE_AFTER) instead of waiting for the next push or poll.
             summary.more = True
-        elif new_history:
+        if new_history and not summary.left:
             values["history_id"] = max(new_history, int(state.get("history_id") or 0))
         await leads_store.save_state(connection, **values)
 
     async def process_batches(self, connection: Any, token: str, ids: list[str],
-                              summary: GmailSyncSummary) -> None:
+                              summary: GmailSyncSummary, live: datetime | None = None) -> None:
         """BATCH messages at a time, each fetched, decided and recorded before the next: a
         rate limit or a crash loses at most the batch in flight."""
         for start in range(0, len(ids), BATCH):
-            await self.process(connection, token, ids[start:start + BATCH], summary)
+            await self.process(connection, token, ids[start:start + BATCH], summary, live)
 
-    async def process(self, connection: Any, token: str, ids: list[str], summary: GmailSyncSummary) -> None:
+    async def process(self, connection: Any, token: str, ids: list[str], summary: GmailSyncSummary,
+                      live: datetime | None = None) -> None:
         """Fetches, decides and records `ids`. On GmailRateLimited the messages fetched so far
-        are still decided and recorded, then it is raised."""
+        are still decided and recorded, then it is raised. A kept inbound email notifies in an
+        incremental pass, or in a backfill when it arrived after `live` (the backfill's start);
+        new bell items are pushed right after the batch is recorded."""
         owners = owner_emails()
         limits = research_jobs.Limits.interview_from_env()
         budget = Budget(max(0, llm_per_day() - await leads_store.llm_calls_today(connection)),
-                        await research_jobs.month_spend(connection) < limits.month_usd)
+                        await research_jobs.month_spend(connection) < limits.month_usd,
+                        llm_reserve() if summary.mode == "backfill" else 0)
+        notified = 0
         emails: list[Email] = []
         limited: gmail_api.GmailRateLimited | None = None
         for message_id in ids:
@@ -401,14 +490,16 @@ class LeadActivities:
         summary.fetched += len(emails)
         known = await leads_store.kept_threads(connection, [e.thread_id for e in emails])
         gate = asyncio.Semaphore(CONCURRENCY)
+        quick = {e.id: lead_classify.own_mail(e, owners, e.thread_id in known)
+                 or lead_classify.prefilter(e, e.thread_id in known) for e in emails}
+        live_mail = lambda e: summary.mode in NOTIFY_MODES or (live is not None and e.at >= live)  # noqa: E731
+        # In the bell before the model has looked (the latency SLA): mail the heuristics did not
+        # settle, i.e. possible job mail. The model's decision then makes it real or retracts it.
+        await notify_incoming(connection, [e for e in emails if quick[e.id] is None and live_mail(e)])
 
         async def decide(email: Email) -> Decision:
-            mine = lead_classify.own_mail(email, owners, email.thread_id in known)
-            if mine is not None:
-                return mine
-            early = lead_classify.prefilter(email, email.thread_id in known)
-            if early is not None:
-                return early
+            if quick[email.id] is not None:
+                return quick[email.id]
             if not budget.take():
                 return Decision(False, "budget", 0.0, "deferred")
             async with gate:
@@ -446,15 +537,22 @@ class LeadActivities:
                 summary.kept += 1
                 touch = email_touch(email, decision, owners)
                 await leads_store.upsert_touch(connection, touch, snippet_cipher(email))
-                if summary.mode in NOTIFY_MODES:  # Never the first backfill: old mail is not news.
-                    await notify_email(connection, email, decision, touch, email.thread_id not in known)
+                # Never old mail from the backfill (not news); mail that arrived since it began is.
+                if live_mail(email):
+                    notified += await notify_email(connection, email, decision, touch, email.thread_id not in known)
             elif verdict == "drop":
                 summary.dropped += 1
+                await retract_incoming(connection, email.id)
             else:
                 summary.deferred += 1
+                if decision.reason == "error" and datetime.now(timezone.utc) - email.at < timedelta(hours=48):
+                    summary.retry = True
         if rows:
             summary.usd += await research_jobs.record_spend(
                 connection, f"leads-{datetime.now(timezone.utc):%Y-%m-%d}", rows)
+        if notified:
+            summary.notified += notified
+            await self.push_now(connection)
         if limited is not None:
             raise limited
 
@@ -988,6 +1086,114 @@ async def relinkedin(dry_run: bool = False, days: int = RELINKEDIN_DAYS) -> dict
             out["queued_for_next_sync"] = cursor.rowcount
     logger.info("VALR leads: relinkedin %s", json.dumps(out, sort_keys=True))
     return out
+
+
+# The fast check: Gmail's Pub/Sub push normally starts a sync within seconds; this catches a
+# push that never came (Pub/Sub outage, an expired watch, the web app down) within ~a minute
+# instead of the 30-minute poll.
+
+def check_every() -> float:
+    """Seconds between checks (VALR_GMAIL_CHECK_S): 30 with Pub/Sub push on (a safety net),
+    15 without it (then the check is the only fast path); 0 turns it off."""
+    return max(0.0, float(os.getenv("VALR_GMAIL_CHECK_S", "30" if topic() else "15")))
+
+
+TOKEN_FOR = timedelta(minutes=45)  # Google access tokens live an hour.
+SKIP_LABELS = {"DRAFT", "CHAT"}  # Every draft autosave is a new message: not news.
+
+
+class GmailCheck:
+    """One history.list a tick from the stored historyId (2 quota units, no message fetched).
+    New messages that are still not decided at the next tick (the push-started sync would have
+    taken a few seconds) start the sync workflow; a historyId too old starts it at once (the
+    sync falls back to the 3-day search). Nothing while the backfill runs: it lists new mail
+    itself. The access token is reused for TOKEN_FOR."""
+
+    def __init__(self, connect: Callable[[], Any], start: Callable[[str], Any],
+                 http: httpx.AsyncClient | None = None, clock: Callable[[], datetime] | None = None) -> None:
+        self.connect, self.start = connect, start
+        self.http = http or httpx.AsyncClient(timeout=20)
+        self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self.token: str | None = None
+        self.token_at: datetime | None = None
+        self.waiting: set[str] = set()
+
+    async def access(self, connection: Any) -> str | None:
+        from app.interview_worker import gmail_access
+        now = self.clock()
+        if self.token and self.token_at and now - self.token_at < TOKEN_FOR:
+            return self.token
+        self.token, _ = await gmail_access(connection, self.http)
+        self.token_at = now
+        return self.token
+
+    async def tick(self) -> str:
+        """-> what it did: off | backfill | no-token | limited | error | idle | waiting | started."""
+        if not enabled():
+            return "off"
+        async with await self.connect() as connection:
+            await leads_store.setup(connection)
+            state = await leads_store.load_state(connection)
+            if not state.get("backfill_done_at") or not state.get("history_id"):
+                return "backfill"
+            token = await self.access(connection)
+            if not token:
+                return "no-token"
+            try:
+                refs, _ = await gmail_api.history(self.http, token, int(state["history_id"]), max_pages=1)
+            except gmail_api.HistoryGone:
+                self.waiting = set()
+                await self.start("check")
+                return "started"
+            except gmail_api.GmailRateLimited:
+                return "limited"
+            except httpx.HTTPError as error:
+                if isinstance(error, httpx.HTTPStatusError) and error.response.status_code == 401:
+                    self.token = None
+                return "error"
+            ids = unique_ids([r for r in refs if not SKIP_LABELS & set(r.get("labelIds") or [])])
+            done = await leads_store.recorded(connection, ids)
+        new = {i for i in ids if i not in done}
+        # With push on, a push-started sync gets one interval first; without it, sync at once.
+        if new & self.waiting or (new and not topic()):
+            self.waiting = set()
+            await self.start("check")
+            logger.info("VALR leads: %d new Gmail message(s) not synced by a push; sync started", len(new))
+            return "started"
+        self.waiting = new
+        return "waiting" if new else "idle"
+
+
+async def check_loop(connect: Callable[[], Any], start: Callable[[str], Any], stop: Any = None,
+                     check: GmailCheck | None = None) -> None:
+    """The research worker's background task: a GmailCheck tick every check_every() seconds."""
+    every = check_every()
+    if not every:
+        logger.info("VALR leads: the fast Gmail check is off (VALR_GMAIL_CHECK_S=0)")
+        return
+    if not topic():
+        logger.error("VALR leads: VALR_GMAIL_TOPIC is not set: no Gmail push, so the notification SLA "
+                     "(new email in the app within 10 s) cannot be met; checking Gmail every %g s instead", every)
+    stop = stop or asyncio.Event()
+    check = check or GmailCheck(connect, start)
+    while not stop.is_set():
+        try:
+            await check.tick()
+        except Exception as error:  # noqa: BLE001 - keep the worker alive
+            logger.warning("VALR leads: Gmail check failed (%s)", type(error).__name__)
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=every)
+        except asyncio.TimeoutError:
+            pass
+
+
+async def start_sync(client: Any, reason: str) -> None:
+    """Start (or poke) the Gmail sync workflow from the worker, like the push webhook does."""
+    from temporalio.common import WorkflowIDConflictPolicy
+    from app.lead_workflow import SYNC_WORKFLOW_ID, TASK_QUEUE, GmailSyncWorkflow
+    await client.start_workflow(GmailSyncWorkflow.run, GmailSyncInput(reason), id=SYNC_WORKFLOW_ID,
+                                task_queue=TASK_QUEUE, start_signal="poke",
+                                id_conflict_policy=WorkflowIDConflictPolicy.USE_EXISTING)
 
 
 # Schedules (the research worker calls this at start) and a small CLI.

@@ -16,7 +16,9 @@ Background tasks: the post-call report loop (app/post_call.py; VALR_POST_CALL=0 
 off): queued recordings -> scores, interviewer cues and a Telegram report; the notifications
 dispatch (app/notifications.py: Telegram alerts, quiet hours, the 09:00 digest); and phone
 call recordings (app/phone_recordings.py: Deepgram, then the notetaker pipeline;
-VALR_PHONE_RECORDINGS=0 turns it off).
+VALR_PHONE_RECORDINGS=0 turns it off); with VALR_LEADS=1, the fast Gmail check
+(app/lead_worker.GmailCheck, every VALR_GMAIL_CHECK_S=30 s) that starts a sync when new mail
+was not picked up by a Pub/Sub push.
 
 The callback itself is the existing CallbackWorkflow, on the callback worker's queue.
 """
@@ -361,6 +363,10 @@ async def main() -> None:
     reports = asyncio.create_task(post_call.loop(connect)) if post_call.enabled() else None
     # The bell's Telegram side (held items at 08:00, the 09:00 digest) and phone recordings.
     background = [asyncio.create_task(notifications.loop(connect))]
+    from app import lead_worker
+    if lead_worker.enabled():  # A Gmail push that never came: caught within ~a minute.
+        background.append(asyncio.create_task(lead_worker.check_loop(
+            connect, lambda reason: lead_worker.start_sync(client, reason))))
     if phone_recordings.enabled():
         background.append(asyncio.create_task(phone_recordings.loop(connect)))
     try:

@@ -6,6 +6,10 @@
 - `POST /valr/api/notifications/read` {ids: [..]}, {lead: "<lead id>"} or {all: true}: marks them read (CSRF, same
   origin, JSON: app/valr_dashboard.action_owner). The page marks an item read when it is
   clicked, not when the list opens.
+- `GET /valr/api/notifications/latency`: {ok, count, p50_s, p95_s, max_s, push_count, push_p50_s,
+  push_p95_s, sla_p50_s, sla_p95_s, met, window_h}: how fast new emails reached the bell
+  (Gmail's arrival time -> the item) and the phone (-> the push) over the last 24 hours, against
+  the owner's SLA (p95 10 s, p50 5 s; notifications.latency_report).
 - `POST /valr/api/notifications/settings` {immediate?, digest?, quiet?, delivery?}: the Telegram
   switches (immediate alerts, the 09:00 digest, quiet hours 23:00-08:00) and where alerts go:
   "both" (Telegram + phone push), "push" (phone push only) or "telegram" (app/webpush.py).
@@ -47,6 +51,17 @@ async def listing(request: Request, unread: int = 0) -> JSONResponse:
         switches = await store.switches()
     return JSONResponse({"ok": True, "unread": count, "items": [notifications.view(r, now) for r in rows],
                          "switches": switches.view()}, headers=NO_CACHE)
+
+
+@router.get("/valr/api/notifications/latency")
+async def latency(request: Request) -> JSONResponse:
+    await valr_dashboard.owner(request)
+    now = datetime.now(timezone.utc)
+    async with pool().connection() as connection:
+        store = notifications.Store(connection)
+        await store.setup()
+        report = await notifications.latency_report(store, now)
+    return JSONResponse({"ok": True, **report}, headers=NO_CACHE)
 
 
 class ReadRequest(BaseModel):

@@ -145,8 +145,10 @@ async def stored_snapshots(connection: Any) -> dict[str, SlotEvent]:
 
 async def notify_calendar(connection: Any, pairs: list[Any], before: dict[str, SlotEvent], full: bool,
                           now: datetime, owners: set[str]) -> None:
-    """Interview-like calendar changes -> the bell (app/notifications.py). Never fails the sync."""
+    """Interview-like calendar changes -> the bell (app/notifications.py), pushed right away
+    (not at the dispatch loop's next tick). Never fails the sync."""
     from app import notifications
+    added = 0
     try:
         store = None
         for event, change in pairs:
@@ -156,9 +158,11 @@ async def notify_calendar(connection: Any, pairs: list[Any], before: dict[str, S
             if store is None:
                 store = notifications.Store(connection)
                 await store.setup()
-            await notifications.from_calendar(store, event, found[0], now, found[1])
+            added += await notifications.from_calendar(store, event, found[0], now, found[1]) is not None
     except Exception as error:  # noqa: BLE001 - a missed notification must not fail the sync
         logger.warning("VALR calendar notification not created: %s", type(error).__name__)
+    if added:
+        await notifications.dispatch_now(connection)
 
 
 class InterviewActivities:
