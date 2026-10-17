@@ -16,7 +16,7 @@
 # 5. Prints the remaining cut-over steps.
 # Never touches cloudflared, Cloudflare Access, Temporal's or Postgres' containers, or GCP.
 set -euo pipefail
-VM=${VM:-ubuntu@<vm-ip>}
+VM=${VM:-valr-vm}
 KEY=${KEY:-$HOME/.ssh/voice-agent-lab_ed25519}
 BRANCH=${BRANCH:-valr-auth}
 REPO=$(git -C "$(dirname "$0")" rev-parse --show-toplevel)

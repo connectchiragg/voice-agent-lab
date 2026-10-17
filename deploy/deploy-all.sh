@@ -9,7 +9,7 @@
 #   DRY_RUN=1 bash deploy/deploy-all.sh  # ships and builds, stops before the swap
 #
 # Needs docker buildx on the VM, once (the Dockerfile's pip cache mounts need BuildKit):
-#   ssh -i ~/.ssh/voice-agent-lab_ed25519 ubuntu@<vm-ip> 'sh -s' < deploy/vm-buildx.sh The steps after the build are shared (deploy/deploy-lib.sh) with
+#   ssh -i ~/.ssh/voice-agent-lab_ed25519 valr-vm 'sh -s' < deploy/vm-buildx.sh The steps after the build are shared (deploy/deploy-lib.sh) with
 # deploy/deploy-pull.sh, which pulls images built by GitHub Actions instead.
 #
 # Steps, stopping at the first failure:
@@ -35,7 +35,7 @@
 #     under 3 GB, and removes dangling images. Prints the rollback commands.
 # Never touches cloudflared, Temporal or Postgres. Secrets are never printed.
 set -euo pipefail
-VM=${VM:-ubuntu@<vm-ip>}
+VM=${VM:-valr-vm}
 KEY=${KEY:-$HOME/.ssh/voice-agent-lab_ed25519}
 BRANCH=${BRANCH:-valr-interviews}
 WAIT_S=${WAIT_S:-900}
@@ -54,7 +54,7 @@ ssh_vm 'bash -s' <<'REMOTE'
 # check that docker buildx (BuildKit) is installed
 sudo docker buildx version >/dev/null 2>&1 && { echo "buildx: $(sudo docker buildx version | cut -d' ' -f2)"; exit 0; }
 echo "The VM has no docker buildx. Install it once, from the Mac (repo root):" >&2
-echo "  ssh -i ~/.ssh/voice-agent-lab_ed25519 ubuntu@<vm-ip> 'sh -s' < deploy/vm-buildx.sh" >&2
+echo "  ssh -i ~/.ssh/voice-agent-lab_ed25519 valr-vm 'sh -s' < deploy/vm-buildx.sh" >&2
 echo "Nothing changed." >&2
 exit 1
 REMOTE

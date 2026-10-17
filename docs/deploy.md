@@ -86,13 +86,24 @@ which cost about 7.5 times as much per hour):
 | Disk | 25 GB gp3 root, plus a 2 GB `/swapfile` (`vm.swappiness=10`) |
 | Image | Ubuntu 24.04 arm64 (`ubuntu-noble-24.04-arm64-server-20261004`) |
 | Network | security group `voice-agent-lab`: SSH only, from the owner's IP; no other inbound port, the tunnels are outbound |
-| SSH | `ssh -i ~/.ssh/voice-agent-lab_ed25519 ubuntu@<vm-ip>` (key pair `voice-agent-lab`) |
+| SSH | `ssh -i ~/.ssh/voice-agent-lab_ed25519 valr-vm` (key pair `voice-agent-lab`) |
 
 The public IPv4 is not an Elastic IP: it changes if the instance is stopped and
 started. Read it with
 `aws ec2 describe-instances --region ap-south-1 --instance-ids i-0a5a070417e9a1146 --query 'Reservations[0].Instances[0].PublicIpAddress'`,
 and update the security group if your own IP changes. Nothing else depends on
 it: voice.haciensus.com and valr.haciensus.com go through the named tunnel.
+
+The IP stays out of the repo. The deploy scripts connect to the SSH alias `valr-vm`
+(or `VM=user@host`), so add it to `~/.ssh/config` once:
+
+```
+Host valr-vm
+  HostName <the instance's public IPv4>
+  User ubuntu
+  IdentityFile ~/.ssh/voice-agent-lab_ed25519
+  IdentitiesOnly yes
+```
 
 **CPU credits.** A t4g.small's baseline is 20% of each vCPU. It earns 24
 credits an hour (one credit is one vCPU at 100% for a minute) and banks at most
@@ -511,7 +522,7 @@ most 3 GB of build cache. Change these with `PRUNE_BELOW_GB`, `ABORT_BELOW_GB`,
 
 **Once, before the first such deploy:** install BuildKit on the VM (the
 Dockerfile's pip cache needs it). From the repo root on the Mac:
-`ssh -i ~/.ssh/voice-agent-lab_ed25519 ubuntu@<vm-ip> 'sh -s' < deploy/vm-buildx.sh`.
+`ssh -i ~/.ssh/voice-agent-lab_ed25519 valr-vm 'sh -s' < deploy/vm-buildx.sh`.
 The first BuildKit build then reinstalls the Python packages once (the old
 builder's cache is not shared): several minutes, more with few CPU credits.
 

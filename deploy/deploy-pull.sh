@@ -14,7 +14,7 @@
 # images by full commit sha (only missing layers download) and tag them :next and :<commit>,
 # then the same safe steps as deploy-all.sh (deploy/deploy-lib.sh).
 set -euo pipefail
-VM=${VM:-ubuntu@<vm-ip>}
+VM=${VM:-valr-vm}
 KEY=${KEY:-$HOME/.ssh/voice-agent-lab_ed25519}
 BRANCH=${BRANCH:-valr-interviews}
 WAIT_S=${WAIT_S:-900}

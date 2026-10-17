@@ -15,7 +15,7 @@
 #    schedules valr-gmail-poll and valr-gmail-watch, and the lead counts (backfill).
 # Never touches cloudflared, Temporal's or Postgres' containers, or GCP.
 set -euo pipefail
-VM=${VM:-ubuntu@<vm-ip>}
+VM=${VM:-valr-vm}
 KEY=${KEY:-$HOME/.ssh/voice-agent-lab_ed25519}
 TEMPORAL_VERSION=${TEMPORAL_VERSION:-1.32.1}
 REPO=$(git -C "$(dirname "$0")" rev-parse --show-toplevel)

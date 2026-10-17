@@ -3,7 +3,7 @@
 # builder is deprecated" warning; only the stages a target needs; pip cache mounts).
 # deploy/deploy-all.sh and deploy/research-setup.sh need it. Idempotent: does nothing when
 # buildx is already there. From the Mac (repo root):
-#   ssh -i ~/.ssh/voice-agent-lab_ed25519 ubuntu@<vm-ip> 'sh -s' < deploy/vm-buildx.sh
+#   ssh -i ~/.ssh/voice-agent-lab_ed25519 valr-vm 'sh -s' < deploy/vm-buildx.sh
 # or on the VM: sh deploy/vm-buildx.sh
 # The first BuildKit build reinstalls the Python packages once (the legacy builder's cache
 # is not shared with BuildKit); later builds are cached again.
