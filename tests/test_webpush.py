@@ -325,6 +325,8 @@ def test_manifest_and_service_worker_are_public_with_the_right_headers(client):
     assert "showNotification" in sw.text and "notificationclick" in sw.text
     assert client.get("/static/icons/apple-touch-icon.png").status_code == 200
     assert client.get("/static/offline.html").status_code == 200
+    ico = client.get("/favicon.ico")  # Public, with no cookie: the Signal V at 16, 32 and 48 px.
+    assert ico.status_code == 200 and ico.headers["content-type"] == "image/x-icon" and ico.content[:4] == b"\x00\x00\x01\x00"
 
 
 def test_subscribe_unsubscribe_and_test_are_owner_only_with_csrf(client):

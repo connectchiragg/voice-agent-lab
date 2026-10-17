@@ -37,7 +37,7 @@ PUBLIC_PATHS = frozenset({
     "/healthz",
     "/login", "/login/google", "/oauth/google/callback", "/logout", "/private",
     # The Home Screen app (app/webpush_web.py): iOS may fetch these without the cookie; nothing private.
-    "/manifest.webmanifest", "/sw.js",
+    "/manifest.webmanifest", "/sw.js", "/favicon.ico",
 })
 PUBLIC_PREFIXES = ("/static",)  # Static assets (no data: the pages' data needs the owner).
 # The owner: every page, API, action and voice surface.

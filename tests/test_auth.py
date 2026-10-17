@@ -438,7 +438,7 @@ def test_every_route_is_public_or_needs_the_owner():
     assert not unclassified, f"Add these to app/auth/gate.py's PUBLIC or OWNER lists: {unclassified}"
     public = sorted(path for path in paths if gate.classify(path) == "public")
     assert public == sorted({"/healthz", "/hooks/fathom", "/hooks/gcal", "/hooks/gmail", "/hooks/granola",
-                             "/hooks/recording-upload", "/manifest.webmanifest", "/sw.js",
+                             "/hooks/recording-upload", "/manifest.webmanifest", "/sw.js", "/favicon.ico",
                              "/hooks/telegram", "/login", "/login/google",
                              "/logout", "/oauth/google/callback", "/private", "/static",
                              "/telnyx/webhook", "/ws/telnyx"}), public

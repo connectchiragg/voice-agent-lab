@@ -1,199 +1,211 @@
-"""Draws VALR's Home Screen icons (static/icons/*.png): the app's brand mark, a lit indigo
-orb with a soft glow on a night-sky square (static/icons/valr-mark.svg; the same orb as the
-top bar's .brand-mark in static/valr-ds.css).
+"""Draws VALR's icons from its mark: three pen-like ink strokes stepping down into a V (the
+"Signal V", Porcelain & Ink). One geometry, defined here, feeds every size.
 
-    python scripts/make_icons.py          # the web icons (static/icons/*.png)
-    python scripts/make_icons.py --mac    # the Mac app's icons (mac/VALRRecorderSync/Resources/)
+    python scripts/make_icons.py          # static/icons/: the SVG marks, favicons, PWA icons, badge
+    python scripts/make_icons.py --mac    # mac/VALRRecorderSync/Resources/: the menu-bar template
 
-The Mac app gets the same orb: AppIcon-1024.png (now drawn by mac/dmg/make_app_icon.swift; macOS's icon grid: an 824 px rounded square
-on a 1024 canvas with a soft shadow; mac/build.sh turns it into AppIcon.icns with sips and
-iconutil) and MenuBarIconTemplate.png/@2x (18 pt, black on transparent, so macOS tints it for
-light and dark menu bars).
+The mark (viewBox 0 0 100 100): three strokes centred at x 30, 50, 70; the outer two run
+y 9-61, the centre one y 39-91 (the V's point, the voice's peak). Each is 10 wide through
+its middle and eases to a fine rounded tip over the last fifth of its length. Outer strokes
+are Ink (#15172C), the centre one Muted Indigo (#4B4C9E); on dark, Porcelain (#F3EFE6) and
+Indigo Mist (#A9AAF0). The app icons put it on a warm porcelain tile.
 
-Pure Python (no Pillow): every pixel is shaded analytically (radial gradients, an
-anti-aliased edge), so the icons are crisp at every size. The badge stays a white V.
+The Mac app icon (AppIcon-1024.png) is drawn by mac/dmg/make_app_icon.swift from the same
+numbers. Pure Python (no Pillow): curves are flattened to polygons and filled with exact
+horizontal coverage and vertical supersampling, so the icons are crisp at every size.
 """
 import struct
 import zlib
 from pathlib import Path
 
-OUT = Path(__file__).resolve().parent.parent / "static" / "icons"
-COBALT = (0x24, 0x59, 0xD6)   # --signal-fill
-BONE = (0xF4, 0xF6, 0xFA)     # a touch lighter than --bone, for contrast on cobalt
-# The V in a unit square (the same points as valr-mark.svg's viewBox 0 0 100 100, divided by 100).
-V = [(0.25, 0.27), (0.365, 0.27), (0.5, 0.605), (0.635, 0.27), (0.75, 0.27), (0.556, 0.74), (0.444, 0.74)]
-SS = 8  # Supersampling per axis.
+ROOT = Path(__file__).resolve().parent.parent
+OUT = ROOT / "static" / "icons"
+MAC_OUT = ROOT / "mac" / "VALRRecorderSync" / "Resources"
+
+INK, PORCELAIN, INDIGO, MIST = (0x15, 0x17, 0x2C), (0xF3, 0xEF, 0xE6), (0x4B, 0x4C, 0x9E), (0xA9, 0xAA, 0xF0)
+TILE_TOP, TILE_BOTTOM = (0xF7, 0xF4, 0xEE), (0xE8, 0xE2, 0xD5)  # The porcelain tile, lit from above.
+BARS = [(30, 9, 61), (50, 39, 91), (70, 9, 61)]  # (centre x, top y, bottom y) in the 100-unit box.
+WIDTH = 10
+SS = 6  # Vertical supersampling.
 
 
-def inside(x: float, y: float, poly: list[tuple[float, float]]) -> bool:
-    hit = False
-    j = len(poly) - 1
-    for i, (xi, yi) in enumerate(poly):
-        xj, yj = poly[j]
-        if (yi > y) != (yj > y) and x < (xj - xi) * (y - yi) / (yj - yi) + xi:
-            hit = not hit
-        j = i
-    return hit
+def bar_segments(cx: float, y0: float, y1: float, w: float = WIDTH) -> tuple[tuple[float, float], list]:
+    """One stroke as a start point and ('L'|'Q'|'C', points...) segments."""
+    h, k, t = y1 - y0, w / 2, w * 0.2
+    e = h * 0.2
+    return (cx - t, y0 + 0.8), [
+        ("Q", (cx, y0 - 0.8), (cx + t, y0 + 0.8)),
+        ("C", (cx + k * 0.8, y0 + e * 0.35), (cx + k, y0 + e * 0.7), (cx + k, y0 + e)),
+        ("L", (cx + k, y1 - e)),
+        ("C", (cx + k, y1 - e * 0.7), (cx + k * 0.8, y1 - e * 0.35), (cx + t, y1 - 0.8)),
+        ("Q", (cx, y1 + 0.8), (cx - t, y1 - 0.8)),
+        ("C", (cx - k * 0.8, y1 - e * 0.35), (cx - k, y1 - e * 0.7), (cx - k, y1 - e)),
+        ("L", (cx - k, y0 + e)),
+        ("C", (cx - k, y0 + e * 0.7), (cx - k * 0.8, y0 + e * 0.35), (cx - t, y0 + 0.8)),
+    ]
+
+
+def bar_path(cx: float, y0: float, y1: float) -> str:
+    """The stroke as SVG path data."""
+    f = lambda v: f"{v:.2f}".rstrip("0").rstrip(".")  # noqa: E731
+    start, segs = bar_segments(cx, y0, y1)
+    d = [f"M{f(start[0])} {f(start[1])}"]
+    for kind, *pts in segs:
+        d.append(kind + " ".join(f"{f(x)} {f(y)}" for x, y in pts))
+    return "".join(d) + "Z"
+
+
+def bar_polygon(cx: float, y0: float, y1: float, steps: int = 24) -> list[tuple[float, float]]:
+    start, segs = bar_segments(cx, y0, y1)
+    poly, p = [start], start
+    for kind, *pts in segs:
+        if kind == "L":
+            poly.append(pts[0])
+        elif kind == "Q":
+            (c, q) = pts
+            poly += [((1 - s) ** 2 * p[0] + 2 * (1 - s) * s * c[0] + s * s * q[0],
+                      (1 - s) ** 2 * p[1] + 2 * (1 - s) * s * c[1] + s * s * q[1]) for s in (i / steps for i in range(1, steps + 1))]
+        else:
+            (c1, c2, q) = pts
+            poly += [((1 - s) ** 3 * p[0] + 3 * (1 - s) ** 2 * s * c1[0] + 3 * (1 - s) * s * s * c2[0] + s ** 3 * q[0],
+                      (1 - s) ** 3 * p[1] + 3 * (1 - s) ** 2 * s * c1[1] + 3 * (1 - s) * s * s * c2[1] + s ** 3 * q[1])
+                     for s in (i / steps for i in range(1, steps + 1))]
+        p = poly[-1]
+    return poly
 
 
 def coverage(size: int, poly: list[tuple[float, float]]) -> list[list[float]]:
-    """How much of each pixel the polygon covers, 0..1."""
-    left, right = min(p[0] for p in poly) * size, max(p[0] for p in poly) * size
-    top, bottom = min(p[1] for p in poly) * size, max(p[1] for p in poly) * size
+    """How much of each pixel the polygon (in pixels) covers, 0..1: scanlines with exact spans."""
     grid = [[0.0] * size for _ in range(size)]
-    for py in range(max(0, int(top) - 1), min(size, int(bottom) + 2)):
-        for px in range(max(0, int(left) - 1), min(size, int(right) + 2)):
-            hits = sum(inside((px + (sx + 0.5) / SS) / size, (py + (sy + 0.5) / SS) / size, poly)
-                       for sy in range(SS) for sx in range(SS))
-            grid[py][px] = hits / (SS * SS)
+    top, bottom = max(0, int(min(y for _, y in poly))), min(size, int(max(y for _, y in poly)) + 1)
+    edges = list(zip(poly, poly[1:] + poly[:1]))
+    for py in range(top, bottom):
+        row = grid[py]
+        for sy in range(SS):
+            y = py + (sy + 0.5) / SS
+            xs = sorted(x0 + (y - y0) * (x1 - x0) / (y1 - y0) for (x0, y0), (x1, y1) in edges if (y0 > y) != (y1 > y))
+            for a, b in zip(xs[0::2], xs[1::2]):
+                a, b = max(a, 0.0), min(b, float(size))
+                for px in range(int(a), min(size, int(b) + 1)):
+                    row[px] += max(0.0, min(b, px + 1) - max(a, px)) / SS
     return grid
+
+
+def mark_layers(size: int, scale: float = 1.0):
+    """Coverage of [outer strokes, centre stroke] with the 100-unit box scaled to `size` px."""
+    k = size / 100 * scale
+    off = (size - size * scale) / 2
+    polys = [[(off + x * k, off + y * k) for x, y in bar_polygon(*b)] for b in BARS]
+    left, right = coverage(size, polys[0]), coverage(size, polys[2])
+    return ([[min(1.0, left[y][x] + right[y][x]) for x in range(size)] for y in range(size)],
+            coverage(size, polys[1]))
+
+
+def mix(a, b, t):
+    return tuple(round(x + (y - x) * min(1.0, t)) for x, y in zip(a, b))
 
 
 def rounded(size: int, radius: float) -> list[list[float]]:
     """Coverage of a rounded square (radius as a fraction of the size)."""
     r = radius * size
-    grid = [[1.0] * size for _ in range(size)]
+    out = []
     for py in range(size):
+        row = []
         for px in range(size):
-            cx = min(max(px + 0.5, r), size - r)
-            cy = min(max(py + 0.5, r), size - r)
-            if (px + 0.5 - cx) ** 2 + (py + 0.5 - cy) ** 2 <= (r - 1.5) ** 2:
-                continue
-            hits = 0
-            for sy in range(SS):
-                for sx in range(SS):
-                    x, y = px + (sx + 0.5) / SS, py + (sy + 0.5) / SS
-                    cx, cy = min(max(x, r), size - r), min(max(y, r), size - r)
-                    hits += (x - cx) ** 2 + (y - cy) ** 2 <= r * r
-            grid[py][px] = hits / (SS * SS)
-    return grid
+            cx, cy = min(max(px + 0.5, r), size - r), min(max(py + 0.5, r), size - r)
+            d = ((px + 0.5 - cx) ** 2 + (py + 0.5 - cy) ** 2) ** 0.5
+            row.append(max(0.0, min(1.0, r - d + 0.5)))
+        out.append(row)
+    return out
 
 
-def scaled(poly: list[tuple[float, float]], factor: float) -> list[tuple[float, float]]:
-    """The polygon scaled about its centre (the maskable icon keeps the V in the safe zone)."""
-    cx = (min(p[0] for p in poly) + max(p[0] for p in poly)) / 2
-    cy = (min(p[1] for p in poly) + max(p[1] for p in poly)) / 2
-    return [(0.5 + (x - cx) * factor, 0.5 + (y - cy) * factor) for x, y in poly]
+def tile_icon(size: int, corner: float | None, scale: float = 0.54):
+    """The porcelain tile (rounded when `corner`, else full-bleed and opaque) with the mark."""
+    outer, centre = mark_layers(size, scale)
+    shape = rounded(size, corner) if corner else None
+    rows = []
+    for y in range(size):
+        bg = mix(TILE_TOP, TILE_BOTTOM, y / max(1, size - 1))
+        row = []
+        for x in range(size):
+            c = mix(mix(bg, INK, outer[y][x]), INDIGO, centre[y][x])
+            row.append((*c, round(255 * (shape[y][x] if shape else 1.0))))
+        rows.append(row)
+    return rows
 
 
-def png(path: Path, pixels: list[list[tuple[int, int, int, int]]]) -> None:
+def solid(size: int, rgb: tuple[int, int, int], scale: float = 1.0):
+    """The mark alone in one colour on transparent (badge, menu-bar template)."""
+    outer, centre = mark_layers(size, scale)
+    return [[(*rgb, round(255 * min(1.0, outer[y][x] + centre[y][x]))) for x in range(size)] for y in range(size)]
+
+
+def png_bytes(pixels) -> bytes:
     size = len(pixels)
     raw = b"".join(b"\x00" + bytes(c for px in row for c in px) for row in pixels)
     chunk = lambda kind, data: (struct.pack(">I", len(data)) + kind + data  # noqa: E731
                                 + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF))
-    path.write_bytes(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", size, size, 8, 6, 0, 0, 0))
-                     + chunk(b"IDAT", zlib.compress(raw, 9)) + chunk(b"IEND", b""))
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", size, size, 8, 6, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(raw, 9)) + chunk(b"IEND", b""))
 
 
-def mix(a: tuple[int, int, int], b: tuple[int, int, int], t: float) -> tuple[int, int, int]:
-    return tuple(round(x + (y - x) * t) for x, y in zip(a, b))  # type: ignore[return-value]
+def png(path: Path, pixels) -> None:
+    path.write_bytes(png_bytes(pixels))
 
 
-def icon(size: int, corner: float | None, mark_scale: float = 1.0) -> list[list[tuple[int, int, int, int]]]:
-    """Cobalt square (rounded when `corner`, else full-bleed and opaque) with the bone V."""
-    mark = coverage(size, scaled(V, mark_scale) if mark_scale != 1.0 else V)
-    shape = rounded(size, corner) if corner else None
-    return [[(*mix(COBALT, BONE, mark[y][x]), round(255 * (shape[y][x] if shape else 1.0)))
-             for x in range(size)] for y in range(size)]
+def ico(path: Path, images: list[bytes], sizes: list[int]) -> None:
+    """A .ico holding PNG images (the Vista+ format; every browser reads it)."""
+    head = struct.pack("<HHH", 0, 1, len(images))
+    offset = 6 + 16 * len(images)
+    entries, blobs = b"", b""
+    for data, s in zip(images, sizes):
+        entries += struct.pack("<BBBBHHII", s % 256, s % 256, 0, 0, 1, 32, len(data), offset + len(blobs))
+        blobs += data
+    path.write_bytes(head + entries + blobs)
 
 
-NIGHT_IN, NIGHT_OUT = (0x16, 0x20, 0x4A), (0x06, 0x09, 0x14)
-ORB_HI, ORB_MID, ORB_LO = (0xC7, 0xC8, 0xFF), (0x6F, 0x70, 0xF5), (0x2B, 0x2D, 0x8F)
-GLOW = (0x63, 0x66, 0xF1)
+def svg(body: str) -> str:
+    return f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">{body}</svg>\n'
 
 
-def orb(size: int, corner: float | None, orb_scale: float = 1.0) -> list[list[tuple[int, int, int, int]]]:
-    """The night-sky square (rounded when `corner`) with the lit orb and its glow."""
-    shape = rounded(size, corner) if corner else None
-    radius = 0.29 * orb_scale
-    out = []
-    for py in range(size):
-        row = []
-        for px in range(size):
-            x, y = (px + 0.5) / size, (py + 0.5) / size
-            d = ((x - 0.5) ** 2 + (y - 0.5) ** 2) ** 0.5
-            sky = mix(NIGHT_IN, NIGHT_OUT, min(1.0, d / 0.75))
-            glow = max(0.0, 1 - (d - radius) / (0.22 * orb_scale)) if d > radius else 1.0
-            color = mix(sky, GLOW, 0.55 * glow * glow)
-            # The orb: lit from the top left, darker towards the far edge.
-            hx, hy = 0.5 - radius * 0.3, 0.5 - radius * 0.4
-            t = min(1.0, ((x - hx) ** 2 + (y - hy) ** 2) ** 0.5 / (radius * 1.55))
-            lit = mix(ORB_HI, ORB_MID, min(1.0, t / 0.45)) if t < 0.45 else mix(ORB_MID, ORB_LO, (t - 0.45) / 0.55)
-            edge = max(0.0, min(1.0, (radius - d) * size + 0.5))  # Anti-aliased rim.
-            color = mix(color, lit, edge)
-            row.append((*color, round(255 * (shape[py][px] if shape else 1.0))))
-        out.append(row)
-    return out
+def mark_svg(outer: str, centre: str) -> str:
+    return (f'<path fill="{outer}" d="{bar_path(*BARS[0])}{bar_path(*BARS[2])}"/>'
+            f'<path fill="{centre}" d="{bar_path(*BARS[1])}"/>')
 
 
-def badge(size: int) -> list[list[tuple[int, int, int, int]]]:
-    """The monochrome badge (Android's status bar): a white V on transparent."""
-    mark = coverage(size, scaled(V, 1.35))
-    return [[(255, 255, 255, round(255 * mark[y][x])) for x in range(size)] for y in range(size)]
-
-
-MAC_OUT = OUT.parent.parent / "mac" / "VALRRecorderSync" / "Resources"
-
-
-def mac_app_icon(size: int = 1024) -> list[list[tuple[int, int, int, int]]]:
-    """macOS's icon grid: the orb on an 824/1024 rounded square, with a soft drop shadow."""
-    body = round(size * 824 / 1024)
-    pad = (size - body) // 2
-    radius = 0.2237 * body
-    tile = orb(body, 0.2237)
-    out: list[list[tuple[int, int, int, int]]] = []
-    for py in range(size):
-        row = []
-        for px in range(size):
-            # Signed distance to the rounded square, shifted down for the shadow.
-            x, y = px + 0.5 - size / 2, py + 0.5 - size / 2 - size * 0.012
-            qx, qy = abs(x) - (body / 2 - radius), abs(y) - (body / 2 - radius)
-            d = (max(qx, 0) ** 2 + max(qy, 0) ** 2) ** 0.5 + min(max(qx, qy), 0) - radius
-            shadow = 0.32 * max(0.0, 1 - d / (size * 0.03)) ** 2 if d > 0 else 0.32
-            fg = tile[py - pad][px - pad] if 0 <= py - pad < body and 0 <= px - pad < body else (0, 0, 0, 0)
-            a = fg[3] / 255
-            alpha = a + shadow * (1 - a)
-            color = tuple(round(c * a / alpha) for c in fg[:3]) if alpha > 0 else (0, 0, 0)
-            row.append((*color, round(255 * alpha)))
-        out.append(row)
-    return out
-
-
-def menubar_template(size: int) -> list[list[tuple[int, int, int, int]]]:
-    """The orb as a menu-bar template: a solid disc inside a thin halo ring, black on transparent."""
-    c = size / 2
-    disc, ring_in, ring_out = 0.25 * size, 0.38 * size, 0.47 * size
-    out = []
-    for py in range(size):
-        row = []
-        for px in range(size):
-            hits = 0
-            for sy in range(SS):
-                for sx in range(SS):
-                    d = ((px + (sx + 0.5) / SS - c) ** 2 + (py + (sy + 0.5) / SS - c) ** 2) ** 0.5
-                    hits += d <= disc or ring_in <= d <= ring_out
-            row.append((0, 0, 0, round(255 * hits / (SS * SS))))
-        out.append(row)
-    return out
-
-
-def mac() -> None:
-    MAC_OUT.mkdir(parents=True, exist_ok=True)
-    # AppIcon-1024.png now comes from mac/dmg/make_app_icon.swift (lit tile, edge highlight);
-    # mac_app_icon() is kept for reference but no longer overwrites it.
-    png(MAC_OUT / "MenuBarIconTemplate.png", menubar_template(18))
-    png(MAC_OUT / "MenuBarIconTemplate@2x.png", menubar_template(36))
-    print("wrote", ", ".join(sorted(p.name for p in MAC_OUT.glob("*.png"))))
+def favicon_svg() -> str:
+    """Porcelain tile in light browser chrome, an ink tile in dark."""
+    return svg('<style>.t{fill:#F3EFE6}.o{fill:#15172C}.c{fill:#4B4C9E}'
+               '@media (prefers-color-scheme:dark){.t{fill:#1B1D36}.o{fill:#F3EFE6}.c{fill:#A9AAF0}}</style>'
+               '<rect class="t" width="100" height="100" rx="22"/>'
+               f'<g transform="translate(14 14) scale(.72)"><path class="o" d="{bar_path(*BARS[0])}{bar_path(*BARS[2])}"/>'
+               f'<path class="c" d="{bar_path(*BARS[1])}"/></g>')
 
 
 def main() -> None:
     OUT.mkdir(parents=True, exist_ok=True)
-    png(OUT / "icon-192.png", orb(192, 0.22))
-    png(OUT / "icon-512.png", orb(512, 0.22))
-    png(OUT / "icon-maskable-512.png", orb(512, None, 0.8))  # The orb stays inside the 80% safe zone.
-    png(OUT / "apple-touch-icon.png", orb(180, None))         # iOS rounds the corners itself; opaque.
-    png(OUT / "badge-96.png", badge(96))
-    print("wrote", ", ".join(sorted(p.name for p in OUT.glob("*.png"))))
+    one = "".join(bar_path(*b) for b in BARS)
+    (OUT / "valr-mark.svg").write_text(svg(f'<path fill="currentColor" d="{one}"/>'))  # One colour: templates, video.
+    (OUT / "valr-mark-light.svg").write_text(svg(mark_svg("#15172C", "#4B4C9E")))
+    (OUT / "valr-mark-dark.svg").write_text(svg(mark_svg("#F3EFE6", "#A9AAF0")))
+    (OUT / "favicon.svg").write_text(favicon_svg())
+    fav = {s: png_bytes(tile_icon(s, 0.22, 0.72)) for s in (16, 32, 48)}
+    (OUT / "favicon-32.png").write_bytes(fav[32])
+    ico(OUT / "favicon.ico", [fav[16], fav[32], fav[48]], [16, 32, 48])
+    png(OUT / "icon-192.png", tile_icon(192, 0.2237))
+    png(OUT / "icon-512.png", tile_icon(512, 0.2237))
+    png(OUT / "icon-maskable-512.png", tile_icon(512, None, 0.46))  # Inside the 80% safe zone.
+    png(OUT / "apple-touch-icon.png", tile_icon(180, None))         # iOS rounds the corners itself; opaque.
+    png(OUT / "badge-96.png", solid(96, (255, 255, 255), 1.1))      # Android's status bar: white on transparent.
+    print("wrote", ", ".join(sorted(p.name for p in OUT.iterdir() if p.is_file())))
+
+
+def mac() -> None:
+    MAC_OUT.mkdir(parents=True, exist_ok=True)
+    # The menu bar: 18 pt, black on transparent, so macOS tints it for light and dark bars.
+    png(MAC_OUT / "MenuBarIconTemplate.png", solid(18, (0, 0, 0), 1.1))
+    png(MAC_OUT / "MenuBarIconTemplate@2x.png", solid(36, (0, 0, 0), 1.1))
+    print("wrote MenuBarIconTemplate.png, MenuBarIconTemplate@2x.png (AppIcon-1024.png: mac/dmg/make_app_icon.swift)")
 
 
 if __name__ == "__main__":
