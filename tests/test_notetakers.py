@@ -934,7 +934,7 @@ def test_media_without_a_key_or_for_other_providers(media_env):
     from app.notetakers import media
     _, resolve = media_env
     assert resolve(FakeFathom(), key=None)["status"] == "unavailable"
-    assert run(media.resolve(object(), "fireflies", "ff1", None, FAKE_KEY, "k"))["status"] == "unavailable"
+    assert run(media.resolve(object(), "granola", "g1", None, FAKE_KEY, "k"))["status"] == "unavailable"
 
 
 def test_media_never_logs_the_signed_url_or_the_key(media_env, caplog):

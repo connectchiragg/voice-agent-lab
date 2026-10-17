@@ -48,7 +48,7 @@ CLOSED_BAND = ("closed", "Closed", "Won or not moving forward")
 NOTETAKER_STATE = {"connected": "connected", "server": "connected", "refused": "error",
                    "not_connected": "not_connected"}
 NOTETAKERS = [("fathom", "Fathom"), ("fireflies", "Fireflies"), ("granola", "Granola")]
-PLAYABLE = ("fathom", "phone")  # Recordings that play inside VALR.
+PLAYABLE = ("fathom", "fireflies", "phone")  # Recordings that play inside VALR.
 OPTIONAL = {"granola"}  # Owner decision 2026-10-16: never an issue or a set-up step.
 
 
