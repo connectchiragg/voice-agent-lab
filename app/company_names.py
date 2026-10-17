@@ -1,5 +1,5 @@
 """The one place that decides which company an email, a calendar event, a recording or an
-interview is about. Leads, touchpoints, past and upcoming interviews, briefings and Telegram
+interview is about. Leads, touchpoints, past and upcoming interviews, briefings and notifications
 text all use it, so a name is either a real company or "Company not identified".
 
 Evidence, strongest first (`resolve`):
@@ -187,8 +187,12 @@ class Resolution:
 
 def owner_words(env: dict[str, str] | None = None) -> frozenset[str]:
     """Every part of the owner's names and address local parts, lower case."""
+    live = env is None
     env = os.environ if env is None else env
     raw = " ".join(env.get(k, "") for k in ("VALR_OWNER_NAME", "VALR_CANDIDATE_NAME"))
+    if live:  # The names edited on the Profile page too (app/owner.py).
+        from app import owner
+        raw += " " + " ".join(owner.names())
     for email in re.split(r"[,\s]+", " ".join(env.get(k, "") for k in ("VALR_OWNER_EMAILS", "VALR_GMAIL_ACCOUNT"))):
         raw += " " + email.partition("@")[0]
     return frozenset(w for w in re.findall(r"[a-z]+", raw.lower()) if len(w) >= 3)

@@ -12,7 +12,7 @@ import pytest
 from aiortc import RTCPeerConnection, RTCSessionDescription
 from fastapi.testclient import TestClient
 
-from app import call_now, callbacks, interview_store, interviews, main, memory, valr_dashboard, webrtc
+from app import owner, call_now, callbacks, interview_store, interviews, main, memory, valr_dashboard, webrtc
 from app.interview_types import SlotEvent
 from app.valr_ui import shell
 from tests.test_valr_pages import GOOD, OWNER, client  # noqa: F401 - the pages' client fixture.
@@ -112,7 +112,7 @@ def test_talk_here_briefs_the_next_interview_with_the_owner_memory(engines, owne
     assert prepared[0][1:] == ("brief_next", "slot-abc")
     assert greeted == [prepared[0][0]]  # VALR speaks first, with this call's context.
     assert [e["type"] for e in events][0] == "ready"
-    assert callers == [f"tel:{PHONE}"]  # The browser call uses the phone call's memory.
+    assert callers == [owner.KEY]  # The browser call uses the phone call's memory.
     assert hung.json() == {"ok": True} and peer.close_reason == "hung up by the caller"
     assert main.app.state.webrtc_peers == set()
 
@@ -255,39 +255,17 @@ def test_call_my_phone_with_nothing_coming_up_still_calls(client, monkeypatch): 
     response = client.post("/valr/api/call-now", json={},
                            headers={**GOOD, "X-CSRF-Token": token, "Content-Type": "application/json"})
     assert response.status_code == 200 and response.json()["mode"] == "talk"
-    assert calls == [(f"tel:{PHONE}", PHONE)]
+    assert calls == [(owner.KEY, PHONE)]
 
 
 # One memory for the owner, whichever way he calls.
 
-def test_the_owner_browser_key_is_his_phone_key(owner_env, monkeypatch):
-    monkeypatch.setattr(memory, "store", None)
-    assert memory.owner_alias(f"email:{OWNER}") == f"tel:{PHONE}"
-    assert memory.owner_alias("email:guest@example.com") == "email:guest@example.com"
-    assert memory.owner_alias(None) is None
-    monkeypatch.delenv("VALR_OWNER_PHONE")
-    assert memory.owner_alias(f"email:{OWNER}") == f"email:{OWNER}"  # No phone: unchanged.
-
-
-def test_what_was_said_in_the_browser_before_joins_the_phone_memory(owner_env, monkeypatch):
-    store = memory.InMemoryStore()
-    day = datetime(2026, 10, 1, tzinfo=timezone.utc)
-
-    async def scenario():
-        await store.record_call(f"tel:{PHONE}", memory.CallRecord("p1", day, day, "Phone call.", profile="Old profile."))
-        later = day + timedelta(days=3)
-        await store.record_call(f"email:{OWNER}", memory.CallRecord(
-            "w1", later, later, "Browser call.", profile="Prefers mornings.", open_items=["Send the deck"]))
-        monkeypatch.setattr(memory, "store", store)
-        monkeypatch.setattr(memory, "merged", set())
-        assert memory.owner_alias(f"email:{OWNER}") == f"tel:{PHONE}"
-        await asyncio.gather(*list(memory.tasks))
-        return await store.load(f"tel:{PHONE}"), await store.load(f"email:{OWNER}")
-
-    merged, gone = run(scenario())
-    assert gone is None and merged.call_count == 2
-    assert merged.profile == "Prefers mornings." and merged.open_items == ["Send the deck"]
-    assert {key for key, _ in store.summaries.values()} == {f"tel:{PHONE}"}
+def test_the_owner_browser_and_phone_keys_are_one_owner_key(owner_env):
+    # Merging old phone/email memory into the owner key is app/owner.py's job (tests/test_owner.py).
+    assert owner.canonical(f"email:{OWNER}") == owner.KEY
+    assert owner.canonical(f"tel:{PHONE}") == owner.KEY
+    assert owner.canonical("email:guest@example.com") == "email:guest@example.com"
+    assert owner.canonical(None) is None
 
 
 # The control.

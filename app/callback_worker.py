@@ -11,7 +11,11 @@ Activities, the only code here that touches the outside world:
 - `place_call`: Telnyx Call Control Dial from our number to the caller. The
   app's webhook answers for the rest (app/callbacks.py): when the call is
   answered it starts the media stream, and it signals the workflow the result.
+  For the owner (the stable key "owner", or a key he had before it) the number is
+  read at dial time (app/owner.py), so a changed number rings the new phone and a
+  removed one is not dialled.
 """
+import dataclasses
 import asyncio
 import base64
 import json
@@ -126,7 +130,15 @@ class Activities:
         if self.dial is None:
             raise ApplicationError("TELNYX_API_KEY is not set", type="DialRefused",
                                    non_retryable=True)
-        if request.caller_key != f"tel:{request.phone_e164}":
+        from app import owner
+        await owner.refresh()  # At most a minute old.
+        if owner.is_owner_key(request.caller_key):
+            current = owner.phone()
+            if not current:
+                raise ApplicationError("The owner has no phone on file", type="DialRefused",
+                                       non_retryable=True)
+            request = dataclasses.replace(request, phone_e164=current)
+        elif request.caller_key != f"tel:{request.phone_e164}":
             # Only the number that asked for the callback is ever dialled.
             raise ApplicationError("The number is not the caller's own", type="DialRefused",
                                    non_retryable=True)

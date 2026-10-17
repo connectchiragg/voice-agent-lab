@@ -11,11 +11,12 @@
   interviewers go through the HR guard and the classifier first.
 - `slot_synthesize`: merge the new parts into the slot's stored context, write the brief.
 - `slot_finish`, `slots_ready`, `block_record`: bookkeeping.
-- `dials_paused`: the dashboard's pause switch for automatic briefing calls (and, since
-  the Telegram design, for the heads-ups too).
+- `dials_paused`: the dashboard's pause switch for automatic briefing calls and the heads-ups.
 - `briefing_auto_dial`: the Settings choice (stored in valr_flags), else VALR_AUTO_DIAL=1 (default off):
   dial at T-30 instead of a heads-up.
-- `telegram_heads_up`: the T-30 Telegram message with [Call me now] [In 10 min] [Skip].
+- `push_heads_up`: the T-30 heads-up, a bell item pushed to the owner's phone ("Acme interview
+  in 30 min — tap for your briefing call"), opening the interview's page. Also served under
+  its old name `telegram_heads_up` for a heads-up that was in flight when Telegram went.
 
 Nothing here logs an email address, a phone number, an email's text or a pay figure.
 """
@@ -37,8 +38,7 @@ from temporalio.client import Client
 from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
 from temporalio.service import RPCError
 
-from app import (calendar_sync, google_oauth, interview_store, interview_types, research_jobs,
-                 telegram_api)
+from app import calendar_sync, google_oauth, interview_store, interview_types, owner, research_jobs
 from app.interview_types import (Person, SlotEvent, attendee_role, company_key, group_blocks,
                                  people, slot_workflow_id)
 from app.interview_workflow import (TASK_QUEUE, BlockCallWorkflow, BlockInput, BlockRecord,
@@ -59,15 +59,17 @@ def owner_emails() -> set[str]:
 
 
 def owner_phone() -> str:
-    return os.getenv("VALR_OWNER_PHONE", "").strip()
+    """The owner's phone now (app/owner.py: the Profile's, else VALR_OWNER_PHONE)."""
+    return owner.phone()
 
 
 def owner_key() -> str:
-    return f"tel:{owner_phone()}" if owner_phone() else ""
+    """The stable owner key: caller memory, limits and workflows survive a new number."""
+    return owner.KEY
 
 
 def zone() -> ZoneInfo:
-    return ZoneInfo(os.getenv("ASSISTANT_TIMEZONE", "Asia/Kolkata"))
+    return owner.zone()
 
 
 def clock(moment: datetime) -> str:
@@ -254,8 +256,8 @@ class InterviewActivities:
             due = (start - RESEARCH_LEAD).isoformat()
             for key in block.slot_keys:
                 summary.slots_started += await self.ensure_slot(by_key[key], block.block_id, due)
-            if not owner_phone():
-                continue
+            # Started with or without a phone: the heads-up needs none, and a dial reads the
+            # owner's number when it happens (app/callback_worker.place_call).
             events = [by_key[key] for key in block.slot_keys]
             old = previous.get(block.block_id)
             if old is None or old.get("state") in ("cancelled",):
@@ -523,50 +525,55 @@ class InterviewActivities:
                 return await interview_store.auto_dial(connection)
         except Exception as error:  # noqa: BLE001 - the database is down: the server default.
             activity.logger.warning("Auto-dial choice unavailable: %s", type(error).__name__)
-            return telegram_api.auto_dial()
+            return interview_store.default_auto_dial()
 
-    @activity.defn(name="telegram_heads_up")
-    async def telegram_heads_up(self, request: HeadsUpInput) -> str:
-        """Send the block's heads-up; 'sent', or why not (no secrets, no personal data)."""
-        bot = telegram_api.bot()
-        if bot is None:
-            return "Telegram is not configured (TELEGRAM_BOT_TOKEN)"
+    @activity.defn(name="push_heads_up")
+    async def push_heads_up(self, request: HeadsUpInput) -> str:
+        """The block's heads-up: 'sent', 'no_device' (it is in the bell only) or why not."""
+        from app import notifications
         async with await connect() as connection:
-            await telegram_api.setup(connection)
             await interview_store.setup(connection)
             await calendar_sync.setup(connection)
-            chat = await telegram_api.owner_chat(connection)
-            if chat is None:
-                return "Telegram is not linked yet (send the dashboard's /start code)"
             snapshots = await calendar_sync.snapshots(connection, list(request.slot_keys))
             events = [snapshots[key] for key in request.slot_keys
                       if key in snapshots and interview_types.briefable(snapshots[key])]
-            slots = await interview_store.load_slots(connection, [e.key for e in events])
-            companies = {}
-            for key in {slot.get("company_key") for slot in slots} - {None, ""}:
-                companies[key] = await interview_store.company(connection, key)
-        if not events:
-            return "no interviews left in this block"
-        # Public research only in Telegram: no spoken brief, no private (email) part, no pay.
-        ready = {slot["key"] for slot in slots if slot.get("status") in ("done", "partial")}
-        teasers = {slot["key"]: telegram_api.public_teaser(slot, companies.get(slot.get("company_key")))
-                   for slot in slots}
-        text = telegram_api.heads_up_text(events, teasers, ready, datetime.now(timezone.utc))
-        try:
-            message_id = await bot.send(chat, text, telegram_api.keyboard(request.block_id))
-        except telegram_api.TelegramError as error:
-            logger.warning("VALR Telegram heads-up failed: %s", error)
-            return f"failed: {error}"[:200]
-        async with await connect() as connection:
-            await telegram_api.setup(connection)
-            await telegram_api.record_heads_up(connection, request.block_id, message_id)
-        logger.info("VALR Telegram heads-up sent for %s", request.block_id)
-        return "sent"
+            if not events:
+                return "no interviews left in this block"
+            now = datetime.now(timezone.utc)
+            note = heads_up_note(request.block_id, events, now)
+            try:
+                result = await notifications.notify_now(connection, note, now)
+            except Exception as error:  # noqa: BLE001 - recorded as failed; nothing personal logged.
+                logger.warning("VALR heads-up failed: %s", type(error).__name__)
+                result = "failed"
+            await interview_store.record_heads_up(connection, request.block_id, result)
+        logger.info("VALR heads-up for %s: %s", request.block_id, result)
+        return "sent" if result in ("sent", "duplicate") else result
+
+    @activity.defn(name="telegram_heads_up")
+    async def legacy_heads_up(self, request: HeadsUpInput) -> str:
+        """The old activity name (Telegram is gone): a heads-up in flight is pushed instead."""
+        return await self.push_heads_up(request)
 
     def all(self) -> list[Any]:
         return [self.calendar_sync, self.slot_plan, self.interview_part, self.slot_synthesize,
                 self.slot_finish, self.slots_ready, self.block_record, self.dials_paused,
-                self.briefing_auto_dial, self.telegram_heads_up]
+                self.briefing_auto_dial, self.push_heads_up, self.legacy_heads_up]
+
+
+def heads_up_note(block_id: str, events: list[SlotEvent], now: datetime) -> dict[str, Any]:
+    """The bell item for a block's heads-up: "Acme interview in 30 min — tap for your briefing
+    call", opening the first interview's page with the call ready (?call=ready)."""
+    first = events[0]
+    who = (first.company or "").strip() or interview_types.event_noun(first.title).capitalize()
+    noun = interview_types.event_noun(first.title)
+    minutes = max(round((datetime.fromisoformat(first.start_utc) - now).total_seconds() / 60), 0)
+    more = f" (+{len(events) - 1} more)" if len(events) > 1 else ""
+    title = f"{who} {noun if who.lower() != noun else ''}".strip() + f" in {minutes} min{more}"
+    return {"source_id": f"heads_up:{block_id}", "kind": "briefing", "title": title[:60],
+            "body": "Tap for your briefing call.", "company": (first.company or "")[:120],
+            "link": f"/valr/interviews/{slot_workflow_id(first.key)}?call=ready", "gmail_url": "",
+            "thread_id": None, "action": "", "interview_at": datetime.fromisoformat(first.start_utc)}
 
 
 def part_record(result: InterviewPartResult) -> dict[str, Any]:

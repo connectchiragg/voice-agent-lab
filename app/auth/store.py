@@ -42,6 +42,9 @@ class Store(Protocol):
 
     async def end_session(self, token: str) -> None: ...
 
+    async def end_all(self) -> int:
+        """Every session (each device): "Sign out of all devices". -> how many."""
+
 
 _ready_pool: Any = None  # The pool the tables were created in (once per process).
 
@@ -102,6 +105,12 @@ class PostgresStore:
             await self._ready(connection)
             await connection.execute("DELETE FROM valr_sessions WHERE token_hash = %s",
                                      (core.token_hash(token),))
+
+    async def end_all(self) -> int:
+        async with self.pool.connection() as connection:
+            await self._ready(connection)
+            cursor = await connection.execute("DELETE FROM valr_sessions")
+            return int(getattr(cursor, "rowcount", 0) or 0)
 
 
 def backend() -> Store | None:

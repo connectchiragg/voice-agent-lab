@@ -1,4 +1,4 @@
-// The notification bell, the Telegram alert switches and the phone-recordings card.
+// The notification bell, Settings' alert switches and times, and the phone-recordings card.
 //
 // Bell (app/valr_ui/shell.bell): the count is unread notifications (new emails, call recordings
 // and calendar changes only), asked for every 60 s (/valr/api/notifications?unread=1). Opening the panel loads the list, grouped
@@ -174,16 +174,35 @@ function startBell() {
 
 function startSwitches() {
   const boxes = [...document.querySelectorAll("[data-notif-switch]")];
-  if (!boxes.length) return;
-  api("/valr/api/notifications").then(data => {
-    for (const box of boxes) { box.checked = Boolean(data.switches?.[box.dataset.notifSwitch]); box.disabled = false; }
-  }).catch(() => {});
+  const times = [...document.querySelectorAll("[data-notif-time]")];
+  if (!boxes.length && !times.length) return;
+  const sync = switches => {
+    for (const box of boxes) { box.checked = Boolean(switches?.[box.dataset.notifSwitch]); box.disabled = false; }
+    for (const pick of times) {
+      const value = switches?.[pick.dataset.notifTime];
+      if (value && ![...pick.options].some(o => o.value === value)) pick.add(new Option(value, value), 0);
+      if (value) pick.value = value;
+      pick.disabled = false;
+    }
+  };
+  api("/valr/api/notifications").then(data => sync(data.switches)).catch(() => {});
   for (const box of boxes) {
     box.addEventListener("change", async () => {
       try {
         await api("/valr/api/notifications/settings", {[box.dataset.notifSwitch]: box.checked});
         toast("Saved.");
       } catch (error) { box.checked = !box.checked; toast(error.message); }
+    });
+  }
+  for (const pick of times) {
+    let before = pick.value;
+    pick.addEventListener("focus", () => { before = pick.value; });
+    pick.addEventListener("change", async () => {
+      try {
+        const data = await api("/valr/api/notifications/settings", {[pick.dataset.notifTime]: pick.value});
+        sync(data.switches);
+        toast("Saved.");
+      } catch (error) { pick.value = before; toast(error.message); }
     });
   }
 }
@@ -193,8 +212,13 @@ function startPhone() {
   if (!status) return;
   const url = document.querySelector("[data-phone-url]");
   if (url) url.textContent = `${location.origin}/hooks/recording-upload`;
+  const on = document.querySelector("[data-phone-on]");
+  const off = document.querySelector("[data-phone-off]");
   const refresh = () => api("/valr/api/phone/status").then(data => {
-    if (!data.token) status.textContent = "Not set up.";
+    if (on) on.hidden = Boolean(data.off);
+    if (off) off.hidden = !data.off;
+    if (data.off) status.textContent = "Uploads are off: the Mac app and the Shortcut can't send recordings.";
+    else if (!data.token) status.textContent = "Not set up yet: show the upload token to start.";
     else if (!data.last_upload_at) status.textContent = "Ready. No recordings uploaded yet.";
     else {
       const when = new Date(data.last_upload_at).toLocaleString([], {dateStyle: "medium", timeStyle: "short"});
@@ -207,12 +231,16 @@ function startPhone() {
   const panel = document.querySelector("[data-phone-token]");
   const value = document.querySelector("[data-phone-token-value]");
   document.querySelectorAll("[data-phone-action]").forEach(button => button.addEventListener("click", async () => {
-    const action = button.dataset.phoneAction;
-    if (action === "rotate" && !confirm("Rotate the upload token? VALR for Mac and the iPhone Shortcut stop sending until you paste the new one into both.")) return;
+    const action = button.dataset.phoneAction;  // Rotate and Turn off are confirmed first ([data-confirm]).
     try {
       const data = await api("/valr/api/phone/token", {action});
-      value.textContent = data.token;
-      panel.hidden = false;
+      if (data.token) {
+        value.textContent = data.token;
+        panel.hidden = false;
+      } else {
+        panel.hidden = true;
+        toast(data.message);
+      }
       refresh();
     } catch (error) { toast(error.message); }
   }));

@@ -690,14 +690,14 @@ async def webhook(request: Request) -> dict[str, bool]:
     callback = callbacks.callback_of(payload.get("client_state"))  # Our own outbound calls.
     if kind == "call.initiated" and payload.get("direction") == "incoming" and call_control_id:
         # The caller's number becomes their memory key here and is never logged.
-        caller_key = memory.caller_key_from_phone(payload.get("from"))
+        caller_key = memory.call_caller_key(payload.get("from"))
         board.spawn(board.incoming(call_control_id, event_id, caller_key))
     elif kind == "streaming.failed" and call_control_id:
         logger.warning("Telnyx media stream failed: %s", payload.get("failure_reason"))
         board.spawn(hang_up(board, call_control_id))
     elif kind == "call.answered" and callback is not None and call_control_id:
         # The callee is the caller who asked for the callback.
-        caller_key = memory.caller_key_from_phone(payload.get("to"))
+        caller_key = memory.call_caller_key(payload.get("to"))
         board.spawn(callbacks.report(callback, call_control_id, "answered"))
         board.spawn(resolve_callback_items(caller_key))
         board.spawn(board.callback_answered(call_control_id, event_id, caller_key, callback))

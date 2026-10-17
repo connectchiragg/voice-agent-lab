@@ -12,10 +12,13 @@ calendar tool). psycopg and the standard library only.
   loads exactly that block's briefs.
 - `interview_context_push`: optional per-interview email context POSTed by a
   Mac-side job (/valr/context), encrypted with VALR_TOKEN_KEY; R1 reads it.
-- `valr_flags`: owner switches set from the dashboard. `dials_paused`: while true,
-  the block workflows skip their automatic briefing dials (on-demand callbacks the
-  owner asks for on a call still ring). VALR_BRIEFING_DIAL=0 stays the hard off.
+- `valr_flags`: owner switches set from the dashboard. `dials_paused`: while true (and
+  until its `until`, when set: "Pause for 1 day"), the block workflows skip their heads-ups
+  and automatic briefing dials (on-demand callbacks the owner asks for on a call still
+  ring). VALR_BRIEFING_DIAL=0 stays the hard off.
+- `heads_up_log`: per block, how its T-30 heads-up went (sent | no_device | failed).
 """
+import os
 import json
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -60,6 +63,12 @@ CREATE TABLE IF NOT EXISTS valr_flags (
     name         text PRIMARY KEY,
     enabled      boolean NOT NULL,
     updated_at   timestamptz NOT NULL DEFAULT now()
+);
+ALTER TABLE valr_flags ADD COLUMN IF NOT EXISTS until timestamptz;
+CREATE TABLE IF NOT EXISTS heads_up_log (
+    block_id     text PRIMARY KEY,
+    outcome      text NOT NULL,       -- sent | no_device | failed | duplicate
+    sent_at      timestamptz NOT NULL DEFAULT now()
 );
 CREATE TABLE IF NOT EXISTS prep_checks (
     slot_ref     text NOT NULL,      -- the interview (slot workflow id)
@@ -185,23 +194,26 @@ async def pushed_context(connection: Any, event_key: str, company_name: str,
 
 
 DIALS_PAUSED = "dials_paused"
-AUTO_DIAL = "auto_dial"  # Set from Settings: true = automatic T-30 call, false = Telegram heads-up.
+AUTO_DIAL = "auto_dial"  # Set from Settings: true = automatic T-30 call, false = a push heads-up.
 
 
 async def flag(connection: Any, name: str) -> dict[str, Any]:
-    """{enabled, updated_at}; a flag never set is off."""
+    """{enabled, updated_at, until}; a flag never set is off, and one past its `until` too."""
     cursor = await connection.execute(
-        "SELECT enabled, updated_at FROM valr_flags WHERE name = %s", (name,))
+        "SELECT enabled, updated_at, until FROM valr_flags WHERE name = %s", (name,))
     row = await cursor.fetchone()
-    return {"enabled": bool(row[0]), "updated_at": row[1]} if row else \
-        {"enabled": False, "updated_at": None}
+    if not row:
+        return {"enabled": False, "updated_at": None, "until": None}
+    until = row[2] if len(row) > 2 else None
+    expired = until is not None and until <= datetime.now(timezone.utc)
+    return {"enabled": bool(row[0]) and not expired, "updated_at": row[1], "until": None if expired else until}
 
 
-async def set_flag(connection: Any, name: str, enabled: bool) -> None:
+async def set_flag(connection: Any, name: str, enabled: bool, until: datetime | None = None) -> None:
     await connection.execute(
-        "INSERT INTO valr_flags (name, enabled, updated_at) VALUES (%s, %s, now()) "
-        "ON CONFLICT (name) DO UPDATE SET enabled = excluded.enabled, updated_at = now()",
-        (name, enabled))
+        "INSERT INTO valr_flags (name, enabled, updated_at, until) VALUES (%s, %s, now(), %s) "
+        "ON CONFLICT (name) DO UPDATE SET enabled = excluded.enabled, updated_at = now(), until = excluded.until",
+        (name, enabled, until))
 
 
 async def flag_choice(connection: Any, name: str) -> bool | None:
@@ -211,11 +223,31 @@ async def flag_choice(connection: Any, name: str) -> bool | None:
     return bool(row[0]) if row else None
 
 
+def default_auto_dial() -> bool:
+    """VALR_AUTO_DIAL=1: the automatic T-30 call instead of the heads-up, until Settings says."""
+    return os.getenv("VALR_AUTO_DIAL", "0").strip() == "1"
+
+
 async def auto_dial(connection: Any) -> bool:
     """How VALR reaches the owner at T-30: the Settings choice, else VALR_AUTO_DIAL (default off)."""
-    from app import telegram_api
     chosen = await flag_choice(connection, AUTO_DIAL)
-    return telegram_api.auto_dial() if chosen is None else chosen
+    return default_auto_dial() if chosen is None else chosen
+
+
+async def record_heads_up(connection: Any, block_id: str, outcome: str) -> None:
+    await connection.execute(
+        "INSERT INTO heads_up_log (block_id, outcome) VALUES (%s, %s) ON CONFLICT (block_id) "
+        "DO UPDATE SET outcome = excluded.outcome, sent_at = now()", (block_id, outcome[:40]))
+
+
+async def heads_ups(connection: Any, block_ids: list[str]) -> dict[str, dict[str, Any]]:
+    if not block_ids:
+        return {}
+    cursor = await connection.execute(
+        "SELECT block_id, outcome, sent_at FROM heads_up_log WHERE block_id = ANY(%s)", (block_ids,))
+    return {row[0]: {"block_id": row[0], "outcome": "sent" if row[1] in ("sent", "duplicate") else
+                     "failed" if row[1] != "no_device" else "no_device", "sent_at": row[2]}
+            for row in await cursor.fetchall()}
 
 
 def prep_item(text: str) -> str:

@@ -1,8 +1,9 @@
 """VALR interview mode, the app's side: owner gating, the owner's prompts and tools,
 and the briefing call.
 
-Interview mode applies only to the owner's own caller keys (VALR_OWNER_KEYS, else
-`tel:` VALR_OWNER_PHONE and `email:` each of VALR_OWNER_EMAILS). Everyone else gets the
+Interview mode applies only to the owner's own caller keys (VALR_OWNER_KEYS, else the
+stable key "owner", which app/owner.canonical gives his current phone and his sign-in
+emails). Everyone else gets the
 generic assistant: no profile, no calendar, no briefings, and the owner-only tools are
 neither offered to the model nor runnable (checked again in code). Caller ID can be
 spoofed (see Caller memory in the README); accepted for this lab.
@@ -33,7 +34,7 @@ from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
 from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.service import RPCError
 
-from app import calendar_sync, callbacks, interview_store, memory, research
+from app import calendar_sync, callbacks, interview_store, memory, owner, research
 from app.interview_types import (SlotEvent, brief_is_current, event_noun, group_blocks, people,
                                  slot_workflow_id)
 from app.interview_workflow import (TASK_QUEUE, BlockCallWorkflow, BlockInput,
@@ -65,8 +66,8 @@ def owner_keys() -> set[str]:
     explicit = {key.strip().lower() for key in os.getenv("VALR_OWNER_KEYS", "").split(",") if key.strip()}
     if explicit:
         return explicit
-    keys = {f"email:{e.strip().lower()}" for e in os.getenv("VALR_OWNER_EMAILS", "").split(",") if e.strip()}
-    phone = os.getenv("VALR_OWNER_PHONE", "").strip()
+    keys = {f"email:{e}" for e in owner.emails()} | {owner.KEY}
+    phone = owner.phone()
     return keys | ({f"tel:{phone}"} if phone else set())
 
 
@@ -79,14 +80,13 @@ def is_owner_call(conversation_id: str) -> bool:
 
 
 def owner_zone() -> ZoneInfo:
-    return ZoneInfo(os.getenv("ASSISTANT_TIMEZONE", "Asia/Kolkata"))
+    return owner.zone()
 
 
 def owner_name() -> str:
-    """The owner's first name (VALR_OWNER_NAME, else VALR_CANDIDATE_NAME's first word); "there"
-    when neither is set, so a greeting still reads "Hi there"."""
-    name = os.getenv("VALR_OWNER_NAME", "").strip() or os.getenv("VALR_CANDIDATE_NAME", "").strip()
-    return name.split()[0] if name else "there"
+    """The owner's first name (Profile, else VALR_OWNER_NAME, else VALR_CANDIDATE_NAME); "there"
+    when none is set, so a greeting still reads "Hi there"."""
+    return owner.first_name("there")
 
 
 # The owner's profile, read from the private data dir (mounted read-only on the VM).
@@ -174,7 +174,9 @@ OWNER_GREETINGS = ("Hi {name}, it's {assistant}. What are we prepping?",
 
 def owner_greeting(conversation_id: str) -> str:
     """One of a few openings, fixed per call, so not the same words every time he calls."""
-    name = memory.display_name(conversation_id) or owner_name()
+    # The name he set on the Profile page wins over the one memory learned from calls.
+    name = (owner.first_name("") if owner.cached("display_name") else "") \
+        or memory.display_name(conversation_id) or owner_name()
     if conversation_id in talk_calls:
         return TALK_GREETING.format(name=name, assistant=ASSISTANT_NAME)
     line = OWNER_GREETINGS[zlib.crc32(conversation_id.encode()) % len(OWNER_GREETINGS)]

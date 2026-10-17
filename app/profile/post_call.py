@@ -1,5 +1,5 @@
 """The post-call report: one new interview recording -> scores, impression cues, a short
-Telegram message. Synchronous (it calls Claude); app/post_call.py runs it in a thread
+report (kept with the recording; the owner is told by a push and the bell). Synchronous (it calls Claude); app/post_call.py runs it in a thread
 inside the research worker and delivers it.
 
 Steps (`process`):
