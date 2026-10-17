@@ -453,16 +453,30 @@ def two_events(day):
             for i in range(2)]
 
 
+# These tests describe "today" with events at 06:00 and 08:00 UTC; frozen just after midnight UTC
+# (morning in India) so both are still ahead and on the same local day, whatever the real clock says.
+FROZEN_NOW = datetime(2026, 10, 17, 0, 30, tzinfo=timezone.utc)
+
+
+class FrozenDatetime(datetime):
+    @classmethod
+    def now(cls, tz=None):
+        return FROZEN_NOW if tz is None else FROZEN_NOW.astimezone(tz)
+
+
 def briefing_env(monkeypatch, ready_keys):
+    monkeypatch.setattr(interviews, "datetime", FrozenDatetime)
+    datetime_now = FrozenDatetime.now
+
     async def day_events(day):
         return two_events(day)
 
     async def upcoming_events(limit_days=8):
-        return two_events(datetime.now(timezone.utc).date() + timedelta(days=1))
+        return two_events(datetime_now(timezone.utc).date() + timedelta(days=1))
 
     async def stored_slots(keys):
-        events = {e.key: e for e in two_events(datetime.now(timezone.utc).date())}
-        events.update({e.key: e for e in two_events(datetime.now(timezone.utc).date() + timedelta(days=1))})
+        events = {e.key: e for e in two_events(datetime_now(timezone.utc).date())}
+        events.update({e.key: e for e in two_events(datetime_now(timezone.utc).date() + timedelta(days=1))})
         return {k: ready_slot(events[k]) for k in keys if k in ready_keys}
 
     async def researched(keys):
