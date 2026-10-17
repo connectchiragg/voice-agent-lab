@@ -18,10 +18,13 @@ public struct AudioAttachment: Equatable, Sendable {
     /// The media file on disk, when it was found (iCloud may not have downloaded it yet).
     public var fileURL: URL?
     public var durationSeconds: Double?
+    /// Z_PK of the attachment row, used to build the AppleScript attachment id
+    /// (x-coredata://<store>/ICAttachment/p<pk>) when Notes must be asked to download the audio.
+    public var attachmentPK: Int64?
 
     public init(attachmentID: String, mediaID: String, uti: String, notePK: Int64, noteTitle: String,
                 noteCreated: Date?, folderTitle: String?, mediaFilename: String?, fileURL: URL?,
-                durationSeconds: Double? = nil) {
+                durationSeconds: Double? = nil, attachmentPK: Int64? = nil) {
         self.attachmentID = attachmentID
         self.mediaID = mediaID
         self.uti = uti
@@ -32,6 +35,7 @@ public struct AudioAttachment: Equatable, Sendable {
         self.mediaFilename = mediaFilename
         self.fileURL = fileURL
         self.durationSeconds = durationSeconds
+        self.attachmentPK = attachmentPK
     }
 }
 

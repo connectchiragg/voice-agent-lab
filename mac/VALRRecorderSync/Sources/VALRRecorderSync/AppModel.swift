@@ -17,17 +17,20 @@ final class AppModel: ObservableObject {
     @Published private(set) var sentToday = 0
     @Published private(set) var status = "Not set up yet"
     @Published private(set) var problem: SyncReport.Problem?
+    /// Call recordings whose audio has not come down from iCloud yet (the menu then offers "Fetch now").
+    @Published private(set) var waitingForDownload = 0
 
     let reader = NotesStoreReader()
     // Carries over an install from before the rename ("VALR Recorder Sync") before anything reads state or settings.
     let store: StateStore = { LegacyMigration.run(); return StateStore() }()
     let keychain = TokenKeychain()
     private lazy var engine = SyncEngine(source: { [reader] in try reader.read() }, store: store,
-                                         deleter: AppleScriptNoteDeleter())
+                                         deleter: AppleScriptNoteDeleter(), fetcher: NotesDownloadFetcher())
     private var timer: Timer?
     private var watcher: FSEventsWatcher?
     private var debounce: DispatchWorkItem?
     private var accessPoll: Timer?
+    private var fetchFollowUp: DispatchWorkItem?
     static let scanInterval: TimeInterval = 120
 
     private init() {
@@ -126,18 +129,40 @@ final class AppModel: ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + 5, execute: item)
     }
 
-    func sync(force: Bool = false) async {
+    /// The menu's "Fetch now": ask Notes straight away to download every waiting call recording.
+    func fetchNow() {
+        Task { await sync(force: true, fetchNow: true) }
+    }
+
+    func openAutomationSettings() {
+        let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation")!
+        NSWorkspace.shared.open(url)
+    }
+
+    /// A pass when the next download request is due (about 30 s), so a waiting recording does not
+    /// sit until the 2-minute timer. FSEvents starts a pass anyway as soon as the audio lands.
+    private func scheduleFetchFollowUp(at date: Date?) {
+        fetchFollowUp?.cancel()
+        guard let date else { return }
+        let item = DispatchWorkItem { Task { @MainActor in await AppModel.shared.sync() } }
+        fetchFollowUp = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + max(1, date.timeIntervalSinceNow) + 1, execute: item)
+    }
+
+    func sync(force: Bool = false, fetchNow: Bool = false) async {
         guard !isSyncing, settings.onboardingDone else { return }
         isSyncing = true
         defer { isSyncing = false }
         refreshAccess()
         let token = keychain.load(for: settings.serverURL)
         let uploader = token.map { Uploader(server: settings.serverURL, token: $0) }
-        let report = await engine.run(settings: settings, uploader: uploader, force: force)
+        let report = await engine.run(settings: settings, uploader: uploader, force: force, fetchNow: fetchNow)
         lastSync = store.state.lastSync
         sentToday = store.state.sentToday()
         problem = report.problem
         status = describe(report)
+        waitingForDownload = report.waitingForDownload
+        scheduleFetchFollowUp(at: report.nextDownloadCheck)
         if report.sent > 0 { notify(sent: report.sent) }
     }
 
@@ -150,12 +175,19 @@ final class AppModel: ObservableObject {
         case .offline: return "Can't reach VALR, will retry"
         case .schema: return "Couldn't read Notes (see Settings › Check Notes)"
         case .deleteFailed: return "Sent, but couldn't move a note to Recently Deleted"
+        case .notesAutomationDenied:
+            return "Can't ask Notes to download \(Self.recordings(r.waitingForDownload)): allow VALR to control Notes in System Settings › Privacy & Security › Automation"
         case nil:
-            if r.waitingForDownload > 0 { return "Waiting for \(r.waitingForDownload) recording(s) to download from iCloud" }
+            if r.waitingForDownload > 0, r.downloadGaveUp < r.waitingForDownload {
+                return "Asking Notes to download \(Self.recordings(r.waitingForDownload)) from iCloud…"
+            }
+            if r.waitingForDownload > 0 { return "Waiting for iCloud to download \(Self.recordings(r.waitingForDownload))" }
             if r.pending > 0 { return "\(r.pending) recording(s) still to send" }
             return "Up to date"
         }
     }
+
+    static func recordings(_ n: Int) -> String { n == 1 ? "1 recording" : "\(n) recordings" }
 
     func diagnose() -> String {
         do { return SyncEngine.diagnose(try reader.read()) } catch { return "\(error)" }

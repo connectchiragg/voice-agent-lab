@@ -32,6 +32,10 @@ struct SettingsView: View {
                     Button("Open Full Disk Access settings") { model.openFullDiskAccessSettings() }
                     Button("Check Notes") { diagnostics = model.diagnose() }
                 }
+                LabeledContent("Notes automation", value: automationText)
+                Text("Used to ask Notes to download a call recording from iCloud when only the note has arrived. macOS asks once; you can change it in Privacy & Security › Automation.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Button("Open Automation settings") { model.openAutomationSettings() }
                 if !diagnostics.isEmpty {
                     Text(diagnostics).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
                 }
@@ -44,6 +48,15 @@ struct SettingsView: View {
         .frame(width: 520)
         .padding(.vertical, 8)
         .onAppear { model.refreshAccess() }
+    }
+
+    private var automationText: String {
+        switch NotesDownloadFetcher.automationState() {
+        case .allowed: return "Allowed"
+        case .denied: return "Not allowed"
+        case .notAsked: return "Not asked yet"
+        case .unknown: return "Unknown (Notes is not open)"
+        }
     }
 
     private func replaceToken() async {
