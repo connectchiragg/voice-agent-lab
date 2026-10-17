@@ -896,3 +896,47 @@ details.fold:not(.card):not(.inline) { padding: var(--s4) var(--s6); border: 1px
 .prose pre { overflow-x: auto; padding: var(--s3); border-radius: var(--r-md); background: var(--surface-2); }
 .prose code { overflow-wrap: anywhere; }
 @media (max-width: 639px) { .prose.card { padding: var(--s4); } }
+
+/* iPhone and touch (mobile Safari, the Home Screen app). */
+/* Anchors (#lead, #prep, a seeked video) land below the sticky top bar, not under it. */
+html { scroll-padding-top: calc(var(--topbar) + 12px); }
+/* No double-tap zoom on controls, so quick repeated taps (seek, menus) stay taps. */
+a, button, summary, label, input, select, textarea, [role="button"] { touch-action: manipulation; }
+/* 100vh is the tallest viewport on iOS (toolbars hidden), so it overshoots; dvh is the visible one. */
+@supports (height: 100dvh) {
+  .solo { min-height: 100dvh; }
+  @media (min-width: 640px) { .notif-pop { max-height: calc(100dvh - var(--topbar) - 24px); } }
+  @media (min-width: 1100px) { .lead-panel { max-height: calc(100dvh - var(--topbar) - 32px); } }
+}
+.notif-head .icon-btn { flex: none; }
+/* A reminder line keeps its icon beside the text instead of wrapping the text below it. */
+.group-note > .i + span { flex: 1 1 10rem; min-width: 0; }
+@media (max-width: 899px) {
+  /* Landscape iPhone: keep content and the bars clear of the notch (viewport-fit=cover). */
+  .topbar-in, .main { padding-left: max(var(--gutter), env(safe-area-inset-left)); padding-right: max(var(--gutter), env(safe-area-inset-right)); }
+  .tabbar { padding-left: max(4px, env(safe-area-inset-left)); padding-right: max(4px, env(safe-area-inset-right)); }
+  /* Toasts sit above the tab bar and the home indicator, not behind them. */
+  .toast { bottom: calc(76px + env(safe-area-inset-bottom)); }
+  /* The bell's full-screen panel scrolls its last item clear of the tab bar. */
+  .notif-pop { padding-bottom: calc(80px + env(safe-area-inset-bottom)); }
+}
+@media (max-width: 899px) {
+  /* A lead row opens its lead wherever it's tapped, not only on the company name. */
+  .leads-table tbody tr { position: relative; }
+  .leads-table .row-anchor::after { content: ""; position: absolute; inset: 0; }
+}
+@media (max-width: 639px) {
+  /* The stage's light-on-ink text, now that the phone stage itself inherits the page colour. */
+  .now-card, .move-card { color: var(--text); }
+}
+@media (pointer: coarse), (max-width: 639px) {
+  /* iOS zooms the page into any field under 16px when it gets focus. */
+  .input, .input.sm, select, textarea,
+  input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]) { font-size: 16px; }
+  /* Bigger touch targets (Apple: 44pt) without moving the layout: padding taken back by margin. */
+  .btn { min-height: 44px; }
+  .btn.sm { min-height: 38px; }
+  .crumb, .card-link, .link-btn { padding-top: 10px; padding-bottom: 10px; margin-top: -10px; margin-bottom: -10px; }
+  .moment-seek { padding: 6px 10px; margin: -4px 0; }
+  .notif-gmail { padding: 8px 0; margin-top: -14px; margin-bottom: 0; }
+}
