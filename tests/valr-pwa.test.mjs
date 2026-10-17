@@ -91,3 +91,14 @@ test("a click focuses an open VALR window, or opens one", async () => {
   assert.deepEqual(navigated, ["https://valr.example.test/valr/leads?lead=l1"]);
   assert.equal(sw.opened.length, 1);
 });
+
+test("a push tells open VALR pages to refresh the bell at once", async () => {
+  const sw = worker();
+  const posted = [];
+  sw.windows.push({url: "https://valr.example.test/valr", postMessage: message => posted.push(message)});
+  let done;
+  sw.handlers.push({data: {text: () => JSON.stringify({title: "Reply · Acme", body: "Acme replied."})},
+                    waitUntil: p => { done = p; }});
+  await done;
+  assert.deepEqual(posted.map(m => m.type), ["valr-push"]);
+});
