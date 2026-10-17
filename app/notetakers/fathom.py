@@ -24,6 +24,7 @@
   interviewers and the company's domain (base.invitee_details).
 - Webhook: Standard Webhooks signature; the payload is the same Meeting object.
 """
+import asyncio
 import os
 from datetime import datetime
 from typing import Any
@@ -36,6 +37,8 @@ from app.profile.recordings import normalize_fathom
 NAME = "fathom"
 API = "https://api.fathom.ai/external/v1"
 MAX_PAGES = 15  # Fathom pages are 10 meetings each.
+RATE_RETRIES = 5  # 429s retried per page (Fathom allows 60 requests a minute: ratelimit-* headers).
+RATE_WAIT_MAX_S = 60.0
 
 
 def headers(key: str) -> dict[str, str]:
@@ -75,19 +78,43 @@ async def verify(key: str, http: httpx.AsyncClient) -> str:
 
 
 async def list_recordings(key: str, start: datetime, end: datetime, http: httpx.AsyncClient,
-                          with_meeting: bool = False) -> list[Recording]:
+                          with_meeting: bool = False, max_pages: int = MAX_PAGES,
+                          pace_s: float = 0.0) -> list[Recording]:
+    """Every meeting in [start, end), page by page (cursor). `pace_s` waits between pages
+    (the history import); a 429 waits for `Retry-After`/`ratelimit-reset` and tries again."""
     params: dict[str, Any] = {"created_after": utc(start.isoformat()), "created_before": utc(end.isoformat())}
     if with_meeting:
         params |= {"include_transcript": "true", "include_summary": "true"}
     out: list[Recording] = []
-    for _ in range(MAX_PAGES):
-        data = check(await http.get(f"{API}/meetings", headers=headers(key), params=params), "Fathom").json()
+    for page in range(max_pages):
+        if page and pace_s:
+            await asyncio.sleep(pace_s)
+        data = (await get_paced(http, f"{API}/meetings", headers(key), params)).json()
         out += [recording(item, with_meeting) for item in data.get("items") or [] if isinstance(item, dict)]
         cursor = data.get("next_cursor")
         if not cursor:
             break
         params["cursor"] = cursor
     return out
+
+
+def retry_after(response: httpx.Response) -> float:
+    for name in ("retry-after", "ratelimit-reset"):
+        try:
+            return min(max(float(response.headers.get(name, "")), 1.0), RATE_WAIT_MAX_S)
+        except ValueError:
+            continue
+    return 10.0
+
+
+async def get_paced(http: httpx.AsyncClient, url: str, hdrs: dict[str, str], params: dict[str, Any]) -> httpx.Response:
+    """GET with the 429 back-off; other errors raise as `check` says."""
+    for _ in range(RATE_RETRIES):
+        response = await http.get(url, headers=hdrs, params=params)
+        if response.status_code != 429:
+            return check(response, "Fathom")
+        await asyncio.sleep(retry_after(response))
+    return check(response, "Fathom")
 
 
 async def get_recording(key: str, external_id: str, http: httpx.AsyncClient,

@@ -107,7 +107,7 @@ export function playerShell(doc, id, title = "") {
 // The player: asks for the signed URL, waits while Fathom prepares it, recovers once from an
 // expired URL. `env` = {fetchMedia(id, refresh) -> answer, wait(ms) -> Promise, origin, now()}.
 export function createPlayer(box, env) {
-  const video = box.querySelector("video");
+  let video = box.querySelector("video");
   const status = box.querySelector("[data-player-status]");
   const id = box.dataset?.player ?? box.getAttribute("data-player");
   let refreshed = false;
@@ -118,7 +118,16 @@ export function createPlayer(box, env) {
     const span = status.querySelector("span.muted") ?? status;
     span.textContent = text;
   };
-  const play = (url, resumeAt = null) => {
+  const play = (url, resumeAt = null, type = "") => {
+    if (String(type).startsWith("audio/") && video.tagName === "VIDEO") {  // Audio only (Fireflies on a Pro plan).
+      const audio = (box.ownerDocument ?? document).createElement("audio");
+      audio.setAttribute("controls", "");
+      audio.setAttribute("preload", "metadata");
+      audio.setAttribute("aria-label", video.getAttribute("aria-label") || "Interview recording");
+      audio.addEventListener("error", onError);
+      video.replaceWith(audio);
+      video = audio;
+    }
     video.setAttribute("src", url);
     video.hidden = false;
     if (status) status.hidden = true;
@@ -140,7 +149,7 @@ export function createPlayer(box, env) {
       if (view.kind === "play") {
         const url = playableUrl(view.url, env.origin);
         if (!url) { say("The video link looked wrong, so it wasn't played. Use the link below."); return "stopped"; }
-        play(url, resumeAt);
+        play(url, resumeAt, view.type);
         return "playing";
       }
       if (view.kind === "stop") { say(view.text); return "stopped"; }
@@ -153,15 +162,16 @@ export function createPlayer(box, env) {
     }
   }
   // A signed URL that stopped working (it lives ~24 h): one fresh one, same second.
-  video.addEventListener("error", () => {
+  function onError() {
     if (refreshed || !video.getAttribute("src")) {
-      say("The video stopped loading. Reload the page, or open it in Fathom.");
+      say("The recording stopped loading. Reload the page, or open it in the notetaker.");
       return;
     }
     refreshed = true;
     const at = video.currentTime || 0;
     load(true, at);
-  });
+  }
+  video.addEventListener("error", onError);
   return {
     load,
     seek(seconds) {
@@ -248,6 +258,63 @@ export async function fillMoments(doc, box, fetchImpl, players, makePlayer) {
   return "moments";
 }
 
+// The past interview's "Transcript" section (owner only: /valr/api/recording/transcript).
+// Each turn's time seeks the player; the search box hides the turns that don't match.
+export function renderTranscript(doc, body, data, seek = null) {
+  const turns = Array.isArray(data?.turns) ? data.turns : [];
+  if (!turns.length) {
+    body.replaceChildren(node(doc, "p", {class: "muted small"}, data?.message || "No transcript for this recording."));
+    return null;
+  }
+  const list = node(doc, "ol", {class: "moments transcript"});
+  for (const turn of turns) {
+    const item = node(doc, "li", {"data-transcript-turn": ""});
+    if (turn.clock && seek && Number.isFinite(turn.seconds)) {
+      const button = node(doc, "button", {type: "button", class: "mono moment-seek", "aria-label": `Play from ${turn.clock}`}, turn.clock);
+      button.addEventListener("click", () => seek(turn.seconds));
+      item.append(button);
+    } else if (turn.clock) {
+      item.append(node(doc, "span", {class: "mono"}, turn.clock));
+    }
+    item.append(node(doc, "strong", {}, ` ${turn.who}: `), node(doc, "span", {}, String(turn.text ?? "")));
+    list.append(item);
+  }
+  body.replaceChildren(list);
+  return list;
+}
+
+export function filterTranscript(list, query) {
+  const q = String(query ?? "").trim().toLowerCase();
+  let shown = 0;
+  for (const item of list?.querySelectorAll?.("[data-transcript-turn]") ?? []) {
+    item.hidden = Boolean(q) && !item.textContent.toLowerCase().includes(q);
+    if (!item.hidden) shown++;
+  }
+  return shown;
+}
+
+function bootTranscript(doc, box, fetchImpl, players) {
+  const id = box.getAttribute("data-transcript-id");
+  const body = box.querySelector("[data-transcript-body]");
+  const search = box.querySelector("[data-transcript-search]");
+  let list = null;
+  const open = async () => {
+    if (box.dataset.loaded) return;
+    box.dataset.loaded = "1";
+    body.textContent = "Loading the transcript…";
+    try {
+      const data = await getJson(fetchImpl, `/valr/api/recording/transcript?id=${encodeURIComponent(id)}`);
+      const player = players[id];
+      list = renderTranscript(doc, body, data, player ? s => player.seek(s) : null);
+    } catch (error) {
+      body.textContent = `The transcript couldn't be loaded: ${error.message}`;
+    }
+  };
+  box.addEventListener("toggle", () => { if (box.open) open(); });
+  if (box.open) open();
+  search?.addEventListener("input", () => filterTranscript(list, search.value));
+}
+
 export function boot(doc = document, fetchImpl = (...args) => fetch(...args), origin = location.origin) {
   const players = {};
   const env = {
@@ -257,6 +324,7 @@ export function boot(doc = document, fetchImpl = (...args) => fetch(...args), or
   const makePlayer = box => { const p = createPlayer(box, env); p.load(); return p; };
   doc.querySelectorAll("[data-player]").forEach(box => { players[box.dataset.player] = makePlayer(box); });
   doc.querySelectorAll("[data-moments-id]").forEach(box => fillMoments(doc, box, fetchImpl, players, makePlayer));
+  doc.querySelectorAll("[data-transcript-id]").forEach(box => bootTranscript(doc, box, fetchImpl, players));
   // The interview drawer (static/valr.js asks) and the scorecard's "Watch recording" dialog.
   const into = async (body, query) => {
     body.textContent = "Looking for the recording…";

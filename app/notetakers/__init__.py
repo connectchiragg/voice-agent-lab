@@ -37,8 +37,8 @@ INFO: dict[str, dict[str, Any]] = {
     "fireflies": {
         "label": "Fireflies", "key_label": "Fireflies API key",
         "key_help": "In Fireflies: Integrations → Fireflies API → copy the API key.",
-        "gets": "Past meetings only (one-time history import); recordings open in Fireflies.",
-        "video": "link", "import": False},
+        "gets": "Past meetings (history import); audio or video plays here when your Fireflies plan allows it.",
+        "video": "player", "import": False},
     "granola": {
         "label": "Granola", "key_label": "Granola API key (needs a Granola Business or Enterprise plan)",
         "optional": True,
@@ -51,7 +51,7 @@ INFO: dict[str, dict[str, Any]] = {
         "gets": "Call recordings shared from Truecaller with the iOS Shortcut.",
         "video": "player", "import": False},
 }
-SYNC_DAYS = 7
+SYNC_DAYS = 14  # The routine sync's window: two weeks, so nothing slips between runs.
 
 
 def token_key() -> str:
@@ -229,6 +229,8 @@ async def recording_view(connection: Any, recording: Recording, http: httpx.Asyn
     if key and recording.meeting is None:
         try:
             recording = await module.get_recording(key, recording.external_id, http, listed=recording)
+            from app.notetakers import transcripts
+            await transcripts.save_quietly(connection, recording.provider, recording.external_id, recording.meeting)
         except (KeyRefused, ProviderError, httpx.HTTPError) as error:
             logger.warning("VALR notetaker %s transcript unavailable: %s", recording.provider, type(error).__name__)
             note = "The transcript could not be loaded just now, so there are no key moments."

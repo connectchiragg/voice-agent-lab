@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {createPlayer, fillMoments, mediaView, momentItems, nextDelay, playableUrl, POLL_LIMIT_MS,
-        renderMoments, renderRecording} from "../static/valr-player.js";
+        renderMoments, renderRecording, renderTranscript, filterTranscript} from "../static/valr-player.js";
 
 class El {
   constructor(tag) {
@@ -184,4 +184,36 @@ test("the drawer's full recording gets a player whose moments seek it", () => {
   assert.ok(body.textContent.includes("Open in Fathom"));
   body.all().find(e => e.tagName === "BUTTON").fire("click");
   assert.deepEqual(made, [10]);
+});
+
+test("the transcript renders turns whose times seek the player, and the find box filters them", () => {
+  const body = new El("div");
+  const sought = [];
+  const list = renderTranscript(doc, body, {turns: [
+    {who: "Ana", seconds: 95, clock: "1:35", text: "How would you shard it?"},
+    {who: "You", seconds: 110, clock: "1:50", text: "By tenant, then by time."},
+  ]}, s => sought.push(s));
+  const buttons = list.all().filter(e => e.tagName === "BUTTON");
+  assert.equal(buttons.length, 2);
+  buttons[1].fire("click");
+  assert.deepEqual(sought, [110]);
+  assert.match(body.textContent, /You: By tenant/);
+  assert.equal(filterTranscript(list, "shard"), 1);
+  assert.equal(filterTranscript(list, ""), 2);
+  const empty = new El("div");
+  assert.equal(renderTranscript(doc, empty, {turns: [], message: "Couldn't read this recording's transcript from Fireflies."}), null);
+  assert.match(empty.textContent, /from Fireflies/);
+});
+
+test("an audio-only recording plays in an audio element", async () => {
+  const box = new El("div"); box.setAttribute("data-player", "fireflies:ff1");
+  const video = new El("video"); video.replaceWith = node => { box.children = box.children.map(c => c === video ? node : c); };
+  box.ownerDocument = doc;
+  box.append(video);
+  const player = createPlayer(box, {origin: "https://valr.example", now: () => 0, wait: async () => {},
+    fetchMedia: async () => ({status: "completed", url: "https://cdn.fireflies.ai/a.mp3", content_type: "audio/mpeg"})});
+  assert.equal(await player.load(), "playing");
+  const audio = box.children[0];
+  assert.equal(audio.tagName, "AUDIO");
+  assert.equal(audio.getAttribute("src"), "https://cdn.fireflies.ai/a.mp3");
 });
