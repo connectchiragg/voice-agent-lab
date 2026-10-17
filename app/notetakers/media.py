@@ -1,6 +1,8 @@
 """Playing a past interview inside VALR: the provider's signed download, cached.
 
-Only Fathom offers one (its official download API, app/notetakers/fathom.py). The page asks
+Fathom (its official download API, app/notetakers/fathom.py) and Fireflies (the transcript's
+signed `video_url`, else `audio_url`, app/notetakers/fireflies.py: Pro plans and up get audio,
+Business and up video; the links live 24 hours) offer one. The page asks
 `GET /valr/api/recording/media?id=fathom:<id>` (owner only) and gets
 {status, url?, expires_at?, content_type?, message?}:
 
@@ -24,7 +26,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from app import google_oauth
-from app.notetakers import fathom, store
+from app.notetakers import fathom, fireflies, store
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -46,6 +48,18 @@ UNAVAILABLE = (403, 404, 422)
 FAILED = {"generation_failed": "Fathom couldn't prepare the video. Try again later, or open it in Fathom.",
           "generation_timeout": "Fathom took too long to prepare the video. Try again in a few minutes."}
 PREPARING = "Preparing the video… (first play can take a minute or two)"
+# Fireflies' signed media: its own storage or its CDN (not measured: no Fireflies key was
+# available locally on 2026-10-17), https only.
+FIREFLIES_HOST_SUFFIXES = (".fireflies.ai", ".amazonaws.com", ".cloudfront.net", ".googleapis.com")
+FIREFLIES_LIFETIME = timedelta(hours=24)
+FIREFLIES_NONE = ("Fireflies gives no audio or video for this recording through its API: audio needs a "
+                  "Fireflies Pro plan or higher, video a Business plan with video recording on.")
+
+
+def fireflies_allowed(url: str) -> bool:
+    parts = urlsplit(url or "")
+    host = parts.hostname or ""
+    return parts.scheme == "https" and any(host.endswith(s) or host == s[1:] for s in FIREFLIES_HOST_SUFFIXES)
 
 
 def _aware(moment: datetime | None) -> datetime | None:
@@ -82,6 +96,8 @@ def reusable(row: dict[str, Any] | None, now: datetime) -> bool:
 async def resolve(connection: Any, provider: str, external_id: str, http: httpx.AsyncClient, key: str | None,
                   token_key: str, now: datetime | None = None, refresh: bool = False) -> dict[str, Any]:
     """The playable media of one recording, from the cache or Fathom (see the module docstring)."""
+    if provider == "fireflies":
+        return await resolve_fireflies(connection, external_id, http, key, token_key, now, refresh)
     if provider != "fathom":
         return answer("unavailable", "This recording opens in its notetaker.")
     if not key:
@@ -104,6 +120,48 @@ async def resolve(connection: Any, provider: str, external_id: str, http: httpx.
             return answer("busy", MESSAGES[429])
         # 404 (the download is gone) or anything else: ask for a new one below.
     return await request(connection, external_id, http, key, token_key, now)
+
+
+async def resolve_fireflies(connection: Any, external_id: str, http: httpx.AsyncClient, key: str | None,
+                            token_key: str, now: datetime | None = None, refresh: bool = False) -> dict[str, Any]:
+    """Fireflies' signed video (else audio), cached sealed until 30 minutes before it expires."""
+    if not key:
+        return answer("unavailable", "Connect Fireflies in Settings to play recordings here.")
+    now = now or datetime.now(timezone.utc)
+    await store.setup(connection)
+    row = await store.get_media(connection, "fireflies", external_id)
+    age = now - (_aware(row["updated_at"]) or now) if row else None
+    if row and reusable(row, now) and not (refresh and age >= REFRESH_AFTER):
+        url = _unseal(token_key, row["url"])
+        if url:
+            return _completed(url, row["expires_at"], row["content_type"])
+    if row and row["status"] == "unavailable" and age < UNAVAILABLE_FOR and not refresh:
+        return answer("unavailable", row.get("error") or FIREFLIES_NONE)
+    try:
+        urls = await fireflies.media_urls(key, external_id, http)
+    except base_errors() as error:
+        logger.info("Fireflies media unavailable: %s", type(error).__name__)
+        return answer("failed", "Fireflies didn't answer. Try again in a minute, or open it in Fireflies.")
+    url, content_type = urls["video_url"], "video/mp4"
+    if not url:
+        url, content_type = urls["audio_url"], "audio/mpeg"
+    if not url:
+        await store.save_media(connection, "fireflies", external_id, {"status": "unavailable", "error": FIREFLIES_NONE})
+        return answer("unavailable", FIREFLIES_NONE)
+    if not fireflies_allowed(url):
+        logger.warning("Fireflies media on an unexpected host: %s", urlsplit(url).hostname)
+        return answer("failed", "Fireflies sent the recording from an unexpected place, so VALR won't play it.")
+    expires = now + FIREFLIES_LIFETIME
+    if token_key:
+        await store.save_media(connection, "fireflies", external_id, {
+            "status": "completed", "url": google_oauth.encrypt(token_key, url), "content_type": content_type,
+            "expires_at": expires})
+    return _completed(url, expires, content_type)
+
+
+def base_errors() -> tuple[type[BaseException], ...]:
+    from app.notetakers.base import KeyRefused, ProviderError
+    return (KeyRefused, ProviderError, httpx.HTTPError)
 
 
 async def request(connection: Any, external_id: str, http: httpx.AsyncClient, key: str, token_key: str,

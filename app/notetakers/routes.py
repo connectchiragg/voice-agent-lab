@@ -6,7 +6,7 @@ token, see app/valr_dashboard.action_owner):
 - `POST /valr/api/notetakers/{provider}/connect` {api_key}: checked with one call to the
   provider, stored encrypted; the answer never contains the key.
 - `POST /valr/api/notetakers/{provider}/disconnect`: forgets the stored key.
-- `POST /valr/api/notetakers/{provider}/sync`: "Check for new recordings" (last 7 days).
+- `POST /valr/api/notetakers/{provider}/sync`: "Check for new recordings" (last 14 days, SYNC_DAYS).
 - `POST /valr/api/notetakers/granola/import` {export}: a Granola note export (JSON).
 - `GET /valr/api/recording?ref=<slot ref>` or `?id=<provider>:<id>`: a past interview's
   recording (player or link) and its key moments; read when the detail view opens.
@@ -14,6 +14,12 @@ token, see app/valr_dashboard.action_owner):
   to stream, from Fathom's official download API, cached (app/notetakers/media.py):
   {status: completed | processing | busy | unavailable | failed | expired, url?, expires_at?,
   content_type?, message?}. `refresh=1` when the player's URL stopped working.
+- `GET /valr/api/recording/transcript?id=<provider>:<id>` (owner only): the kept transcript
+  (app/notetakers/transcripts.py) as {turns: [{who, seconds, clock, text}]}; fetched from the
+  provider and kept when VALR has none yet. `GET /valr/api/recording/transcript.txt?id=`: the
+  same as a .txt download. A hidden recording's transcript is not served.
+- `POST /valr/api/recording/reanalyse` {id}: "Try again" on an interview whose interviewer cues
+  are missing: the worker reads its transcript again and re-runs them (app/post_call.requeue).
 - `POST /valr/api/recordings/remove` {id, action: delete | hide}: the owner's "Delete
   recording" (a phone upload: audio, transcript, row, notification, evaluation) or "Hide" (a
   Fathom/Fireflies/Granola recording, which stays at the provider).
@@ -36,7 +42,7 @@ from typing import Any
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from app import notetakers, research, valr_dashboard
@@ -214,6 +220,85 @@ async def recording_media(request: Request, id: str = "", refresh: int = 0) -> J
     return JSONResponse({"ok": True, **result}, headers=NO_CACHE)
 
 
+async def transcript_data(provider: str, external_id: str) -> dict | None:
+    """The kept transcript; else the provider's (kept from now on). None when there is none."""
+    from app.notetakers import transcripts
+    async with pool().connection() as connection:
+        await store.setup(connection)
+        if (provider, external_id) in await store.hidden(connection):
+            raise HTTPException(404, "This recording is hidden.")
+        data = await transcripts.load(connection, provider, external_id)
+        if data is not None or provider not in ("fathom", "fireflies", "granola"):
+            return data
+        key = await notetakers.api_key(connection, provider)
+        if not key:
+            return None
+        row = await store.recording(connection, provider, external_id) or {}
+        listed = notetakers.from_row(row) if row else base.Recording(provider, external_id)
+        try:
+            async with notetakers.http_client() as http:
+                meeting = (await notetakers.PROVIDERS[provider].get_recording(key, external_id, http, listed=listed)).meeting
+        except (KeyRefused, ProviderError, httpx.HTTPError) as error:
+            logger.warning("VALR transcript fetch failed (%s): %s", provider, type(error).__name__)
+            return None
+        await transcripts.save_quietly(connection, provider, external_id, meeting)
+        return {"title": (meeting or {}).get("title") or "", "turns": transcripts.turns_of(meeting)}
+
+
+@router.get("/valr/api/recording/transcript")
+async def recording_transcript(request: Request, id: str = "") -> JSONResponse:
+    """The owner's transcript of one recording (never logged)."""
+    from app.notetakers import transcripts
+    await valr_dashboard.owner(request)
+    provider, external_id = parse_id(id)
+    data = await transcript_data(provider, external_id)
+    if not data:
+        label = notetakers.INFO.get(provider, {}).get("label", "the notetaker")
+        return JSONResponse({"ok": True, "turns": [],
+                             "message": f"Couldn't read this recording's transcript from {label}."}, headers=NO_CACHE)
+    return JSONResponse({"ok": True, "title": data.get("title") or "", "turns": transcripts.view(data)},
+                        headers=NO_CACHE)
+
+
+@router.get("/valr/api/recording/transcript.txt")
+async def recording_transcript_txt(request: Request, id: str = "") -> PlainTextResponse:
+    from app.notetakers import transcripts
+    await valr_dashboard.owner(request)
+    provider, external_id = parse_id(id)
+    data = await transcript_data(provider, external_id)
+    if not data:
+        raise HTTPException(404, "No transcript for this recording.")
+    name = f"transcript-{provider}-{external_id}.txt"
+    return PlainTextResponse(transcripts.as_text(data), headers={
+        **NO_CACHE, "Content-Disposition": f'attachment; filename="{name}"'})
+
+
+class ReanalyseRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    id: str = Field(min_length=3, max_length=140)
+
+
+@router.post("/valr/api/recording/reanalyse")
+async def reanalyse(request: Request) -> JSONResponse:
+    """The owner's "Try again": queue the interview's re-read (the worker fetches the transcript)."""
+    from app import post_call
+    await valr_dashboard.action_owner(request)
+    try:
+        body = ReanalyseRequest.model_validate_json(await request.body())
+    except ValidationError:
+        raise HTTPException(400, "Expected {id}.") from None
+    provider, external_id = parse_id(body.id)
+    if provider not in ("fathom", "fireflies"):
+        raise HTTPException(400, "Only Fathom and Fireflies recordings can be read again.")
+    async with pool().connection() as connection:
+        await store.setup(connection)
+        row = await store.recording(connection, provider, external_id) or {}
+        queued = await post_call.requeue(connection, provider, external_id, row.get("title") or "",
+                                         base.safe_link(row.get("share_url") or ""))
+    return JSONResponse({"ok": True, "message": "Queued: the coach reads the transcript again within a few minutes."
+                         if queued else "Already being read again."}, headers=NO_CACHE)
+
+
 class CompanyRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     id: str = Field(min_length=6, max_length=140)
@@ -269,6 +354,8 @@ async def remove(connection: Any, provider: str, external_id: str, action: str) 
     # can be sent again), the recording row, its notification and its evaluation entry.
     await phone_recordings.drop_upload(connection, external_id)
     await store.delete_recording(connection, provider, external_id)
+    from app.notetakers import transcripts
+    await transcripts.delete(connection, provider, external_id)  # The owner's kept copy goes too.
     for table, column in (("notifications", "source_id"), ("post_call_reports", None)):
         if not await _exists(connection, table):
             continue

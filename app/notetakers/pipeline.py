@@ -96,6 +96,9 @@ async def intake(connection: Any, recording: Recording, origin: str, hook: Hook 
     sealed = (google_oauth.encrypt(key, json.dumps(recording.meeting))
               if key and recording.meeting else None)
     new = await store.upsert_recording(connection, recording.public(), origin, sealed)
+    if recording.meeting:  # The owner's copy of the transcript (encrypted; app/notetakers/transcripts.py).
+        from app.notetakers import transcripts
+        await transcripts.save_quietly(connection, recording.provider, recording.external_id, recording.meeting)
     event = await match(recording) if match else None
     event_key = event["key"] if event else None
     if event:

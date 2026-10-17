@@ -236,6 +236,24 @@ document.addEventListener("click", async event => {
   }
 });
 
+// Past interview "Try again": read the transcript from the notetaker again and re-run the
+// interviewer cues (the worker does it within a few minutes).
+document.addEventListener("click", async event => {
+  const button = event.target.closest("[data-reanalyse]");
+  if (!button) return;
+  button.setAttribute("aria-busy", "true");
+  button.disabled = true;
+  try {
+    const reply = await postJson("/valr/api/recording/reanalyse", {id: button.dataset.reanalyse});
+    toast(reply.message || "Queued.");
+  } catch (error) {
+    toast(error.message);
+    button.disabled = false;
+  } finally {
+    button.removeAttribute("aria-busy");
+  }
+});
+
 // Merge: filter the company list as you type.
 document.querySelector("[data-merge-search]")?.addEventListener("input", event => {
   const q = event.target.value.trim().toLowerCase();

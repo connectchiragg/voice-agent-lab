@@ -256,7 +256,7 @@ def detail_page(view: dict[str, Any], block: dict[str, Any], slot: dict[str, Any
 # Past interviews.
 
 REVIEW = {"pending": ("Review pending", "muted"), "unavailable": ("Review not available", "muted"),
-          "sent": ("Review sent", "ok")}
+          "sent": ("Review sent", "ok"), "no_recording": ("No recording", "muted")}
 
 
 def outcome_chip(iv: dict[str, Any], with_evidence: bool = False) -> str:
@@ -296,7 +296,7 @@ def remove_item(iv: dict[str, Any]) -> str:
     """⋯ "Delete recording" (a phone upload: its data lives in VALR) or "Hide" (a notetaker's,
     which lives at the provider). static/valr-app.js confirms, then posts with the CSRF token."""
     provider, _, external_id = str(iv.get("id") or "").partition(":")
-    if not external_id:
+    if not external_id or provider == "calendar":  # A calendar-only entry (no recording).
         return ""
     if provider == "phone":
         return menu_item("Delete recording", "trash", attrs=f' data-recording-remove="delete" data-id="{e(iv["id"])}"')
@@ -374,12 +374,21 @@ def cue_html(c: dict[str, Any]) -> str:
             + (f'<p class="cue-after">After you said: {e(c["after"])}</p>' if c["after"] else "") + "</li>")
 
 
-def reaction_block(imp: dict[str, Any] | None) -> str:
+TRANSCRIPT_FROM = {"fathom": "Fathom", "fireflies": "Fireflies"}
+
+
+def reaction_block(imp: dict[str, Any] | None, iv: dict[str, Any] | None = None) -> str:
     if not imp:
         return '<p class="muted">How you came across appears here once the coach has reviewed this interview.</p>'
     if imp["coverage"] == "derived":
+        # The cues need the transcript: re-read from the notetaker (python -m app.notetakers history,
+        # or "Try again", POST /valr/api/recording/reanalyse).
+        iid = str((iv or {}).get("id") or "")
+        source = TRANSCRIPT_FROM.get(iid.partition(":")[0], "the notetaker")
         share = f" You talked {imp['talk_share'] * 100:.0f}% of the time." if imp["talk_share"] is not None else ""
-        return f'<p class="muted">The transcript is gone, so only the talk balance is known.{e(share)}</p>'
+        again = (f' <button type="button" class="btn sm" data-reanalyse="{e(iid)}">Try again</button>'
+                 if iid.partition(":")[0] in TRANSCRIPT_FROM else "")
+        return f'<p class="muted">Couldn\'t read this recording\'s transcript from {e(source)}.{e(share)}{again}</p>'
     verdict = "".join((
         f'<p class="verdict-line"><span class="chip tone-ok">Leaned in</span><span>{e(imp["leaned_in"])}</span></p>' if imp["leaned_in"] else "",
         f'<p class="verdict-line"><span class="chip tone-bad">Disengaged</span><span>{e(imp["disengaged"])}</span></p>' if imp["disengaged"] else ""))
@@ -428,15 +437,33 @@ def past_detail_page(view: dict[str, Any], iv: dict[str, Any], clock: Clock) -> 
 {unidentified_note(iv['company'])}
 <div class="review">
   <section class="card next-time" id="next"><h2 class="card-title">{icon('lightbulb', 18)}Next time</h2>{f'<ol class="points numbered">{nxt}</ol>' if nxt else '<p class="muted">No notes yet.</p>'}</section>
-  <section class="card" id="impression"><h2 class="card-title">{icon('users', 18)}How the interviewer reacted</h2>{reaction_block(iv.get('impression'))}</section>
+  <section class="card" id="impression"><h2 class="card-title">{icon('users', 18)}How the interviewer reacted</h2>{reaction_block(iv.get('impression'), iv)}</section>
   <section class="card" id="recording"><h2 class="card-title">{icon('video', 18)}Recording</h2>{recording_block(iv.get('recording'), iv.get('id') or '')}</section>
   {f'<section class="card" id="feedback"><h2 class="card-title">{icon("help", 18)}Question by question</h2><ul class="qlist">{qs}</ul></section>' if qs else ''}
   {skills_block(iv, labels)}
 </div>
+{transcript_section(iv)}
 {company_sheet("interview:" + (iv.get("id") or ""), iv["company"]) if iv.get("id") else ""}"""
 
 
+def transcript_section(iv: dict[str, Any]) -> str:
+    """The owner's transcript, folded (static/valr-player.js loads it from the owner-only
+    /valr/api/recording/transcript when opened): times seek the player, a find box, a .txt."""
+    iid = str(iv.get("id") or "")
+    if ":" not in iid or iv.get("no_recording"):
+        return ""
+    return f"""<details class="fold" id="transcript" data-transcript-id="{e(iid)}"><summary><span class="fold-title">Transcript</span><span class="fold-sub">Only you can see it</span>{icon('chevron-down', 18)}</summary>
+  <div class="fold-body">
+    <p><input type="search" class="input" placeholder="Find in transcript" aria-label="Find in transcript" data-transcript-search>
+      <a class="btn sm" href="/valr/api/recording/transcript.txt?id={e(iid)}" download>Download transcript (.txt)</a></p>
+    <div class="muted" data-transcript-body aria-live="polite">Open to load the transcript.</div>
+  </div>
+</details>"""
+
+
 def review_block(state: str) -> str:
+    if state == "no_recording":
+        return '<p class="muted">No recording of this interview, so there is no coach review.</p>'
     if state == "unavailable":
         return ('<p class="muted">Review not available: the coach found no interview to score in this call '
                 '(too short, or no transcript).</p>')
@@ -462,7 +489,8 @@ def recording_detail_page(iv: dict[str, Any], clock: Clock) -> str:
     return f"""{head}
 {unidentified_note(iv.get('company') or '')}
 <div class="review">
-  <section class="card" id="recording"><h2 class="card-title">{icon('video', 18)}Recording</h2>{recording_block(iv.get('recording'), iv['id'])}</section>
+  <section class="card" id="recording"><h2 class="card-title">{icon('video', 18)}Recording</h2>{recording_block(iv.get('recording'), '' if iv.get('no_recording') else iv['id'])}</section>
   <section class="card" id="coach"><h2 class="card-title">{icon('lightbulb', 18)}Coach review</h2>{review_block(iv.get('review') or 'pending')}</section>
 </div>
+{transcript_section(iv)}
 {company_sheet("interview:" + iv["id"], iv.get("company") or "")}"""
