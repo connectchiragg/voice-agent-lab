@@ -30,8 +30,21 @@ MARK_ART = ('<svg class="auth-mark" viewBox="0 0 100 100" aria-hidden="true">'
             '<path class="m-accent" d="M48 39.8Q50 38.2 52 39.8C54 42.64 55 46.28 55 49.4L55 80.6C55 83.72 54 87.36 52 90.2Q50 91.8 48 90.2C46 87.36 45 83.72 45 80.6L45 49.4C45 46.28 46 42.64 48 39.8Z"/></svg>')
 
 
+# Link previews (LinkedIn, Slack, iMessage): the public sign-in page is what their crawlers see.
+SOCIAL = """<meta name="description" content="VALR researches every interviewer, calls you with a spoken briefing before each round, and coaches you afterwards.">
+<meta property="og:type" content="website"><meta property="og:site_name" content="VALR">
+<meta property="og:url" content="https://valr.haciensus.com/">
+<meta property="og:title" content="VALR — your AI interview copilot">
+<meta property="og:description" content="Researches every interviewer, calls you with a spoken briefing before each round, and coaches you afterwards.">
+<meta property="og:image" content="https://valr.haciensus.com/static/og.jpg">
+<meta property="og:image:width" content="1200"><meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="VALR: an interview copilot with a lead globe and your next interview">
+<meta name="twitter:card" content="summary_large_image">"""
+
+
 def frame(title: str, body: str, theme: str | None) -> str:
     return f"""{head(title, theme)}
+{SOCIAL}
 <link rel="stylesheet" href="{asset('valr-auth.css')}">
 </head><body class="auth-page">
 <main class="auth-main">

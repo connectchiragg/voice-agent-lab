@@ -645,3 +645,11 @@ def test_safari_form_post_with_null_origin_is_same_origin_only_with_fetch_metada
     assert core.same_origin({"origin": "null", "sec-fetch-site": "same-origin"}, "valr.example.com")
     assert not core.same_origin({"origin": "null", "sec-fetch-site": "cross-site"}, "valr.example.com")
     assert not core.same_origin({"origin": "null"}, "valr.example.com")
+
+
+def test_sign_in_page_has_link_preview_tags():
+    from app.auth import pages
+    html = pages.login_page("/valr")
+    for tag in ('property="og:title"', 'property="og:description"',
+                'content="https://valr.haciensus.com/static/og.jpg"', 'name="twitter:card"'):
+        assert tag in html
