@@ -37,6 +37,14 @@ export function safeHref(url, origin = "") {
   } catch { return ""; }
 }
 
+// Where a message link opens: LinkedIn threads say so; everything else is Gmail.
+export function mailSource(url) {
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    return host === "linkedin.com" || host.endsWith(".linkedin.com") ? "LinkedIn" : "Gmail";
+  } catch { return "Gmail"; }
+}
+
 function el(doc, tag, attrs = {}, text = "") {
   const node = doc.createElement(tag);
   for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, v);
@@ -65,7 +73,7 @@ function itemNode(doc, item, onOpen, origin) {
   li.append(link);
   const gmail = safeHref(item.gmail_url);
   if (gmail) {
-    const a = el(doc, "a", {class: "notif-gmail", href: gmail, target: "_blank", rel: "noopener noreferrer"}, "Open in Gmail");
+    const a = el(doc, "a", {class: "notif-gmail", href: gmail, target: "_blank", rel: "noopener noreferrer"}, `Open in ${mailSource(gmail)}`);
     a.addEventListener("click", () => onOpen(item, null));
     li.append(a);
   }

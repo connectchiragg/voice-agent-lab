@@ -179,6 +179,13 @@ def telegram_line(tg: dict[str, Any], clock: Clock) -> str:
     return "connected" + (f" · since {clock.when(tg['linked_at'])}" if tg.get("linked_at") else "")
 
 
+def mail_source(url: str) -> str:
+    """Where a message link opens: "LinkedIn" for linkedin.com threads, else "Gmail"."""
+    from urllib.parse import urlsplit
+    host = (urlsplit(url or "").hostname or "").lower()
+    return "LinkedIn" if host == "linkedin.com" or host.endswith(".linkedin.com") else "Gmail"
+
+
 # The faces (Newsreader, Source Sans 3) are self-hosted in static/fonts (static/valr-ds.css
 # @font-face); preload the two every page paints first, so text doesn't reflow.
 FONTS = ('<link rel="preload" href="/static/fonts/source-sans-3-latin-wght-normal.woff2" as="font" type="font/woff2" crossorigin>'

@@ -928,3 +928,15 @@ def test_clicking_an_item_reads_it_on_the_server(client, monkeypatch):
     assert client.post("/valr/api/notifications/read", content=json.dumps({"lead": "../x"}), headers=headers).status_code == 400
     script = (ROOT / "static/valr-notify.js").read_text(encoding="utf-8")
     assert "[data-notif-item]" in script and "/valr/api/notifications/read" in script  # Clicks read; opening doesn't.
+
+
+def test_message_links_name_linkedin_or_gmail():
+    from app.valr_page import mail_source
+    from app.valr_ui.shell import note_item
+    now = datetime.now(timezone.utc)
+    assert mail_source("https://www.linkedin.com/messaging/thread/2-abc/") == "LinkedIn"
+    assert mail_source("https://mail.google.com/mail/u/0/#all/abc") == "Gmail"
+    assert mail_source("https://linkedin.com.example/x") == "Gmail"
+    item = {"id": "n1", "title": "Arcworks replied", "gmail_url": "https://www.linkedin.com/messaging/thread/2-abc/"}
+    assert ">Open in LinkedIn</a>" in note_item(item, now)
+    assert ">Open in Gmail</a>" in note_item({**item, "gmail_url": "https://mail.google.com/mail/u/0/#all/abc"}, now)
