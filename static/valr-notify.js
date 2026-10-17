@@ -1,7 +1,9 @@
 // The notification bell, the Telegram alert switches and the phone-recordings card.
 //
 // Bell (app/valr_ui/shell.bell): the count is unread notifications (new emails, call recordings
-// and calendar changes only), asked for every 60 s (/valr/api/notifications?unread=1). Opening the panel loads the list, grouped
+// and calendar changes only), asked for every 5 s while the page is visible, at once when it becomes
+// visible again and when a push arrives (static/sw.js posts "valr-push"), so a new email shows within
+// seconds (the SLA: 10 s from Gmail to the bell) (/valr/api/notifications?unread=1). Opening the panel loads the list, grouped
 // by day (Today, Yesterday, Earlier), several items of one company in a day folded into one
 // row. Opening does not mark anything read: clicking an item does (then it opens its page);
 // "Mark all read" marks everything. Built with DOM calls only; pure parts are exported.
@@ -9,7 +11,7 @@
 // app/valr_ui/shell.note_item): a red dot stays until that item is clicked. Every
 // [data-notif-count] on the page (the bell's badge) shows one number.
 
-export const POLL_MS = 60000;
+export const POLL_MS = 5000;
 
 export function groupByDay(items) {
   const days = [];
@@ -161,8 +163,14 @@ function startBell() {
       box.dataset.loaded = "1";
     } catch (error) { box.replaceChildren(el(document, "p", {class: "muted small"}, `Couldn't load: ${error.message}`)); }
   };
+  let last = null;
   const poll = async () => {
-    try { show((await api("/valr/api/notifications?unread=1")).unread); } catch { /* next time */ }
+    try {
+      const unread = (await api("/valr/api/notifications?unread=1")).unread;
+      show(unread);
+      if (last !== null && unread !== last && bell.open) load();  // Something new while the panel is open.
+      last = unread;
+    } catch { /* next time */ }
   };
   bell.addEventListener("toggle", () => { if (bell.open) load(); });
   bell.querySelector("[data-notif-all]")?.addEventListener("click", async () => {
@@ -170,6 +178,8 @@ function startBell() {
   });
   poll();
   setInterval(() => { if (!document.hidden) poll(); }, POLL_MS);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) poll(); });
+  navigator.serviceWorker?.addEventListener("message", event => { if (event.data?.type === "valr-push") poll(); });
 }
 
 function startSwitches() {

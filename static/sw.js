@@ -43,7 +43,9 @@ function parsePush(text) {
 
 self.addEventListener("push", event => {
   const {title, options, badge} = parsePush(event.data ? event.data.text() : "");
-  const work = [self.registration.showNotification(title, options)];
+  const work = [self.registration.showNotification(title, options),
+                self.clients.matchAll({type: "window", includeUncontrolled: true})  // Open pages refresh the bell now.
+                  .then(windows => windows.forEach(client => client.postMessage({type: "valr-push"}))).catch(() => {})];
   if (badge !== null && "setAppBadge" in self.navigator) {
     work.push((badge ? self.navigator.setAppBadge(badge) : self.navigator.clearAppBadge()).catch(() => {}));
   }
