@@ -367,7 +367,8 @@ async def telegram_test(request: Request) -> JSONResponse:
 
 @router.post("/valr/api/call-now")
 async def call_me_now(request: Request) -> JSONResponse:
-    """Call the owner now with the brief for his next interview (research it first if needed)."""
+    """Call the owner now with the brief for his next interview (research it first if needed);
+    with nothing coming up, a general chat. Rings once, no retries."""
     await action_owner(request)
     if research.pool is None:
         raise HTTPException(503, "Postgres is unavailable.")
@@ -377,19 +378,22 @@ async def call_me_now(request: Request) -> JSONResponse:
     from app import call_now
     from app.interview_worker import owner_key, owner_phone
     if not owner_phone():
-        raise HTTPException(503, "VALR_OWNER_PHONE is not set.")
+        raise HTTPException(409, "Add your phone in Settings first, or use Talk here.")
     now = datetime.now(timezone.utc)
     async with research.pool.connection() as connection:
         await calendar_sync.setup(connection)
         events = await calendar_sync.upcoming(connection, now, now + valr_view.LOOK_AHEAD)
     event = call_now.pick(events, "next", now)
-    if event is None:
-        raise HTTPException(404, "No upcoming interview to brief.")
+    if event is None:  # Nothing coming up: still ring him, for a general chat.
+        await call_now.call_talk_now(client, owner_key(), owner_phone(), rpc_timeout=callbacks.RPC_TIMEOUT)
+        logger.info("VALR call-now requested from the dashboard (no interview: talk mode)")
+        return JSONResponse({"ok": True, "mode": "talk", "message": "Calling you now. Nothing's coming up, "
+                             "so it's a general chat."}, headers=NO_CACHE)
     ready, _ = await interviews.split_ready([event])
     await call_now.call_now(client, event, owner_key(), owner_phone(), bool(ready),
                             rpc_timeout=callbacks.RPC_TIMEOUT)
     logger.info("VALR call-now requested from the dashboard (brief %s)", "ready" if ready else "researching")
-    return JSONResponse({"ok": True, "message": "Calling you now." if ready else
+    return JSONResponse({"ok": True, "mode": "brief", "message": "Calling you now." if ready else
                          "Researching first; VALR calls you within five minutes."}, headers=NO_CACHE)
 
 

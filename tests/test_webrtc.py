@@ -12,7 +12,8 @@ from aiortc.mediastreams import MediaStreamError
 from aiortc.rtp import RtpPacket
 from fastapi.testclient import TestClient
 
-from app import ice, main, webrtc
+from app import ice, main, valr_dashboard, webrtc
+from app import auth
 from app.auth import Identity, gate
 from app.webrtc import FRAME_S, Downsampler, LowDelayAudioBuffer, Peer, SpeechTrack
 from tests.test_pipeline import FakeListener, FakeSpeaker, make_engines
@@ -28,6 +29,12 @@ def signed_in(monkeypatch):
     async def owner(connection):
         return Identity("owner@example.com", "session")
     monkeypatch.setattr(gate, "identify", owner)
+    monkeypatch.setattr(auth, "identify", owner)  # The offer's own owner check (valr_dashboard).
+
+
+def csrf():
+    """The page's CSRF token for the signed-in owner (every offer needs it)."""
+    return {"X-CSRF-Token": valr_dashboard.csrf_token("owner@example.com")}
 
 
 def opus_frames(tone_hz, seconds, amplitude=0.5, rate=48000):
@@ -435,19 +442,21 @@ def engines(monkeypatch):
 
 def test_offer_is_validated_and_calls_are_limited(engines, monkeypatch):
     client = TestClient(main.app)
-    bad = client.post("/webrtc/offer", json={"type": "offer", "sdp": "nonsense", "echo_cancelled": True})
+    bad = client.post("/webrtc/offer", json={"type": "offer", "sdp": "nonsense", "echo_cancelled": True},
+                      headers=csrf())
     assert bad.status_code == 400 and main.app.state.webrtc_peers == set()
-    assert client.post("/webrtc/offer", json={"type": "answer", "sdp": "x",
-                                              "echo_cancelled": True}).status_code == 422
+    assert client.post("/webrtc/offer", json={"type": "answer", "sdp": "x", "echo_cancelled": True},
+                       headers=csrf()).status_code == 422
     monkeypatch.setattr(webrtc, "MAX_CALLS", 0)
-    full = client.post("/webrtc/offer", json={"type": "offer", "sdp": "x", "echo_cancelled": True})
+    full = client.post("/webrtc/offer", json={"type": "offer", "sdp": "x", "echo_cancelled": True},
+                       headers=csrf())
     assert full.status_code == 503
 
 
 def test_offer_without_models_is_refused(monkeypatch):
     monkeypatch.delattr(main.app.state, "engines", raising=False)
     response = TestClient(main.app).post("/webrtc/offer", json={"type": "offer", "sdp": "x",
-                                                                "echo_cancelled": True})
+                                                                "echo_cancelled": True}, headers=csrf())
     assert response.status_code == 503
 
 
@@ -500,9 +509,10 @@ def test_a_real_peer_connection_hears_a_turn_and_receives_the_reply(engines):
         transport = httpx.ASGITransport(app=main.app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
             response = await client.post("/webrtc/offer", json={
-                "type": "offer", "sdp": browser.localDescription.sdp, "echo_cancelled": True})
+                "type": "offer", "sdp": browser.localDescription.sdp, "echo_cancelled": True}, headers=csrf())
         assert response.status_code == 200
-        await browser.setRemoteDescription(RTCSessionDescription(**response.json()))
+        answer = response.json()
+        await browser.setRemoteDescription(RTCSessionDescription(answer["sdp"], answer["type"]))
         async with asyncio.timeout(10):
             while not any(event["type"] == "reply_end" for event in events):
                 received.clear()
@@ -538,7 +548,7 @@ def test_refused_speech_service_closes_the_peer_with_a_clear_503(engines):
         transport = httpx.ASGITransport(app=main.app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
             response = await client.post("/webrtc/offer", json={
-                "type": "offer", "sdp": browser.localDescription.sdp, "echo_cancelled": True})
+                "type": "offer", "sdp": browser.localDescription.sdp, "echo_cancelled": True}, headers=csrf())
         await browser.close()
         return response
 

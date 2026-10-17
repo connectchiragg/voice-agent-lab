@@ -459,6 +459,8 @@ def greeting(conversation_id: str) -> str:
     call = calls.get(conversation_id)
     if call is None:
         from app import interviews  # Imports this module; loaded late to avoid a cycle.
+        if interviews.on_briefing_call(conversation_id):  # "Talk here" briefing the next interview.
+            return interviews.greeting(conversation_id, "")
         if interviews.is_owner_call(conversation_id):
             return interviews.owner_greeting(conversation_id)
         return memory.greeting(conversation_id)
