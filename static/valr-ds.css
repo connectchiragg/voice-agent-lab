@@ -733,6 +733,7 @@ details.fold:not(.card):not(.inline) { padding: var(--s4) var(--s6); border: 1px
 .seg { display: inline-flex; padding: 3px; gap: 3px; border-radius: var(--r-md); background: var(--surface-2); width: fit-content; max-width: 100%; }
 .seg button { border: 0; background: none; padding: 6px 12px; border-radius: var(--r-sm); color: var(--text-2); font-weight: 500; font-size: var(--fs-14); }
 .seg button[aria-pressed="true"] { background: var(--surface); color: var(--text); box-shadow: var(--e1); }
+.seg button[disabled] { opacity: .55; cursor: not-allowed; }
 .seg-field { border: 0; margin: var(--s2) 0 0; padding: 0; display: grid; gap: 6px; min-width: 0; }
 .seg-option { position: relative; display: inline-flex; cursor: pointer; }
 .seg-option input { position: absolute; opacity: 0; width: 1px; height: 1px; }
