@@ -48,10 +48,11 @@ class MemoryStore:
     async def delete(self, note_id):
         self.rows = [r for r in self.rows if r["id"] != note_id]
 
-    async def latencies(self, since):
-        return [((r["created_at"] - r["arrived_at"]).total_seconds(),
-                 (r["push_sent_at"] - r["arrived_at"]).total_seconds() if r.get("push_sent_at") else None)
-                for r in self.rows if r.get("arrived_at") and r["created_at"] >= since]
+    async def latencies(self, since, prefix="gmail:"):
+        def gap(key, r):
+            return (r[key] - r["arrived_at"]).total_seconds() if r.get(key) else None
+        return [(gap("created_at", r), gap("push_sent_at", r), gap("ready_at", r)) for r in self.rows
+                if r.get("arrived_at") and r["created_at"] >= since and str(r["source_id"]).startswith(prefix)]
 
     async def recent_for_thread(self, thread_id, since):
         found = [r for r in self.rows if r.get("thread_id") == thread_id and r["created_at"] >= since

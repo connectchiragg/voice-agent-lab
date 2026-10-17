@@ -54,6 +54,10 @@ Latency: Gmail's Pub/Sub push starts a sync within seconds (app/leads_web.py); t
 fast check (app/lead_worker.GmailCheck, every 30 s) catches a push that never came; the item is
 stored as soon as its batch is classified, and pushed right then (`dispatch_now`), not at the
 dispatch loop's next tick. Calendar changes and processed recordings push the same way.
+A phone call recording is in the bell and pushed when its upload finishes (`from_call_upload`,
+called by app/phone_recordings.announce); processing makes the same item "ready" silently
+(`from_recording`), and the coach review's push takes the call's push tag (`push_tag`), so the
+phone replaces the first notification: two pushes per call at most.
 
 Phone push (app/webpush.py, the Home Screen app): each immediate item is pushed once, unread,
 within two days, to every subscribed device, with the "Action needed" title and Urgency: high;
@@ -138,6 +142,10 @@ DO $$ BEGIN
     ALTER TABLE notifications ADD COLUMN arrived_at timestamptz;  -- Gmail's internalDate: the latency SLA
   END IF;
   IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                 WHERE table_name = 'notifications' AND column_name = 'ready_at') THEN
+    ALTER TABLE notifications ADD COLUMN ready_at timestamptz;  -- A call recording's item: processed
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns
                  WHERE table_name = 'notify_settings' AND column_name = 'delivery') THEN
     ALTER TABLE notify_settings ADD COLUMN delivery text;  -- Unused since Telegram went.
   END IF;
@@ -148,7 +156,7 @@ ALTER TABLE notify_settings ADD COLUMN IF NOT EXISTS quiet_end text;     -- "08:
 """
 FIELDS = ("id", "source_id", "kind", "importance", "title", "body", "company", "link", "gmail_url", "thread_id",
           "lead_id", "action", "interview_at", "created_at", "read_at", "tg_state", "tg_sent_at",
-          "push_state", "push_sent_at", "arrived_at")
+          "push_state", "push_sent_at", "arrived_at", "ready_at")
 
 
 # Settings.
@@ -436,13 +444,17 @@ class Store:
     async def delete(self, note_id: int) -> None:
         await self.c.execute("DELETE FROM notifications WHERE id = %s", (note_id,))
 
-    async def latencies(self, since: datetime) -> list[tuple[float, float | None]]:
-        """(seconds from the email's arrival to its bell item, to its push or None) for the live
-        email items created since `since` (silent unread-mail items carry no arrived_at)."""
+    async def latencies(self, since: datetime, prefix: str = "gmail:") -> list[tuple[float, float | None, float | None]]:
+        """(seconds from arrival to the bell item, to its push or None, to "ready" or None) for the
+        live items whose source_id starts with `prefix` created since `since`: emails ("gmail:",
+        arrival = Gmail's internalDate; silent unread-mail items carry no arrived_at) or phone
+        calls ("phone:", arrival = the upload finishing; ready = transcribed and in Past)."""
         cursor = await self.c.execute(
-            "SELECT extract(epoch FROM created_at - arrived_at), extract(epoch FROM push_sent_at - arrived_at) "
-            "FROM notifications WHERE arrived_at IS NOT NULL AND created_at >= %s", (since,))
-        return [(float(r[0]), float(r[1]) if r[1] is not None else None) for r in await cursor.fetchall()]
+            "SELECT extract(epoch FROM created_at - arrived_at), extract(epoch FROM push_sent_at - arrived_at), "
+            "extract(epoch FROM ready_at - arrived_at) FROM notifications WHERE arrived_at IS NOT NULL "
+            "AND created_at >= %s AND source_id LIKE %s", (since, prefix + "%"))
+        return [(float(r[0]), float(r[1]) if r[1] is not None else None, float(r[2]) if r[2] is not None else None)
+                for r in await cursor.fetchall()]
 
     async def update(self, note_id: int, **values: Any) -> None:
         sets = ", ".join(f"{k} = %s" for k in values)
@@ -552,16 +564,67 @@ async def add(store: Any, note: dict[str, Any], now: datetime) -> int | None:
     return await store.insert(note)
 
 
+def call_party(other: str) -> str:
+    """The other party's name for a title or a push: never a phone number (scrub)."""
+    return scrub(" ".join((other or "").split()))[:60]
+
+
+def past_link(provider: str, external_id: str) -> str:
+    return f"/valr/interviews/past/{provider}-{external_id}"
+
+
+async def from_call_upload(store: Any, upload_id: str, other: str, now: datetime) -> int | None:
+    """A phone call recording just uploaded -> its bell item at once ("Call with Riya recorded"),
+    immediate, so it is pushed now; the same item becomes "... is ready" when it is processed
+    (`from_recording`). The upload finishing is its arrival (the latency figures)."""
+    from app.phone_recordings import PROVIDER
+    who = call_party(other)
+    note = {"source_id": f"{PROVIDER}:{upload_id}", "kind": "recording", "importance": "immediate",
+            "title": f"Call with {who} recorded" if who else "New call recording",
+            "body": "Transcribing; the coach review follows.", "company": "",
+            "link": past_link(PROVIDER, upload_id), "gmail_url": "", "thread_id": None, "action": "uploaded",
+            "arrived_at": now}
+    return await add(store, note, now)
+
+
 async def from_recording(store: Any, provider: str, external_id: str, company: str, other: str,
                          now: datetime) -> int | None:
-    """A processed call recording -> one notification linking to its past-interview page."""
-    who = name_of(company) or (other or "").strip()[:60]
+    """A processed call recording -> its notification linking to its past-interview page. A phone
+    call's item from the upload (`from_call_upload`) is updated in place, silently: the one more
+    push a call gets is "Your coach review is ready" (app/post_call.deliver), which carries the
+    same push tag (`push_tag`), so the phone replaces the first notification instead of
+    stacking. -> the id of a NEW item (push it), else None."""
+    who = name_of(company) or call_party(other)
     note = {"source_id": f"{provider}:{external_id}", "kind": "recording",
             "title": f"Call with {who} is ready" if who else "Your call recording is ready",
             "body": "Transcript and coach review are in Past interviews.", "company": (company or "")[:120],
-            "link": f"/valr/interviews/past/{provider}-{external_id}", "gmail_url": "", "thread_id": None,
-            "action": ""}
-    return await add(store, note, now)
+            "link": past_link(provider, external_id), "gmail_url": "", "thread_id": None,
+            "action": "ready"}
+    found = await store.get_source(note["source_id"])
+    if found is None:
+        return await add(store, {**note, "ready_at": now}, now)
+    if found.get("action") == "ready":
+        return None  # A re-run.
+    note["body"] = "Transcript is in Past interviews; the coach review follows."
+    await store.update(found["id"], ready_at=now, **{k: note[k] for k in ("title", "body", "company", "link", "action")})
+    if found.get("arrived_at"):
+        logger.info("VALR notification latency: call ready %.1f s after its upload",
+                    (now - found["arrived_at"]).total_seconds())
+    return None
+
+
+async def call_failed(store: Any, provider: str, external_id: str, other: str, now: datetime) -> bool:
+    """A call recording that could not be processed (after its last try): its item says so. Not
+    pushed again. False when there is no item."""
+    found = await store.get_source(f"{provider}:{external_id}")
+    if found is None or found.get("action") == "ready":
+        return False
+    who = call_party(other)
+    await store.update(found["id"], title=f"Call with {who}: transcription failed" if who
+                       else "A call recording could not be transcribed",
+                       body="Send it again from the Mac app or Settings; nothing else is needed.",
+                       action="failed", link="/valr/interviews/past")
+    return True
 
 
 async def from_email(store: Any, email: Any, decision: Any, touch: Any, new_thread: bool, now: datetime) -> int | None:
@@ -630,6 +693,7 @@ async def retract_incoming(store: Any, email_id: str) -> bool:
 
 SLA_P95_S = 10.0  # The owner, 2026-10-17: a new email in the app within 5-10 s (p95 10 s, p50 5 s).
 SLA_P50_S = 5.0
+PHONE_SLA_S = 10.0  # The owner, 2026-10-17: a call in the bell and on the phone ~10 s after its upload.
 
 
 def percentile(values: list[float], share: float) -> float | None:
@@ -640,19 +704,34 @@ def percentile(values: list[float], share: float) -> float | None:
     return ordered[min(len(ordered) - 1, max(0, int(-(-share * len(ordered) // 1)) - 1))]
 
 
+def rnd(value: float | None) -> float | None:
+    return round(value, 1) if value is not None else None
+
+
 async def latency_report(store: Any, now: datetime, window: timedelta = timedelta(hours=24)) -> dict[str, Any]:
-    """{count, p50_s, p95_s, max_s, push_p50_s, push_p95_s, sla_p50_s, sla_p95_s, met} for the email
-    items of the last `window`: Gmail's arrival time -> the bell item, and -> the phone push."""
-    rows = await store.latencies(now - window)
-    shown = [max(0.0, a) for a, _ in rows]
-    pushed = [max(0.0, b) for _, b in rows if b is not None]
+    """{count, p50_s, p95_s, max_s, push_p50_s, push_p95_s, sla_p50_s, sla_p95_s, met, phone} for the
+    email items of the last `window` (Gmail's arrival time -> the bell item, and -> the phone push);
+    `phone`: the call recordings' series (the upload finishing -> the bell item, -> its push, ->
+    "ready": transcribed and in Past interviews), against PHONE_SLA_S for the bell."""
+    rows = await store.latencies(now - window, "gmail:")
+    shown = [max(0.0, a) for a, _, _ in rows]
+    pushed = [max(0.0, b) for _, b, _ in rows if b is not None]
     p95 = percentile(shown, 0.95)
-    rnd = lambda v: round(v, 1) if v is not None else None  # noqa: E731
+    calls = await store.latencies(now - window, "phone:")
+    bell = [max(0.0, a) for a, _, _ in calls]
+    ready = [max(0.0, c) for _, _, c in calls if c is not None]
+    call_pushed = [max(0.0, b) for _, b, _ in calls if b is not None]
+    phone_p95 = percentile(bell, 0.95)
     return {"window_h": window.total_seconds() / 3600, "count": len(shown), "p50_s": rnd(percentile(shown, 0.5)),
             "p95_s": rnd(p95), "max_s": rnd(max(shown) if shown else None),
             "push_count": len(pushed), "push_p50_s": rnd(percentile(pushed, 0.5)),
             "push_p95_s": rnd(percentile(pushed, 0.95)), "sla_p50_s": SLA_P50_S, "sla_p95_s": SLA_P95_S,
-            "met": None if p95 is None else p95 <= SLA_P95_S}
+            "met": None if p95 is None else p95 <= SLA_P95_S,
+            "phone": {"count": len(bell), "bell_p50_s": rnd(percentile(bell, 0.5)), "bell_p95_s": rnd(phone_p95),
+                      "push_p50_s": rnd(percentile(call_pushed, 0.5)), "push_p95_s": rnd(percentile(call_pushed, 0.95)),
+                      "ready_count": len(ready), "ready_p50_s": rnd(percentile(ready, 0.5)),
+                      "ready_p95_s": rnd(percentile(ready, 0.95)), "sla_s": PHONE_SLA_S,
+                      "met": None if phone_p95 is None else phone_p95 <= PHONE_SLA_S}}
 
 
 # Unread mail (app/lead_worker.py, after each Gmail sync).
@@ -827,6 +906,16 @@ PUSH_PHRASE = {**DIGEST_PHRASE, "offer": "sent you an offer", "interview": "want
 OWN_WORDS = ("briefing", "review", "account")
 
 
+def push_tag(note: dict[str, Any]) -> str:
+    """The thread's (or lead's, or item's) tag; a coach review ("review:<provider>:<id>") takes its
+    recording's tag ("<provider>:<id>"), so its push replaces the call's on the phone."""
+    from app import webpush
+    source = str(note.get("source_id") or "")
+    if source.startswith("review:"):
+        source = source.removeprefix("review:")
+    return webpush.tag_for(note.get("thread_id"), note.get("lead_id"), source)
+
+
 def push_message(note: dict[str, Any], unread: int | None = None) -> dict[str, Any]:
     """{title, body, url, tag, badge, urgent} for static/sw.js. Immediate kinds: "Action needed"."""
     from app import webpush
@@ -841,6 +930,8 @@ def push_message(note: dict[str, Any], unread: int | None = None) -> dict[str, A
         body = f"{who} {PUSH_PHRASE.get(kind, 'has an update')}."
     if kind in OWN_WORDS:  # VALR's own messages (heads-up, review ready, reconnect): as written.
         title, body = note.get("title") or LABELS[kind], note.get("body") or ""
+    elif kind == "recording":  # "Call with Riya recorded" / "... is ready": as written, no numbers.
+        title, body = scrub(note.get("title") or "") or LABELS[kind], scrub(note.get("body") or "")
     elif kind == "calendar":
         title = "Calendar" + (f" · {scrub(name_of(note.get('company') or ''))}" if name_of(note.get("company") or "") else "")
     else:
@@ -848,7 +939,7 @@ def push_message(note: dict[str, Any], unread: int | None = None) -> dict[str, A
         title = f"Action needed · {who}" if urgent and kind in IMMEDIATE else f"{LABELS.get(kind, 'Update')} · {who}"
     link = note.get("link") or "/valr"
     return webpush.payload(title, body, link if link.startswith("/") else "/valr",
-                           webpush.tag_for(note.get("thread_id"), note.get("lead_id"), note.get("source_id")),
+                           push_tag(note),
                            unread, urgent)
 
 
@@ -975,6 +1066,12 @@ async def loop(connect: Any, stop: Any = None) -> None:
                                     "(target p95 <= %g s: %s); push p50 %s s, p95 %s s", report["count"],
                                     report["p50_s"], report["p95_s"], report["max_s"], SLA_P95_S,
                                     "met" if report["met"] else "MISSED", report["push_p50_s"], report["push_p95_s"])
+                    calls = report["phone"]
+                    if calls["count"]:
+                        logger.info("VALR notification SLA (24 h): %d calls, upload -> bell p50 %s s, p95 %s s "
+                                    "(target <= %g s: %s); -> ready p50 %s s, p95 %s s", calls["count"],
+                                    calls["bell_p50_s"], calls["bell_p95_s"], PHONE_SLA_S,
+                                    "met" if calls["met"] else "MISSED", calls["ready_p50_s"], calls["ready_p95_s"])
         except Exception as error:  # noqa: BLE001 - keep the worker alive
             logger.warning("VALR notifications loop: %s", type(error).__name__)
         try:

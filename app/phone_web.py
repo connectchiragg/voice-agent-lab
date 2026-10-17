@@ -201,6 +201,7 @@ async def receive(request: Request, boundary: bytes, upload_id: str, limit: int)
     name = phone.clean_text(phone.strip_phones(fields.get("name", "")), 80) or hint_name
     await run(phone.finish_upload, upload_id, size, kind,
               phone.clean_text(phone.strip_phones(fields.get("title", "")), 200), name, when or hint_when, sha)
+    await run(phone.announce, upload_id, name)  # In the bell and on the phone now; the worker woken.
     return {"size": size, "kind": kind}
 
 

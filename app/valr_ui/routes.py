@@ -245,6 +245,36 @@ async def load_recording(interview: dict[str, Any]) -> dict[str, Any] | None:
             "title": row.get("title") or ""}
 
 
+async def phone_upload_state(slug: str) -> str | None:
+    """A phone call's upload status ("uploaded", "processing", "failed", ...) for the past page's
+    slug "phone-<upload id>", before it is processed into Past interviews; None otherwise."""
+    from app import phone_recordings
+    prefix = phone_recordings.PROVIDER + "-"
+    upload_id = slug[len(prefix):] if slug.startswith(prefix) else ""
+    if not upload_id or not upload_id.isalnum() or research.pool is None:
+        return None
+    try:
+        async with research.pool.connection() as connection:
+            await phone_recordings.setup(connection)
+            row = await phone_recordings.upload(connection, upload_id)
+    except Exception as error:  # noqa: BLE001 - then it is simply not found
+        logger.warning("VALR phone upload lookup failed: %s", type(error).__name__)
+        return None
+    return str(row["status"]) if row else None
+
+
+def call_processing(status: str) -> str:
+    """The past page of a call that is still being transcribed (the bell links here at once), or
+    that failed. It reloads itself every 10 s until the call is in Past interviews."""
+    if status == "failed":
+        return (shell.page_head(e_("This call could not be transcribed"), crumb="/valr/interviews/past|Past interviews")
+                + shell.empty_state("calendar", "Send the recording again from the Mac app; nothing else is needed."))
+    return ('<meta http-equiv="refresh" content="10">'
+            + shell.page_head(e_("Transcribing this call"), crumb="/valr/interviews/past|Past interviews")
+            + shell.empty_state("calendar", "The transcript usually takes under a minute; the coach review follows.",
+                                "This page opens it when it is ready."))
+
+
 def not_found(what: str, back: str, label: str) -> str:
     return (shell.page_head(e_(what), crumb=f"{back}|{label}")
             + shell.empty_state("calendar", "It may have been moved or cancelled on your calendar."))
@@ -303,6 +333,9 @@ async def render(request: Request, name: str, **params: str) -> HTMLResponse:
             else:
                 body = interviews.past_detail_page(view, found, clock)
                 title = found["company"] or title
+        elif (upload_state := await phone_upload_state(params["slug"])) is not None:
+            body = call_processing(upload_state)
+            title = "Call recording"
         else:
             body, status = not_found("That interview isn't in your history.", "/valr/interviews/past", "Past interviews"), 404
     elif name == "processes":

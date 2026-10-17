@@ -354,8 +354,12 @@ def test_the_notification_link_opens_the_recording_page(client, monkeypatch, pro
         notes.append(note)
         return 1
 
+    class Empty:  # No item from the upload yet.
+        async def get_source(self, source_id):
+            return None
+
     monkeypatch.setattr(notifications, "add", add)
-    run(notifications.from_recording(None, provider, external_id, "", "Maheku", datetime.now(timezone.utc)))
+    run(notifications.from_recording(Empty(), provider, external_id, "", "Maheku", datetime.now(timezone.utc)))
     page = client.get(notes[0]["link"], headers=client.good)
     assert page.status_code == 200 and f'data-moments-id="{provider}:{external_id}"' in page.text
     if provider != "phone":

@@ -9,7 +9,8 @@
 - `GET /valr/api/notifications/latency`: {ok, count, p50_s, p95_s, max_s, push_count, push_p50_s,
   push_p95_s, sla_p50_s, sla_p95_s, met, window_h}: how fast new emails reached the bell
   (Gmail's arrival time -> the item) and the phone (-> the push) over the last 24 hours, against
-  the owner's SLA (p95 10 s, p50 5 s; notifications.latency_report).
+  the owner's SLA (p95 10 s, p50 5 s; notifications.latency_report); `phone`: the same for call
+  recordings, from the upload finishing to the bell item, its push and "ready" (transcribed).
 - `POST /valr/api/notifications/settings` {immediate?, digest?, quiet?, digest_at?, quiet_start?,
   quiet_end?}: the alert switches (immediate pushes, the daily digest push, quiet hours) and
   their times ("HH:MM", the owner's time zone).

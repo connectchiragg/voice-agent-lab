@@ -27,6 +27,15 @@ the worker's own connection: the worker image has no groq/fastapi, so nothing he
 app.research). A hand-off that failed is retried once at each worker start, or by hand:
 `python -m app.phone_recordings reevaluate <upload id|--all-unevaluated>` (worker container).
 
+Speed (the owner, 2026-10-17: "recruiter calls notifications should be quick"): when an upload
+finishes, the app adds the call's bell item at once ("Call with Riya recorded", pushed;
+`announce`) and wakes the worker with a Postgres NOTIFY on WAKE_CHANNEL; the worker's loop
+LISTENs, so it starts transcribing within a second instead of at its next VALR_PHONE_LOOP_S
+(30 s) tick (still the fallback). When the call is processed the same item becomes "... is
+ready" (silently); the coach review's push then replaces the first one on the phone (same push
+tag). A call that fails for good says so in its item. iCloud's sync of the recording to the Mac
+happens before the upload and is outside VALR's control.
+
 Nothing here logs a name, a title, a token or transcript text.
 """
 from __future__ import annotations
@@ -437,6 +446,29 @@ async def finish_upload(connection: Any, upload_id: str, size: int, kind: str, t
         "recorded_at = %s, sha256 = %s WHERE id = %s", (size, kind, title, other_name, recorded_at, sha256, upload_id))
 
 
+WAKE_CHANNEL = "valr_phone_upload"
+
+
+async def announce(connection: Any, upload_id: str, other_name: str, now: datetime | None = None) -> None:
+    """An upload just finished (the app, app/phone_web.py): its bell item now, pushed now, and the
+    worker woken to transcribe it now. Never raises: the upload is stored either way."""
+    now = now or datetime.now(timezone.utc)
+    try:
+        await connection.execute(f"NOTIFY {WAKE_CHANNEL}")
+    except Exception as error:  # noqa: BLE001 - the loop's poll picks it up
+        logger.warning("VALR phone recording: worker not woken (%s)", type(error).__name__)
+    try:
+        from app import notifications
+        store = notifications.Store(connection)
+        await store.setup()
+        if await notifications.from_call_upload(store, upload_id, other_name, now) is not None:
+            await notifications.dispatch_now(connection)
+            logger.info("VALR notification latency: call in the bell %.1f s after its upload",
+                        (datetime.now(timezone.utc) - now).total_seconds())
+    except Exception as error:  # noqa: BLE001
+        logger.warning("VALR phone recording: bell item not created (%s)", type(error).__name__)
+
+
 async def find_duplicate(connection: Any, sha256: str, upload_id: str) -> str | None:
     """An earlier upload of the same bytes that is waiting, processing or done."""
     cursor = await connection.execute(
@@ -650,6 +682,8 @@ class Processor:
             await mark(connection, row["id"], status="failed" if final else "uploaded", error=type(error).__name__,
                        delete_after=now + timedelta(days=audio_days()) if final else None)
             logger.warning("VALR phone recording failed (%s, try %d)", type(error).__name__, row["tries"])
+            if final:
+                await self.say_failed(connection, row, now)
             return None  # The next pass retries it, not this one.
         self.done.append(row["id"])
         return row["id"]
@@ -700,11 +734,20 @@ class Processor:
             from app import notifications
             store = notifications.Store(connection)
             await store.setup()
-            if await notifications.from_recording(store, PROVIDER, upload_id, company,
-                                                  row.get("other_name") or "", now) is not None:
+            if await notifications.from_recording(store, PROVIDER, upload_id, company, row.get("other_name") or "",
+                                                  datetime.now(timezone.utc)) is not None:
                 await notifications.dispatch_now(connection)  # Pushed now, not at the loop's next tick.
         except Exception as error:  # noqa: BLE001 - the recording is processed either way.
             logger.warning("VALR phone recording notification failed: %s", type(error).__name__)
+
+    async def say_failed(self, connection: Any, row: dict[str, Any], now: datetime) -> None:
+        try:
+            from app import notifications
+            store = notifications.Store(connection)
+            await store.setup()
+            await notifications.call_failed(store, PROVIDER, row["id"], row.get("other_name") or "", now)
+        except Exception as error:  # noqa: BLE001
+            logger.warning("VALR phone recording: failure not shown in the bell (%s)", type(error).__name__)
 
     async def company(self, connection: Any, recording: Any, meeting: dict, event: dict | None,
                       other_name: str, candidate: str = "") -> tuple[str, str]:
@@ -819,14 +862,47 @@ def candidate_name() -> str:
         return owner.recording_name()
 
 
+async def listen(connect: Callable[[], Any]) -> Any:
+    """A connection LISTENing on WAKE_CHANNEL, or None (then the loop only polls)."""
+    try:
+        listener = await connect()
+        await listener.set_autocommit(True)
+        await listener.execute(f"LISTEN {WAKE_CHANNEL}")
+        return listener
+    except Exception as error:  # noqa: BLE001
+        logger.info("VALR phone recordings: no LISTEN (%s); polling only", type(error).__name__)
+        return None
+
+
+async def wait_for_upload(listener: Any, every: float, stop: asyncio.Event) -> bool:
+    """Until an upload's NOTIFY (True), `every` seconds, or stop. Checks stop each second."""
+    loop_time = asyncio.get_running_loop().time
+    deadline = loop_time() + every
+    while not stop.is_set() and loop_time() < deadline:
+        step = min(1.0, max(0.0, deadline - loop_time()))
+        if listener is None:
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=step)
+            except asyncio.TimeoutError:
+                pass
+            continue
+        async for _ in listener.notifies(timeout=step, stop_after=1):
+            return True
+    return False
+
+
 async def loop(connect: Callable[[], Any], stop: asyncio.Event | None = None) -> None:
-    """The research worker's background task: one upload at a time, every VALR_PHONE_LOOP_S (30)
-    seconds, and the audio clean-up."""
+    """The research worker's background task: one upload at a time, at once when the app NOTIFYs
+    an upload (LISTEN on WAKE_CHANNEL), else every VALR_PHONE_LOOP_S (30) seconds; and the audio
+    clean-up."""
     stop = stop or asyncio.Event()
     every = float(os.getenv("VALR_PHONE_LOOP_S", "30"))
     processor = Processor()
     picked_up = False
+    listener = await listen(connect)
     while not stop.is_set():
+        if listener is None:  # The database was down at start, or the listener dropped.
+            listener = await listen(connect)
         try:
             async with await connect() as connection:
                 await setup(connection)
@@ -839,9 +915,20 @@ async def loop(connect: Callable[[], Any], stop: asyncio.Event | None = None) ->
         except Exception as error:  # noqa: BLE001 - keep the worker alive
             logger.warning("VALR phone recordings loop: %s", type(error).__name__)
         try:
-            await asyncio.wait_for(stop.wait(), timeout=every)
-        except asyncio.TimeoutError:
-            pass
+            await wait_for_upload(listener, every, stop)
+        except Exception as error:  # noqa: BLE001 - a dropped listener: poll, and LISTEN again
+            logger.warning("VALR phone recordings: LISTEN lost (%s)", type(error).__name__)
+            await close_quietly(listener)
+            listener = None
+    await close_quietly(listener)
+
+
+async def close_quietly(connection: Any) -> None:
+    try:
+        if connection is not None:
+            await connection.close()
+    except Exception:  # noqa: BLE001
+        pass
 
 
 async def _cli(target: str) -> int:
