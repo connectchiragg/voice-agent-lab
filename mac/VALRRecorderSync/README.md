@@ -18,6 +18,14 @@ iPhone call  →  Notes (iCloud)  →  this Mac  →  VALR (menu bar)  →  POST
 - An item counts as done only after VALR answers `ok`. What was sent is recorded in
   `~/Library/Application Support/VALR/state.json`, which holds attachment IDs, SHA-256
   digests and VALR IDs only.
+- **Audio not downloaded yet:** iCloud often brings the note to the Mac before its audio, and Notes
+  only downloads the audio when something asks for it. So the app asks Notes, at most once every
+  30 seconds per recording and up to 5 times: first silently (AppleScript `save attachment` into a
+  private temp file that is deleted at once; no window, no focus change), then by showing the note in
+  Notes (Notes comes to the front for about a second, then the app you were using is brought back and
+  Notes is hidden again if it was hidden). After that the menu says *"Waiting for iCloud to download
+  N recordings"* and offers **Fetch now**. This needs the Automation permission for Notes (below).
+  Notes are never changed.
 - Optional and **off by default**: after VALR confirms a recording, the app moves the note to Notes'
   **Recently Deleted** folder, where Notes keeps it for 30 days.
 
@@ -54,13 +62,16 @@ its icon; in the menu bar it shows a monochrome version of the orb that follows 
       2. Click **+** and choose **Applications › VALR**, or switch it on if it's
          already in the list.
       3. The step in the app turns green by itself.
-   4. **Options:** "Move the note to Recently Deleted" is off by default. If you turn it on, macOS
-      asks once: *"VALR wants to control Notes"*. Click **Allow**.
+   4. **Options:** "Move the note to Recently Deleted" is off by default.
+   5. **Automation:** the first time a call recording's audio has to be fetched (or a note deleted),
+      macOS asks once: *"“VALR” wants access to control “Notes”"*. Click **Allow**. If it was
+      declined, the menu says so and **Open Automation settings…** goes to System Settings ›
+      Privacy & Security › Automation › VALR › Notes.
 5. Click **Start syncing**. The VALR orb appears in the menu bar.
 6. **Check it:** open **Settings… › Check Notes**. It shows counts only, for example
    "Call recordings ready to send: 1".
 7. **Test it end to end:** make a short call on the iPhone and record it. Wait until the note appears
-   in Notes on the Mac and its audio has downloaded. Within about 2 minutes you get the notification
+   in Notes on the Mac; the app asks Notes for the audio if it hasn't downloaded. Within about 2 minutes you get the notification
    *"Sent 1 call recording to VALR"*.
 
 **The menu shows:** the status, the last sync time, how many were sent today, **Sync now**,

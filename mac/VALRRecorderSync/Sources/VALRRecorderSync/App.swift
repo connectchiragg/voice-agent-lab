@@ -75,6 +75,13 @@ struct MenuContent: View {
             Text("Last sync: never")
         }
         Text("Sent today: \(model.sentToday)")
+        if model.waitingForDownload > 0 {
+            Button("Fetch now") { model.fetchNow() }
+                .disabled(model.isSyncing)
+        }
+        if model.problem == .notesAutomationDenied {
+            Button("Open Automation settings…") { model.openAutomationSettings() }
+        }
         Divider()
         Button(model.isSyncing ? "Syncing…" : "Sync now") { Task { await model.sync(force: true) } }
             .disabled(model.isSyncing || model.needsOnboarding)

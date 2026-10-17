@@ -134,7 +134,7 @@ public struct NotesStoreReader {
             filters.append("COALESCE(f.ZFOLDERTYPE, 0) != 1")
         }
         let sql = """
-        SELECT a.ZIDENTIFIER AS att_id, \(uti) AS uti, n.Z_PK AS note_pk, \(title) AS note_title,
+        SELECT a.ZIDENTIFIER AS att_id, a.Z_PK AS att_pk, \(uti) AS uti, n.Z_PK AS note_pk, \(title) AS note_title,
                \(created) AS created, \(folderTitle) AS folder_title, m.ZIDENTIFIER AS media_id,
                \(filename) AS media_filename, \(generation) AS generation,
                acct.ZIDENTIFIER AS account_id, \(duration) AS duration
@@ -161,7 +161,7 @@ public struct NotesStoreReader {
                 noteTitle: row["note_title"]?.text ?? "",
                 noteCreated: row["created"]?.double.map { Date(timeIntervalSinceReferenceDate: $0) },
                 folderTitle: row["folder_title"]?.text, mediaFilename: fname, fileURL: file,
-                durationSeconds: row["duration"]?.double))
+                durationSeconds: row["duration"]?.double, attachmentPK: row["att_pk"]?.int))
         }
         let store = (try? db.query("SELECT Z_UUID FROM Z_METADATA LIMIT 1"))?.first?["Z_UUID"]?.text
         return Snapshot(attachments: out, storeUUID: store, schemaNotes: notes)

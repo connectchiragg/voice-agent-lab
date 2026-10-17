@@ -15,7 +15,7 @@
 	<key>LSMinimumSystemVersion</key><string>14.0</string>
 	<key>LSUIElement</key><true/>
 	<key>LSApplicationCategoryType</key><string>public.app-category.productivity</string>
-	<key>NSAppleEventsUsageDescription</key><string>VALR moves a call-recording note to Recently Deleted after VALR has received it, only if you turned that on.</string>
+	<key>NSAppleEventsUsageDescription</key><string>VALR asks Notes to download a call recording from iCloud when only the note has arrived on this Mac, so the call reaches VALR quickly. If you turned it on, VALR also moves a call-recording note to Recently Deleted after VALR has received it.</string>
 	<key>NSHumanReadableCopyright</key><string>VALR</string>
 </dict>
 </plist>

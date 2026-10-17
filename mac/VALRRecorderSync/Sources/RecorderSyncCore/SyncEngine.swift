@@ -32,11 +32,20 @@ public protocol NoteDeleting: Sendable {
 public struct SyncReport: Equatable, Sendable {
     public enum Problem: Equatable, Sendable {
         case noToken, noAccess, notesMissing, unauthorized, offline(String), schema(String), deleteFailed(String)
+        /// A call recording is waiting for its audio and macOS did not let VALR ask Notes to download it.
+        case notesAutomationDenied
     }
     public var sent = 0
     public var duplicates = 0
     public var rejected = 0
+    /// Call recordings whose note is on this Mac but whose audio is not downloaded yet.
     public var waitingForDownload = 0
+    /// Of those, how many VALR asked Notes to download in this pass.
+    public var downloadRequested = 0
+    /// Of those, how many VALR stopped asking about (tried the maximum; "Fetch now" starts over).
+    public var downloadGaveUp = 0
+    /// When the next download request is due, so the app can run a pass then.
+    public var nextDownloadCheck: Date?
     public var pending = 0
     public var notesDeleted = 0
     public var callRecordingsSeen = 0
@@ -52,6 +61,8 @@ public actor SyncEngine {
     private let store: StateStore
     private let retry: RetryPolicy
     private let deleter: NoteDeleting?
+    private let fetcher: DownloadFetching?
+    private var fetchTracker: DownloadFetchTracker
     private let now: @Sendable () -> Date
     /// Uploads per pass. VALR allows 60 an hour per address.
     public var maxUploadsPerPass = 30
@@ -61,15 +72,21 @@ public actor SyncEngine {
     private var notBefore: Date?
 
     public init(source: @escaping SnapshotSource, store: StateStore, retry: RetryPolicy = RetryPolicy(),
-                deleter: NoteDeleting? = nil, now: @escaping @Sendable () -> Date = { Date() }) {
+                deleter: NoteDeleting? = nil, fetcher: DownloadFetching? = nil,
+                fetchPolicy: DownloadFetchPolicy = DownloadFetchPolicy(),
+                now: @escaping @Sendable () -> Date = { Date() }) {
         self.source = source
         self.store = store
         self.retry = retry
         self.deleter = deleter
+        self.fetcher = fetcher
+        self.fetchTracker = DownloadFetchTracker(policy: fetchPolicy)
         self.now = now
     }
 
-    public func run(settings: AppSettings, uploader: Uploader?, force: Bool = false) async -> SyncReport {
+    /// `fetchNow`: ask Notes right away to download every call recording still waiting for its audio
+    /// (the menu's "Fetch now"), ignoring the wait between attempts and the attempt limit.
+    public func run(settings: AppSettings, uploader: Uploader?, force: Bool = false, fetchNow: Bool = false) async -> SyncReport {
         var report = SyncReport()
         if !force, let notBefore, now() < notBefore {
             report.problem = .offline("waiting before the next try")
@@ -92,6 +109,7 @@ public actor SyncEngine {
 
         // Pick the recordings to send.
         var work: [(AudioAttachment, String?, Bool)] = [] // attachment, contact, isCall
+        var waiting: [AudioAttachment] = []
         for a in snapshot.attachments {
             let kind = CallRecordingClassifier.classify(a)
             var contact: String?
@@ -100,17 +118,18 @@ public actor SyncEngine {
             case .callRecording(let c): contact = c; isCall = true; report.callRecordingsSeen += 1
             case .otherAudio: guard settings.includeOtherAudio else { continue }
             case .unsupported(let why):
-                if why.hasPrefix("audio not downloaded"), CallRecordingClassifier.contactFromTitle(a.noteTitle) != nil {
-                    report.waitingForDownload += 1
+                if why.hasPrefix("audio not downloaded"), CallRecordingClassifier.contactFromTitle(a.noteTitle) != nil,
+                   isWanted(a, settings: settings) {
+                    waiting.append(a)
                 }
                 continue
             }
-            let st = store.state
-            if st.done[a.attachmentID] != nil || st.rejected[a.attachmentID] != nil { continue }
-            if !settings.includeExistingRecordings, let created = a.noteCreated, created < settings.setupDate { continue }
+            guard isWanted(a, settings: settings) else { continue }
             work.append((a, contact, isCall))
         }
         report.pending = work.count
+        report.waitingForDownload = waiting.count
+        await requestDownloads(waiting, storeUUID: snapshot.storeUUID, fetchNow: fetchNow, report: &report)
 
         if !work.isEmpty {
             guard let uploader else { report.problem = .noToken; return report }
@@ -166,6 +185,44 @@ public actor SyncEngine {
             await deleteFinishedNotes(snapshot: snapshot, deleter: deleter, report: &report)
         }
         return finish(report)
+    }
+
+    /// Not sent or refused before, and inside the "existing recordings" setting.
+    private func isWanted(_ a: AudioAttachment, settings: AppSettings) -> Bool {
+        let st = store.state
+        if st.done[a.attachmentID] != nil || st.rejected[a.attachmentID] != nil { return false }
+        if !settings.includeExistingRecordings, let created = a.noteCreated, created < settings.setupDate { return false }
+        return true
+    }
+
+    /// Asks Notes to download call recordings that are waiting for their audio, rate-limited per
+    /// attachment (DownloadFetchPolicy): a silent request first, then opening the note.
+    private func requestDownloads(_ waiting: [AudioAttachment], storeUUID: String?, fetchNow: Bool, report: inout SyncReport) async {
+        let ids = waiting.map(\.attachmentID)
+        fetchTracker.keepOnly(Set(ids))
+        if fetchNow { fetchTracker.reset() }
+        guard let fetcher, !waiting.isEmpty else { return }
+        let t = now()
+        let plan = fetchTracker.plan(ids, at: t, now: fetchNow)
+        for method in [DownloadFetchMethod.silent, .show] {
+            let requests = waiting.filter { plan[$0.attachmentID] == method }
+                .compactMap { DownloadRequest.make(for: $0, storeUUID: storeUUID) }
+            guard !requests.isEmpty else { continue }
+            fetchTracker.recordAttempt(requests.map(\.attachmentID), at: t)
+            report.downloadRequested += requests.count
+            do {
+                try await fetcher.fetch(requests, method: method)
+                log.info("Asked Notes to download \(requests.count, privacy: .public) recording(s) (\(method == .silent ? "silent" : "show", privacy: .public))")
+            } catch DownloadFetchError.notAllowed {
+                report.problem = report.problem ?? .notesAutomationDenied
+                log.error("Not allowed to ask Notes to download a recording (Automation permission)")
+                break
+            } catch {
+                log.error("Asking Notes to download failed: \(String(describing: error), privacy: .public)")
+            }
+        }
+        report.downloadGaveUp = ids.filter { fetchTracker.hasGivenUp($0) }.count
+        report.nextDownloadCheck = fetchTracker.nextDue(for: ids)
     }
 
     private func finish(_ report: SyncReport) -> SyncReport {
