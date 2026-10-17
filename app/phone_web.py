@@ -16,8 +16,9 @@
 - `GET /valr/api/recording/audio?id=phone:<id>` (owner): the decrypted audio, with Range
   support, for the past-interview player. Gone (410) once the audio was deleted.
 - `GET /valr/api/phone/status` (owner): the Settings card's state.
-- `POST /valr/api/phone/token` {action: "show" | "rotate"} (owner, CSRF): the token, shown
-  once. Rotating stops the old one at once.
+- `POST /valr/api/phone/token` {action: "show" | "rotate" | "revoke"} (owner, CSRF): the token,
+  shown once. Rotating stops the old one at once (and turns uploads back on); revoking turns
+  uploads off: every upload answers 401 until the next rotation.
 """
 from __future__ import annotations
 
@@ -252,7 +253,7 @@ async def phone_status(request: Request) -> JSONResponse:
 
 class TokenRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
-    action: Literal["show", "rotate"]
+    action: Literal["show", "rotate", "revoke"]
 
 
 @router.post("/valr/api/phone/token")
@@ -261,9 +262,14 @@ async def phone_token(request: Request) -> JSONResponse:
     try:
         body = TokenRequest.model_validate_json(await request.body())
     except ValidationError:
-        raise HTTPException(400, 'Expected {"action": "show" | "rotate"}.') from None
+        raise HTTPException(400, 'Expected {"action": "show" | "rotate" | "revoke"}.') from None
     async with pool().connection() as connection:
         await phone.setup(connection)
+        if body.action == "revoke":
+            await phone.revoke(connection)
+            logger.info("VALR upload token revoked (uploads off)")
+            return JSONResponse({"ok": True, "off": True, "message": "Uploads are off. Turn them on to get a new token."},
+                                headers=NO_CACHE)
         try:
             token = await (phone.reveal(connection) if body.action == "show" else phone.rotate(connection))
         except phone.AlreadyShown:

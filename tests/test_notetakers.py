@@ -579,35 +579,42 @@ def test_recording_endpoint_returns_player_and_moments(client, monkeypatch):
     assert client.get("/valr/api/recording?id=zoom:1", headers=GOOD).status_code == 404
 
 
-def test_setup_checklist_items_are_links_or_buttons_that_do_the_step(client):
-    page = client.get("/valr/settings", headers=GOOD).text  # The checklist lives on Settings now.
-    setup = page.split('id="setup"', 1)[1].split('id="g-conn"', 1)[0]
-    cards = page.split('id="notetakers"', 1)[1]
-    # Done steps say so; an open step either has its button or says what needs fixing.
-    assert setup.count("Done") == 4 and "Connect Telegram" in setup and "4 of 5 done" in setup
-    for name in ("fathom", "fireflies", "granola"):
-        assert f'data-connect="{name}"' in cards and f'id="nt-{name}"' in cards
-    assert 'type="password"' in cards and 'value="' not in cards.split('type="password"', 1)[1][:200]
-    assert 'data-import="granola"' in cards
-    assert "Done" in setup and "Finish setting up" in setup  # Telegram isn't linked in the sample.
-
-
-def test_telegram_step_and_deep_link(client, monkeypatch):
-    from app import telegram_api, valr_view
-    from tests.valr_sample import sample_view
+def no_devices(monkeypatch, **changes):
+    from app import valr_view
+    from tests.valr_sample import notetakers_view, sample_view
 
     async def collect(pool, now=None):
         view = sample_view()
-        view["mode"] = "telegram"
-        view["connections"]["telegram"] = {"configured": True, "linked": False, "linked_at": None}
+        view["connections"]["push"] = {"configured": True, "devices": []}
+        if changes.get("notetakers"):
+            view["connections"]["notetakers"] = notetakers_view(changes["notetakers"])
+        if changes.get("no_phone"):
+            view["setup"]["phone_on_file"] = False
         return view
-
     monkeypatch.setattr(valr_view, "collect", collect)
-    assert 'data-action="tglink"' in client.get("/valr/settings", headers=GOOD).text
-    assert telegram_api.start_link("example_valr_bot", "123456") == "https://t.me/example_valr_bot?start=123456"
-    assert telegram_api.start_link("bad name!", "123456") == ""
-    monkeypatch.setenv("TELEGRAM_BOT_USERNAME", "@example_valr_bot")
-    assert run(telegram_api.username()) == "example_valr_bot"
+
+
+def test_setup_checklist_items_are_links_or_buttons_that_do_the_step(client, monkeypatch):
+    no_devices(monkeypatch)
+    page = client.get("/valr/settings", headers=GOOD).text  # The checklist lives on Settings now.
+    setup = page.split('id="setup"', 1)[1].split('id="g-profile"', 1)[0]
+    cards = page.split('id="notetakers"', 1)[1]
+    # Done steps say so; an open step has its button: here, phone notifications.
+    assert setup.count("Done") == 4 and "Turn on phone notifications" in setup and "4 of 5 done" in setup
+    assert 'href="#phone-push"' in setup and "Telegram" not in page
+    for name in ("fathom", "fireflies", "granola"):
+        assert f'data-connect="{name}"' in cards and f'id="nt-{name}"' in cards
+        assert f'src="/static/brands/{name}.svg"' in cards
+    assert 'type="password"' in cards and 'value="' not in cards.split('type="password"', 1)[1][:200]
+    assert 'data-import="granola"' in cards
+
+
+def test_the_phone_step_is_done_in_the_app(client, monkeypatch):
+    no_devices(monkeypatch, no_phone=True)
+    page = client.get("/valr/settings", headers=GOOD).text
+    setup = page.split('id="setup"', 1)[1].split('id="g-profile"', 1)[0]
+    assert "Add your phone" in setup and "data-phone-edit" in setup and "server settings and restart" not in page
+    assert "3 of 5 done" in setup
 
 
 def test_past_interview_page_plays_or_finds_the_recording(client, monkeypatch):
@@ -731,17 +738,9 @@ def test_past_interviews_lists_events_and_stored_recordings(client, monkeypatch)
 
 
 def test_granola_is_optional_and_fathom_plays_without_a_sharing_hint(client, monkeypatch):
-    from app import valr_view
-    from tests.valr_sample import notetakers_view, sample_view
-
-    async def collect(pool, now=None):
-        view = sample_view()
-        view["connections"]["notetakers"] = notetakers_view({"fathom": "connected", "granola": "refused"})
-        return view
-
-    monkeypatch.setattr(valr_view, "collect", collect)
+    no_devices(monkeypatch, notetakers={"fathom": "connected", "granola": "refused"})
     page = client.get("/valr/settings", headers=GOOD).text
-    setup = page.split('id="setup"', 1)[1].split('id="g-conn"', 1)[0]
+    setup = page.split('id="setup"', 1)[1].split('id="g-profile"', 1)[0]
     assert "Connect a notetaker" in setup and 'data-connect-open="granola"' not in setup
     step = setup.split("Connect a notetaker", 1)[1].split("</li>", 1)[0]
     assert "Done" in step and "Needs attention" not in step

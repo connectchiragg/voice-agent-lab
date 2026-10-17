@@ -4,8 +4,9 @@
   (which registers /sw.js on every page and runs the Settings card).
 - `card()`: Settings → "Phone notifications". The server renders every state; valr-pwa.js
   shows the one that fits this device: install steps on iPhone Safari, "Enable notifications"
-  in the installed app, then "On for this iPhone" with Send test and Turn off. Also where
-  alerts go (Telegram + phone push, phone push only, Telegram only) and how many devices.
+  in the installed app, then "On for this iPhone" with Send test and Turn off. Below it, every
+  subscribed device ("This iPhone" marked) with Send a test and Remove, so a lost phone can be
+  removed from another device. With none, "Phone notifications are off": alerts stay in the bell.
 """
 from app.valr_page import e
 
@@ -14,7 +15,6 @@ STEPS = [
     "Scroll down, tap “Add to Home Screen”, then tap Add.",
     "Open VALR from the new Home Screen icon, sign in if asked, and come back to Settings.",
 ]
-DELIVERY = [("both", "Telegram + phone push"), ("push", "Phone push only"), ("telegram", "Telegram only")]
 
 
 def head() -> str:
@@ -31,9 +31,6 @@ def card() -> str:
     """Settings › Reminders › "Phone notifications", in the design system's row (app/valr_ui/settings.row)."""
     from app.valr_ui.shell import icon
     steps = "".join(f"<li>{e(step)}</li>" for step in STEPS)
-    modes = "".join(
-        f'<label class="seg-option"><input type="radio" name="pwa-delivery" value="{key}" data-pwa-delivery'
-        f'{" checked" if key == "both" else ""} disabled><span>{e(label)}</span></label>' for key, label in DELIVERY)
     views = f"""
 <p class="muted" data-pwa-view="loading">Checking this device…</p>
 <div data-pwa-view="install" hidden>
@@ -60,10 +57,9 @@ def card() -> str:
   <span class="set-icon" aria-hidden="true">{icon("bell", 18)}</span>
   <div class="set-main"><div class="set-title-row"><h3 class="set-title">Phone notifications</h3></div>
     <div class="set-body" data-pwa-card>{views}
-      <p class="muted" data-pwa-devices></p>
-      <fieldset class="seg-field" data-pwa-modes><legend class="field-label">Where alerts go</legend>
-        <div class="seg">{modes}</div></fieldset>
-      <p class="field-help">Quiet hours hold phone notifications too. “Phone push only” still uses Telegram until a
-        phone is set up, so nothing is lost meanwhile.</p>
+      <div class="devices" aria-labelledby="pwa-devices-title"><h4 class="sub-title" id="pwa-devices-title">Devices</h4>
+        <p class="muted" data-pwa-devices>Checking…</p>
+        <ul class="device-list" data-pwa-device-list></ul></div>
+      <p class="field-help">Quiet hours hold phone notifications too. Every alert also stays in the bell.</p>
     </div></div>
 </li>"""

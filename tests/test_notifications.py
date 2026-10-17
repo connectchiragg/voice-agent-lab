@@ -1,4 +1,4 @@
-"""Notifications: which emails notify, the dedupe, quiet hours and the digest, Telegram text
+"""Notifications: which emails notify, the dedupe, quiet hours and the digest push, push text
 without PII, calendar changes, the removed inferred kinds, and the owner-only API. All names, addresses and numbers are fictional."""
 import asyncio
 import dataclasses
@@ -40,7 +40,6 @@ class MemoryStore:
         for r in self.rows:
             if r["kind"] in n.REMOVED:
                 r["read_at"] = r["read_at"] or NOW
-                r["tg_state"] = "skipped" if r["tg_state"] == "pending" else r["tg_state"]
                 r["push_state"] = "skipped" if r.get("push_state") == "pending" else r.get("push_state")
 
     async def get_source(self, source_id):
@@ -77,9 +76,6 @@ class MemoryStore:
     async def unlinked(self):
         return [r for r in self.rows if r.get("lead_id") is None and r.get("thread_id")]
 
-    async def pending(self):
-        return [dict(r) for r in self.rows if r["tg_state"] == "pending" and r["kind"] not in n.REMOVED]
-
     async def push_pending(self):
         return [dict(r) for r in self.rows if r.get("push_state") == "pending" and r["kind"] not in n.REMOVED]
 
@@ -115,15 +111,6 @@ class MemoryStore:
 
     def by_source(self, source_id):
         return next((r for r in self.rows if r["source_id"] == source_id), None)
-
-
-class Bot:
-    def __init__(self):
-        self.sent = []
-
-    async def send(self, chat, text, keyboard=None):
-        self.sent.append(text)
-        return 1
 
 
 def email(message_id="m1", thread="t1", subject="Next steps", at=NOW - timedelta(minutes=5)):
@@ -203,22 +190,28 @@ def test_dedupe_per_thread_within_ten_minutes_and_upgrade():
     assert run(n.from_email(store, email("m4"), decision(), touch(), False, NOW + timedelta(minutes=40))) is None
 
 
-# Telegram text: no pay figures, phone numbers or email addresses.
+# Push text: no pay figures, phone numbers or email addresses.
 
-def test_telegram_text_carries_no_pii():
-    note = {"kind": "reply_needed", "company": "Acme", "link": "/valr/leads?lead=x",
+def test_push_text_carries_no_pii():
+    note = {"kind": "reply_needed", "company": "Acme", "link": "/valr/leads?lead=x", "importance": "immediate",
             "action": "Call riya@acme.example or +91 98765 43210 about the 45 LPA CTC, ₹30,00,000 base"}
-    text = n.telegram_text(note)
-    assert text.startswith("📩 Acme — recruiter asked you to ")
-    assert text.endswith("Open: https://valr.example.test/valr/leads?lead=x")
+    message = n.push_message(note)
+    assert message["title"] == "Action needed · Acme" and message["url"] == "/valr/leads?lead=x"
     for leak in ("@", "98765", "43210", "45", "LPA", "30,00,000", "₹"):
-        assert leak not in text, leak
-    assert n.telegram_text({"kind": "reply_needed", "company": "Acme", "link": "/valr", "action": "share your availability"}) \
-        == "📩 Acme — recruiter asked you to share your availability. Open: https://valr.example.test/valr"
-    digest = n.digest_text([{"kind": "rejection", "company": "Tessel"}, {"kind": "reply", "company": "Quillworks"},
-                            {"kind": "calendar", "company": "Glintworks", "title": "Interview with Glintworks cancelled: Mon 19 Oct, 6:00 PM"}])
-    assert digest.startswith("🗞 3 updates: Tessel said no · Quillworks replied · "
-                             "Interview with Glintworks cancelled: Mon 19 Oct, 6:00 PM.")
+        assert leak not in message["body"], leak
+    digest = n.digest_message([{"kind": "rejection", "company": "Tessel"}, {"kind": "reply", "company": "Quillworks"},
+                               {"kind": "calendar", "company": "Glintworks",
+                                "title": "Interview with Glintworks cancelled: Mon 19 Oct, 6:00 PM"}])
+    assert digest["title"] == "VALR · 3 updates" and digest["tag"] == "valr-digest" and not digest["urgent"]
+    assert digest["body"].startswith("Tessel said no · Quillworks replied · Interview with Glintworks cancelled")
+
+
+def test_own_kinds_push_their_own_words():
+    heads_up = {"kind": "briefing", "importance": "immediate", "title": "Nextiva interview in 30 min",
+                "body": "Tap for your briefing call.", "link": "/valr/interviews/slot-x?call=ready", "source_id": "heads_up:b"}
+    message = n.push_message(heads_up)
+    assert (message["title"], message["body"], message["url"], message["urgent"]) == (
+        "Nextiva interview in 30 min", "Tap for your briefing call.", "/valr/interviews/slot-x?call=ready", True)
 
 
 # Quiet hours and the digest.
@@ -232,43 +225,52 @@ def test_quiet_hours_window():
     assert not n.in_quiet_hours(ist(8)) and not n.in_quiet_hours(ist(22, 59))
 
 
+def test_quiet_hours_and_digest_time_come_from_settings():
+    switches = n.Switches.from_row({"quiet_start": "22:00", "quiet_end": "07:00", "digest_at": "18:00"})
+    assert n.in_quiet_hours(ist(22, 30), switches) and not n.in_quiet_hours(ist(7, 30), switches)
+    assert switches.view() | {} == {"immediate": True, "digest": True, "quiet": True, "digest_at": "18:00",
+                                    "quiet_start": "22:00", "quiet_end": "07:00"}
+    assert not n.digest_due(ist(17, 59), switches) and n.digest_due(ist(18, 1), switches)
+
+
 def test_immediate_items_wait_for_8am_unless_an_interview_is_within_12_hours():
-    store, bot = MemoryStore(), Bot()
+    store, sender = MemoryStore(), PushSender()
     night = ist(2)
     run(n.add(store, {"source_id": "gmail:a", "kind": "offer", "title": "x", "company": "Arcworks"}, night))
     run(n.add(store, {"source_id": "gmail:b", "kind": "interview", "title": "y", "company": "Nimbus",
                       "interview_at": night + timedelta(hours=7)}, night))
     run(n.add(store, {"source_id": "gmail:c", "kind": "interview", "title": "z", "company": "Kite",
                       "interview_at": night + timedelta(days=2)}, night))
-    result = run(n.dispatch(store, night, bot, chat=42))
-    assert result["sent"] == 1 and result["held"] == 2 and "Nimbus" in bot.sent[0]
-    result = run(n.dispatch(store, ist(8, 1), bot, chat=42))
-    assert result["sent"] == 2 and {r["tg_state"] for r in store.rows} == {"sent"}
-    # Quiet hours switched off: sent at once.
-    store2, bot2 = MemoryStore(), Bot()
+    result = run(n.dispatch(store, night, sender))
+    assert result["pushed"] == 1 and result["held"] == 2 and "Nimbus" in sender.sent[0]["title"]
+    result = run(n.dispatch(store, ist(8, 1), sender))
+    assert result["pushed"] == 2 and {r["push_state"] for r in store.rows} == {"sent"}
+    # Quiet hours switched off: pushed at once.
+    store2, sender2 = MemoryStore(), PushSender()
     run(store2.save_switches(quiet=False))
     run(n.add(store2, {"source_id": "gmail:d", "kind": "offer", "title": "x", "company": "Arcworks"}, night))
-    assert run(n.dispatch(store2, night, bot2, chat=42))["sent"] == 1
+    assert run(n.dispatch(store2, night, sender2))["pushed"] == 1
 
 
-def test_digest_once_a_day_at_nine_with_something_in_it():
-    store, bot = MemoryStore(), Bot()
+def test_digest_is_one_push_a_day_at_nine_with_something_in_it():
+    store, sender = MemoryStore(), PushSender()
     run(n.add(store, {"source_id": "gmail:r", "kind": "rejection", "title": "x", "company": "Tessel"}, ist(1)))
     run(n.add(store, {"source_id": "gmail:l", "kind": "reply", "title": "y", "company": "Quillworks"}, ist(1)))
-    assert run(n.dispatch(store, ist(8, 30), bot, chat=1)) == {"sent": 0, "held": 0, "digest": 0, "pushed": 0,
-                                                               "push_held": 0} and not bot.sent
-    assert run(n.dispatch(store, ist(9, 1), bot, chat=1))["digest"] == 2
-    assert len(bot.sent) == 1 and bot.sent[0].startswith("🗞 2 updates")
+    assert run(n.dispatch(store, ist(8, 30), sender)) == {"pushed": 0, "held": 0, "digest": 0} and not sender.sent
+    assert run(n.dispatch(store, ist(9, 1), sender))["digest"] == 2
+    assert len(sender.sent) == 1 and sender.sent[0]["title"] == "VALR · 2 updates"
+    assert {r["push_state"] for r in store.rows} == {"digested"}
     run(n.add(store, {"source_id": "gmail:x", "kind": "rejection", "title": "z", "company": "Onyx"}, ist(10)))
-    run(n.dispatch(store, ist(11), bot, chat=1))
-    assert len(bot.sent) == 1  # Tomorrow's digest, not a second one today.
+    run(n.dispatch(store, ist(11), sender))
+    assert len(sender.sent) == 1  # Tomorrow's digest, not a second one today.
 
 
-def test_without_a_linked_chat_nothing_is_marked():
-    store = MemoryStore()
+def test_with_no_phone_subscribed_items_stay_in_the_bell_only():
+    store, sender = MemoryStore(), PushSender(devices=0)
     run(n.add(store, {"source_id": "gmail:a", "kind": "offer", "title": "x"}, NOW))
-    run(n.dispatch(store, NOW, None, None))
-    assert store.rows[0]["tg_state"] == "pending"
+    assert run(n.dispatch(store, NOW, sender))["pushed"] == 0 and sender.sent == []
+    assert store.rows[0]["push_state"] == "skipped" and not store.rows[0]["read_at"]
+    assert run(store.unread_count(NOW - n.KEEP_FOR)) == 1
 
 
 # No inferred items: only new events notify.
@@ -292,11 +294,11 @@ def stored_old_items(store, at):
     """Rows of the removed kinds, as an older version stored them."""
     for i, kind in enumerate(n.REMOVED):
         run(store.insert({"source_id": f"{kind}:l{i}", "kind": kind, "importance": "digest", "title": "old",
-                          "company": "Glintworks", "created_at": at, "tg_state": "pending", "push_state": "pending"}))
+                          "company": "Glintworks", "created_at": at, "push_state": "pending"}))
 
 
 def test_stored_inferred_items_are_hidden_from_count_list_push_and_digest():
-    store, bot = MemoryStore(), Bot()
+    store = MemoryStore()
     stored_old_items(store, ist(1))
     run(n.add(store, {"source_id": "gmail:r", "kind": "rejection", "title": "x", "company": "Tessel"}, ist(1)))
     run(store.setup())
@@ -304,17 +306,17 @@ def test_stored_inferred_items_are_hidden_from_count_list_push_and_digest():
     assert run(store.unread_count(ist(0))) == 1
     assert [r["kind"] for r in run(store.listing(False, ist(0)))] == ["rejection"]
     sender = PushSender()
-    result = run(n.dispatch(store, ist(9, 1), bot, chat=1, sender=sender))
-    assert result["digest"] == 1 and bot.sent[0].startswith("🗞 1 update: Tessel said no")
-    assert len(sender.sent) == 1 and "Tessel" in sender.sent[0]["body"]
+    result = run(n.dispatch(store, ist(9, 1), sender))
+    assert result["digest"] == 1 and sender.sent[0]["title"] == "VALR · 1 update"
+    assert len(sender.sent) == 1 and sender.sent[0]["body"] == "Tessel said no"
 
 
 class PushSender:
-    def __init__(self):
-        self.sent = []
+    def __init__(self, devices=1):
+        self.sent, self.devices = [], devices
 
     async def subscribers(self):
-        return 1
+        return self.devices
 
     async def send(self, message, now):
         self.sent.append(message)
@@ -353,7 +355,7 @@ def test_calendar_added_moved_and_cancelled_each_notify_once():
     assert run(n.from_calendar(store, moved, "cancelled", NOW, moved.start_utc)) is None
     assert store.rows[-1]["title"] == "Interview with Acme cancelled: Sun 18 Oct, 5:00 PM"
     assert len(store.rows) == 3
-    assert n.telegram_text(store.rows[-1]).startswith("📅 Interview with Acme cancelled: Sun 18 Oct, 5:00 PM. Open:")
+    assert n.push_message(store.rows[-1])["body"].startswith("Interview with Acme cancelled: Sun 18 Oct, 5:00 PM")
     assert n.push_message(store.rows[-1])["title"] == "Calendar · Acme"
 
 
@@ -520,15 +522,15 @@ def test_unread_kept_emails_appear_and_read_ones_do_not():
     assert run(n.sync_unread(store, kept, {"u1", "u2"}, True, {}, NOW, set()))["added"] == 0  # Once each.
 
 
-def test_the_unread_backfill_is_silent_no_push_no_telegram_no_digest():
-    store, bot, sender = MemoryStore(), Bot(), PushSender()
+def test_the_unread_backfill_is_silent_no_push_no_digest():
+    store, sender = MemoryStore(), PushSender()
     kept = [kept_touch("u1", NOW - timedelta(hours=2), category="offer"), kept_touch("u2", NOW - timedelta(days=4))]
     run(n.sync_unread(store, kept, {"u1", "u2"}, True, {}, NOW, set()))
     assert len(store.rows) == 2 and all(not r["read_at"] for r in store.rows)
     for at in (NOW, ist(9, 5)):  # A normal pass and the digest hour.
-        result = run(n.dispatch(store, at, bot, chat=1, sender=sender))
-        assert result["sent"] == result["digest"] == result["pushed"] == 0
-    assert bot.sent == [] and sender.sent == []
+        result = run(n.dispatch(store, at, sender))
+        assert result["digest"] == result["pushed"] == 0
+    assert sender.sent == []
 
 
 def test_reading_in_gmail_reads_the_item_and_marking_unread_brings_it_back():
@@ -555,13 +557,13 @@ def test_reading_in_gmail_reads_the_item_and_marking_unread_brings_it_back():
 
 
 def test_new_mail_still_pushes_and_is_not_doubled_by_the_unread_pass():
-    store, bot, sender = MemoryStore(), Bot(), PushSender()
+    store, sender = MemoryStore(), PushSender()
     mail = email("m1", "t-m1", at=NOW - timedelta(minutes=5))
     run(n.from_email(store, mail, decision("scheduling"), touch(), False, NOW))
     kept = [kept_touch("m1", mail.at, thread="t-m1", category="scheduling")]
     assert run(n.sync_unread(store, kept, {"m1"}, True, {}, NOW, set()))["added"] == 0
-    result = run(n.dispatch(store, NOW, bot, chat=1, sender=sender))
-    assert result["pushed"] == 1 and result["sent"] == 1 and len(store.rows) == 1
+    result = run(n.dispatch(store, NOW, sender))
+    assert result["pushed"] == 1 and len(store.rows) == 1
 
 
 def test_new_mail_already_read_in_gmail_is_not_pushed():
@@ -569,7 +571,7 @@ def test_new_mail_already_read_in_gmail_is_not_pushed():
     mail = email("m1", "t-m1", at=NOW - timedelta(minutes=5))
     run(n.from_email(store, mail, decision("scheduling"), touch(), False, NOW))
     run(n.sync_unread(store, [kept_touch("m1", mail.at, thread="t-m1")], set(), True, {}, NOW, set()))
-    assert run(n.dispatch(store, NOW, None, None, sender=sender))["pushed"] == 0 and sender.sent == []
+    assert run(n.dispatch(store, NOW, sender))["pushed"] == 0 and sender.sent == []
 
 
 def test_max_age_push_48_hours_bell_30_days():
@@ -580,7 +582,7 @@ def test_max_age_push_48_hours_bell_30_days():
             kept_touch("m31", NOW - timedelta(days=31))]
     run(n.sync_unread(store, kept, {"m3", "m29", "m31"}, True, {}, NOW, set()))
     assert {r["source_id"] for r in store.rows} == {"gmail:m3", "gmail:m29"}  # In the bell, silently.
-    assert run(n.dispatch(store, NOW, None, None, sender=sender))["pushed"] == 0
+    assert run(n.dispatch(store, NOW, sender))["pushed"] == 0
 
 
 # Latency: a missed new email is caught up loudly; new items are pushed right away.
@@ -590,7 +592,7 @@ def test_a_missed_new_email_is_caught_up_and_pushed_old_or_covered_ones_stay_sil
     live = NOW - timedelta(days=1)  # The backfill began then: mail after it is news.
     run(store.insert({"source_id": "gmail:c0", "kind": "reply", "importance": "digest", "title": "x",
                       "thread_id": "t-covered", "created_at": NOW - timedelta(minutes=30),
-                      "tg_state": "pending", "push_state": "sent"}))
+                      "push_state": "sent"}))
     kept = [kept_touch("m1", NOW - timedelta(minutes=4), category="scheduling"),       # Missed: pushed.
             kept_touch("old", live - timedelta(hours=1), category="scheduling"),       # Before the backfill.
             kept_touch("aged", NOW - timedelta(hours=50), category="scheduling"),      # Over 48 h: not news.
@@ -602,7 +604,7 @@ def test_a_missed_new_email_is_caught_up_and_pushed_old_or_covered_ones_stay_sil
     loud = {r["source_id"] for r in store.rows if r["push_state"] == "pending"}
     assert loud == {"gmail:m1"}
     assert store.by_source("gmail:m1")["kind"] == "interview"
-    assert run(n.dispatch(store, NOW, None, None, sender=sender))["pushed"] == 1 and len(sender.sent) == 1
+    assert run(n.dispatch(store, NOW, sender=sender))["pushed"] == 1 and len(sender.sent) == 1
     # Without a live mark (the first backfill not begun), everything stays silent.
     quiet = MemoryStore()
     assert run(n.sync_unread(quiet, kept[:1], {"m1"}, True, {}, NOW, set()))["caught_up"] == 0
@@ -612,7 +614,7 @@ def test_dispatch_now_retries_while_the_loop_holds_the_lock(monkeypatch):
     results = [{"locked": 1}, {"locked": 1}, {"pushed": 1}]
     calls = []
 
-    async def fake(connection, now=None, bot=None):
+    async def fake(connection, now=None):
         calls.append(connection)
         return results.pop(0)
     monkeypatch.setattr(n, "run_dispatch", fake)
@@ -620,7 +622,7 @@ def test_dispatch_now_retries_while_the_loop_holds_the_lock(monkeypatch):
     results[:] = [{"locked": 1}] * 5
     assert run(n.dispatch_now("conn", tries=2, wait=0)) is None  # The loop sends it on its tick.
 
-    async def broken(connection, now=None, bot=None):
+    async def broken(connection, now=None):
         raise RuntimeError("db gone")
     monkeypatch.setattr(n, "run_dispatch", broken)
     assert run(n.dispatch_now("conn", wait=0)) is None  # Never raises.
@@ -635,7 +637,7 @@ def test_a_calendar_change_is_pushed_at_once():
     async def created(store, event, change, now, before_utc=""):
         return 7
 
-    async def dispatch_now(connection, bot=None, tries=5, wait=0.5):
+    async def dispatch_now(connection, tries=5, wait=0.5):
         pushed.append(connection)
 
     owners = {"owner@example.test"}
@@ -656,8 +658,8 @@ def test_an_incoming_email_shows_at_once_then_becomes_the_real_item_or_goes():
     assert run(n.from_incoming(store, mail, NOW)) is not None
     row = store.by_source("gmail:m1")
     assert row["kind"] == n.INCOMING and row["title"] == "Riya Sen: Interview availability"
-    assert (row["push_state"], row["tg_state"]) == ("hold", "hold") and row["arrived_at"] == mail.at
-    assert run(n.dispatch(store, NOW, Bot(), chat=1, sender=sender))["pushed"] == 0  # Not pushed yet.
+    assert row["push_state"] == "hold" and row["arrived_at"] == mail.at
+    assert run(n.dispatch(store, NOW, sender=sender))["pushed"] == 0  # Not pushed yet.
     assert run(n.from_incoming(store, mail, NOW)) is None  # Once per message.
     # The model kept it: the same bell entry becomes the real one, dated when it first showed.
     later = NOW + timedelta(seconds=3)
@@ -665,7 +667,7 @@ def test_an_incoming_email_shows_at_once_then_becomes_the_real_item_or_goes():
     row = store.by_source("gmail:m1")
     assert row["kind"] == "interview" and row["created_at"] == NOW and row["push_state"] == "pending"
     assert len(store.rows) == 1
-    assert run(n.dispatch(store, later, None, None, sender=sender))["pushed"] == 1
+    assert run(n.dispatch(store, later, sender=sender))["pushed"] == 1
     # Another one the model dropped: retracted.
     junk = email("m2", "t-m2", subject="Webinar", at=NOW)
     run(n.from_incoming(store, junk, NOW))
@@ -695,9 +697,9 @@ def test_the_latency_report_against_the_sla():
     for i, seconds in enumerate([2, 3, 4, 4, 5, 5, 6, 7, 8, 12]):
         run(store.insert({"source_id": f"gmail:l{i}", "kind": "reply", "importance": "digest", "title": "x",
                           "created_at": NOW, "arrived_at": NOW - timedelta(seconds=seconds),
-                          "push_sent_at": NOW + timedelta(seconds=1), "tg_state": "sent", "push_state": "sent"}))
+                          "push_sent_at": NOW + timedelta(seconds=1), "push_state": "sent"}))
     run(store.insert({"source_id": "gmail:silent", "kind": "reply", "importance": "digest", "title": "x",
-                      "created_at": NOW - timedelta(days=3), "tg_state": "skipped", "push_state": "skipped"}))
+                      "created_at": NOW - timedelta(days=3), "push_state": "skipped"}))
     report = run(n.latency_report(store, NOW))
     assert report["count"] == 10 and report["p50_s"] == 5.0 and report["p95_s"] == 12.0 and report["max_s"] == 12.0
     assert report["push_p50_s"] == 6.0 and report["met"] is False and report["sla_p95_s"] == 10.0

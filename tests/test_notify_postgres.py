@@ -38,7 +38,7 @@ def test_notification_store_sql():
                                        "thread_id": "t1"}, now) == first
             assert await store.insert({"source_id": "gmail:1", "kind": "reply", "importance": "digest",
                                        "title": "dup"}) is None
-            assert [r["kind"] for r in await store.pending()] == ["offer"]
+            assert [r["kind"] for r in await store.push_pending()] == ["offer"]
             assert len(await store.unlinked()) == 1
             await store.update(first, lead_id="lead-kite", link="/valr/leads?lead=lead-kite")
             assert len(await store.recent_for_lead("lead-kite", now - timedelta(minutes=1))) == 1
@@ -52,10 +52,10 @@ def test_notification_store_sql():
             assert await store.unread_count(now - timedelta(days=1)) == 0
             assert await store.listing(False, now - timedelta(days=1)) != []
             assert all(r["kind"] not in n.REMOVED for r in await store.listing(False, now - timedelta(days=1)))
-            assert all(r["kind"] not in n.REMOVED for r in await store.pending() + await store.push_pending())
+            assert all(r["kind"] not in n.REMOVED for r in await store.push_pending())
             await store.setup()
             cursor = await c.execute("SELECT count(*) FROM notifications WHERE kind = ANY(%s) AND (read_at IS NULL "
-                                     "OR tg_state = 'pending' OR push_state = 'pending')", (list(n.REMOVED),))
+                                     "OR push_state = 'pending')", (list(n.REMOVED),))
             assert (await cursor.fetchone())[0] == 0
             assert (await store.switches()).digest is True
             # The unread pass: items by Gmail message id; read, then unread again.
@@ -133,8 +133,9 @@ def test_push_columns_migrate_old_rows_and_the_subscription_store():
             now = datetime.now(timezone.utc)
             await n.add(store, {"source_id": "gmail:new", "kind": "reply", "title": "Kite replied"}, now)
             assert [r["source_id"] for r in await store.push_pending()] == ["gmail:new"]  # The old row: never.
-            await store.save_switches(delivery="push")
-            assert (await store.switches()).delivery == "push"
+            await store.save_switches(digest_at="18:30", quiet_start="22:00", quiet_end="07:00")
+            saved = (await store.switches()).view()
+            assert (saved["digest_at"], saved["quiet_start"], saved["quiet_end"]) == ("18:30", "22:00", "07:00")
             subs = webpush.Store(c)
             await subs.setup()
             await subs.save("https://web.push.apple.com/a", "p" * 40, "a" * 16, "iPhone")

@@ -1,0 +1,82 @@
+/* "Call my phone" / "Talk here" and the inline call panel (static/valr-call.js). Tokens from
+   static/valr-ds.css (Porcelain & Ink), so light and dark follow the page. */
+
+/* The split button: the main half shows this device's choice. */
+.split-main[data-choice="phone"] .i-mic, .split-main[data-choice="talk"] .i-phone { display: none; }
+.call-choices { min-width: 260px; }
+.call-choices .menu-item { align-items: flex-start; }
+.call-choices .menu-text { display: grid; gap: 1px; flex: 1; text-align: left; }
+.call-choices .menu-note { font-size: var(--fs-xs); color: var(--text-3); }
+.call-choices .menu-item .i-check { color: var(--accent-text); visibility: hidden; margin-top: 2px; }
+.call-choices .menu-item[aria-checked="true"] .i-check { visibility: visible; }
+.call-choices .menu-item[aria-checked="true"] .menu-text { font-weight: 600; }
+.call-choices .menu-item[disabled] { opacity: .6; cursor: not-allowed; }
+.call-choices .menu-item .i:first-child { margin-top: 2px; }
+
+/* The panel: docked bottom-right on desktop, full screen on a phone. */
+.call-panel { position: fixed; inset: auto var(--s6) var(--s6) auto; z-index: 80; margin: 0; padding: 0;
+  width: min(380px, calc(100vw - 2 * var(--s4))); max-height: min(640px, calc(100dvh - var(--topbar) - 2 * var(--s6)));
+  display: none; flex-direction: column; gap: var(--s3); padding: var(--s4) var(--s5) var(--s5);
+  background: var(--surface); color: var(--text); border: 1px solid var(--line); border-radius: var(--r-xl);
+  box-shadow: var(--e3); overflow: hidden; }
+.call-panel[open] { display: flex; animation: cp-in var(--t3) var(--ease); }
+@keyframes cp-in { from { opacity: 0; transform: translateY(12px); } }
+.cp-head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--s3); }
+.cp-eyebrow { font-size: var(--fs-xs); font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--text-3); }
+.cp-title { font: 500 var(--fs-xl)/1.15 var(--font-display); }
+.cp-mode { margin-top: 2px; font-size: var(--fs-sm); color: var(--text-2); }
+.cp-close { flex: none; }
+
+.cp-status { display: flex; align-items: center; gap: var(--s2); padding: var(--s2) var(--s3);
+  border-radius: var(--r-full); background: var(--surface-2); font-weight: 600; font-size: var(--fs-14); }
+.cp-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--text-3); flex: none; }
+.cp-timer { margin-left: auto; color: var(--text-3); font-weight: 500; }
+.call-panel[data-state="listening"] .cp-dot, .call-panel[data-state="hearing"] .cp-dot { background: var(--ok); }
+.call-panel[data-state="thinking"] .cp-dot { background: var(--warn); }
+.call-panel[data-state="speaking"] .cp-dot { background: var(--accent); }
+.call-panel[data-state="connecting"] .cp-dot { background: var(--info); animation: cp-pulse 1.1s ease-in-out infinite; }
+.call-panel[data-state="paused"] .cp-dot { background: var(--warn); }
+.call-panel[data-state="error"] .cp-dot { background: var(--bad); }
+.call-panel.is-muted .cp-status { background: var(--warn-soft); color: var(--warn); }
+@keyframes cp-pulse { 50% { opacity: .35; } }
+
+.cp-meters { display: grid; grid-template-columns: 1fr 1fr; gap: var(--s3); }
+.cp-meter { display: grid; gap: 4px; font-size: var(--fs-xs); font-weight: 600; color: var(--text-3); }
+.cp-meter i { display: block; height: 8px; border-radius: var(--r-full); background: var(--surface-3); overflow: hidden; }
+.cp-meter b { --level: 0; display: block; height: 100%; width: 100%; border-radius: inherit; transform-origin: left;
+  transform: scaleX(max(.02, var(--level))); transition: transform 80ms linear; }
+.cp-meter.you b { background: var(--ok); }
+.cp-meter.valr b { background: var(--accent); }
+.call-panel.is-muted .cp-meter.you b { background: var(--text-3); }
+
+.cp-notice { padding: var(--s3) var(--s4); border-radius: var(--r-md); background: var(--warn-soft); color: var(--text);
+  font-size: var(--fs-14); display: grid; gap: var(--s2); }
+.call-panel[data-state="error"] .cp-notice { background: var(--bad-soft); }
+.cp-notice ol { list-style: decimal; padding-left: 1.25em; display: grid; gap: 2px; }
+.cp-notice-actions { display: flex; flex-wrap: wrap; gap: var(--s2); }
+
+.cp-captions { flex: 1 1 auto; min-height: 120px; max-height: 260px; overflow-y: auto; display: grid; align-content: start;
+  gap: var(--s2); padding: var(--s3); border-radius: var(--r-md); background: var(--bg); border: 1px solid var(--line);
+  font-size: var(--fs-14); overscroll-behavior: contain; }
+.cp-empty { color: var(--text-3); }
+.cp-line { display: grid; grid-template-columns: 44px 1fr; gap: var(--s2); line-height: 1.45; }
+.cp-who { font-size: var(--fs-xs); font-weight: 700; letter-spacing: .02em; color: var(--text-3); padding-top: 2px; }
+.cp-line.assistant .cp-who { color: var(--accent-text); }
+.cp-line.partial .cp-said { color: var(--text-3); }
+.cp-line.interrupted .cp-said::after { content: " …"; color: var(--text-3); }
+.cp-line.notice { grid-template-columns: 1fr; color: var(--text-3); font-style: italic; }
+.cp-line.notice .cp-who { display: none; }
+
+.cp-controls { display: flex; gap: var(--s2); }
+.cp-controls .btn { flex: 1; min-height: 44px; }
+.cp-mute[aria-pressed="true"] { background: var(--warn-soft); border-color: var(--warn); color: var(--warn); }
+
+@media (max-width: 639px) {
+  .call-panel { inset: 0; width: 100%; max-width: none; max-height: none; height: 100dvh; border-radius: 0; border: 0;
+    padding: calc(env(safe-area-inset-top) + var(--s4)) var(--s4) calc(env(safe-area-inset-bottom) + var(--s4)); }
+  .cp-captions { max-height: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .call-panel[open], .call-panel[data-state="connecting"] .cp-dot { animation: none; }
+  .cp-meter b { transition: none; }
+}

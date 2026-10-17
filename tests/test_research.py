@@ -189,8 +189,8 @@ def test_the_dashboard_needs_a_verified_access_login(monkeypatch):
     assert client.get("/valr").status_code == 403
     assert client.get("/valr", headers={"Cf-Access-Jwt-Assertion": "bad"}).status_code == 403
     page = client.get("/valr/system", headers={"Cf-Access-Jwt-Assertion": "good"})
-    assert page.status_code == 200 and "Coorg &lt;b&gt;" in page.text
-    assert "61 s" in page.text and "$0.09" in page.text  # Under System: recent research.
+    assert page.status_code == 200 and page.url.path == "/valr/settings"  # The old System page: Settings.
+    assert "Coorg" not in page.text  # The research log is gone from the app (owner's call, 2026-10-17).
     moved = client.get("/", headers={"host": "valr.haciensus.com", "Cf-Access-Jwt-Assertion": "good"},
                        follow_redirects=False)
     assert moved.status_code == 307 and moved.headers["location"] == "/valr"

@@ -1,5 +1,6 @@
 """Browser page and the call WebSocket, wired to the cascaded voice pipeline."""
 import asyncio
+import html
 import logging
 import os
 from collections.abc import AsyncIterator
@@ -11,12 +12,12 @@ from uuid import uuid4
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from app import (access, agent, auth, callbacks, groq_api, interviews, leads_web, memory,
-                 notifications_web, phone_web, recordings, research, telegram_bot, telnyx, valr_dashboard, valr_hooks, webpush_web, webrtc)
+                 notifications_web, phone_web, recordings, research, settings_web, telnyx, valr_dashboard, valr_hooks, webpush_web, webrtc)
 from app.notetakers import routes as notetaker_routes
 from app.valr_ui import routes as valr_routes
 from app.deepgram import AuraSpeaker, DeepgramSettings, FluxListener
@@ -134,12 +135,12 @@ app.include_router(telnyx.router)
 app.include_router(valr_dashboard.router)
 app.include_router(valr_routes.router)  # /valr/interviews, /valr/leads, ... (GET pages)
 app.include_router(valr_hooks.router)
-app.include_router(telegram_bot.router)
 app.include_router(notetaker_routes.router)
 app.include_router(leads_web.router)
 app.include_router(notifications_web.router)  # The bell: /valr/api/notifications
 app.include_router(phone_web.router)  # /hooks/recording-upload and the phone recordings' audio
 app.include_router(webpush_web.router)  # The Home Screen app: /manifest.webmanifest, /sw.js, /valr/api/push
+app.include_router(settings_web.router)  # Settings and Profile actions: /valr/api/profile, google, export
 
 
 class CallSettings(BaseModel):
@@ -151,16 +152,25 @@ class CallSettings(BaseModel):
 
 
 @app.get("/", response_model=None)
-async def home(request: Request) -> FileResponse | RedirectResponse:
+async def home(request: Request) -> HTMLResponse | RedirectResponse:
     if valr_dashboard.is_dashboard_host(request.headers.get("host")):
         return RedirectResponse("/valr", status_code=307)  # valr.haciensus.com: the dashboard.
-    return FileResponse(ROOT / "static/index.html")
+    return await legacy_call_page(request)
+
+
+async def legacy_call_page(request: Request) -> HTMLResponse:
+    """The old stand-alone call page (static/index.html), with the CSRF token /webrtc/offer needs."""
+    who = await auth.identify(request)
+    token = valr_dashboard.csrf_token(who.email) if who is not None else ""
+    page = (ROOT / "static/index.html").read_text(encoding="utf-8")
+    meta = f'<meta name="csrf-token" content="{html.escape(token)}" />\n  </head>'
+    return HTMLResponse(page.replace("</head>", meta, 1), headers={"Cache-Control": "no-store"})
 
 
 @app.get("/call", response_model=None)
-async def call_page() -> FileResponse:
-    """The browser call page, on any host (valr.haciensus.com/call after voice.* goes)."""
-    return FileResponse(ROOT / "static/index.html")
+async def call_page() -> RedirectResponse:
+    """Talking in the browser is the inline "Talk here" panel now: /call opens it on Home."""
+    return RedirectResponse("/valr?talk=1", status_code=307)
 
 
 @app.get("/healthz")

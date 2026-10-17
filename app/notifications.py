@@ -1,4 +1,4 @@
-"""Notifications: what changed in the job search, in the app's bell and on Telegram.
+"""Notifications: what changed in the job search, in the app's bell and as phone pushes.
 
 Where they come from (all in the research worker):
 
@@ -9,7 +9,7 @@ Where they come from (all in the research worker):
   mail under VALR_NOTIFY_MAX_AGE_HOURS (48) old;
 - every kept inbound job email that is still UNREAD in Gmail (`sync_unread`, after each Gmail
   sync): older mail too, up to 30 days, so the bell shows all his unread job mail. These items
-  are created silently (push and Telegram "skipped"): only genuinely new mail pings the phone.
+  are created silently (push "skipped"): only genuinely new mail pings the phone.
   A safety net: an unread, recent (48 h) kept email of a notifying kind that arrived after the
   backfill began and still has no item (nothing in its thread either) was missed, so it is
   added as a normal, pushed item (`missed`, "caught_up").
@@ -28,22 +28,23 @@ gone quiet, new lead) and no pinned action items: `after_rebuild` only links ema
 notifications to their lead. Rows of those REMOVED kinds stored before are marked read at
 `setup` and left out of every list, count, push and digest.
 
-Kinds and Telegram routing:
+Kinds and push routing (the in-app bell always lists every item):
 
-    immediate (sent within ~2 minutes): offer, interview (invite, reschedule, cancel),
-        reply_needed (a recruiter asks him for something), take_home, recording,
-        calendar (when the interview is within 48 hours)
-    digest (one message at 09:00 IST, only when there is something): rejection, reply
-        (no answer needed, or a first email from a recruiter), update, calendar (later)
+    immediate (one push each, within ~1 minute): offer, interview (invite, reschedule,
+        cancel), reply_needed (a recruiter asks him for something), take_home, recording,
+        review (a coach review is ready), briefing (the 30-minute heads-up), account
+        (Google needs reconnecting), calendar (when the interview is within 48 hours)
+    digest (ONE push at 09:00, only when there is something): rejection, reply (no answer
+        needed, or a first email from a recruiter), update, calendar (later)
 
-Quiet hours 23:00-08:00 (VALR_NOTIFY_QUIET, in ASSISTANT_TIMEZONE, default Asia/Kolkata):
-immediate items wait until 08:00, except one tied to an interview in the next
-VALR_NOTIFY_URGENT_HOURS (12). The three switches (immediate alerts, daily digest, quiet hours)
-are in Settings (`notify_settings`), seeded from VALR_NOTIFY_IMMEDIATE / VALR_NOTIFY_DIGEST /
-VALR_NOTIFY_QUIET_HOURS (all 1). VALR_NOTIFY_DIGEST_AT (09:00) sets the digest time.
+Quiet hours 23:00-08:00 (the owner's time zone, app/owner.py): immediate pushes wait until
+the end, except one tied to an interview in the next VALR_NOTIFY_URGENT_HOURS (12). Settings
+(`notify_settings`) holds the three switches (immediate alerts, daily digest, quiet hours),
+the digest time and the quiet hours; VALR_NOTIFY_IMMEDIATE / _DIGEST / _QUIET_HOURS (all 1),
+VALR_NOTIFY_DIGEST_AT (09:00) and VALR_NOTIFY_QUIET (23:00-08:00) are only the defaults.
 
-Max age: a new email pushes (and goes to Telegram) only under VALR_NOTIFY_MAX_AGE_HOURS (48)
-old; an unread one stays in the bell up to 30 days (KEEP_FOR), dated by when it arrived.
+Max age: a new email pushes only under VALR_NOTIFY_MAX_AGE_HOURS (48) old; an unread one
+stays in the bell up to 30 days (KEEP_FOR), dated by when it arrived.
 
 Dedupe: one notification per Gmail thread within 10 minutes (a later, more important email in
 the same thread upgrades it instead); every source has a unique `source_id`, so a re-run never
@@ -54,22 +55,18 @@ fast check (app/lead_worker.GmailCheck, every 30 s) catches a push that never ca
 stored as soon as its batch is classified, and pushed right then (`dispatch_now`), not at the
 dispatch loop's next tick. Calendar changes and processed recordings push the same way.
 
-Phone push (app/webpush.py, the Home Screen app): every new item is pushed once, unread, within
-two days, to every subscribed device; quiet hours hold it like an immediate Telegram alert (an
-interview within 12 hours still gets through). Immediate kinds get the stronger "Action needed"
-title and Urgency: high. Where it goes is the Settings "delivery" choice next to the switches:
-    both      Telegram + phone push (the default; VALR_NOTIFY_DELIVERY seeds it)
-    push      phone push only: Telegram is skipped, unless no phone is subscribed yet, so
-              nothing is lost while setting up
-    telegram  Telegram only: nothing is pushed
-Rows from before phone push existed have push_state NULL and are never pushed.
+Phone push (app/webpush.py, the Home Screen app): each immediate item is pushed once, unread,
+within two days, to every subscribed device, with the "Action needed" title and Urgency: high;
+digest items wait for the one digest push. With no device subscribed nothing is pushed: the
+items stay in the bell, and Settings says phone notifications are off. Rows from before
+phone push existed have push_state NULL and are never pushed. (The tg_state column is left
+from the Telegram days and no longer read.)
 
-Telegram text and push payloads never carry pay figures, phone numbers or email addresses
-(`scrub`), and nothing here logs a title, a company or a body.
+Push payloads never carry pay figures, phone numbers or email addresses (`scrub`), and
+nothing here logs a title, a company or a body.
 """
 from __future__ import annotations
 
-import html
 import logging
 import os
 import re
@@ -85,7 +82,7 @@ KEEP_FOR = timedelta(days=30)
 CALENDAR_SOON = timedelta(hours=48)  # A calendar change this close is immediate.
 LOCK = 7_202_610_31
 
-IMMEDIATE = ("offer", "interview", "reply_needed", "take_home", "recording")
+IMMEDIATE = ("offer", "interview", "reply_needed", "take_home", "recording", "review", "briefing", "account")
 DIGEST = ("rejection", "reply", "update")
 KINDS = IMMEDIATE + DIGEST + ("calendar",)  # calendar: immediate within 48 hours, else digest.
 # Inferred, not events: never created now; stored ones are hidden (`hide_removed`, `VISIBLE`).
@@ -94,7 +91,8 @@ VISIBLE = "NOT (kind = ANY(%s))"
 INCOMING = "incoming"  # A new email shown before it is classified (`incoming`), then settled.
 LABELS = {INCOMING: "New email", "offer": "Offer", "interview": "Interview invite", "reply_needed": "Asked for something",
           "take_home": "Take-home", "rejection": "Not moving forward", "reply": "Reply", "update": "Update",
-          "recording": "Call recording", "calendar": "Calendar"}
+          "recording": "Call recording", "calendar": "Calendar", "review": "Coach review",
+          "briefing": "Briefing", "account": "Account"}
 RANK = {"immediate": 2, "digest": 1}
 
 SCHEMA = """
@@ -141,14 +139,16 @@ DO $$ BEGIN
   END IF;
   IF NOT EXISTS (SELECT 1 FROM information_schema.columns
                  WHERE table_name = 'notify_settings' AND column_name = 'delivery') THEN
-    ALTER TABLE notify_settings ADD COLUMN delivery text;  -- both | push | telegram
+    ALTER TABLE notify_settings ADD COLUMN delivery text;  -- Unused since Telegram went.
   END IF;
 END $$;
+ALTER TABLE notify_settings ADD COLUMN IF NOT EXISTS digest_at text;     -- "09:00", local
+ALTER TABLE notify_settings ADD COLUMN IF NOT EXISTS quiet_start text;   -- "23:00"
+ALTER TABLE notify_settings ADD COLUMN IF NOT EXISTS quiet_end text;     -- "08:00"
 """
 FIELDS = ("id", "source_id", "kind", "importance", "title", "body", "company", "link", "gmail_url", "thread_id",
           "lead_id", "action", "interview_at", "created_at", "read_at", "tg_state", "tg_sent_at",
           "push_state", "push_sent_at", "arrived_at")
-DELIVERY = ("both", "push", "telegram")  # Telegram + phone push, phone push only, Telegram only.
 
 
 # Settings.
@@ -158,7 +158,8 @@ def flag(name: str, default: str = "1") -> bool:
 
 
 def zone() -> ZoneInfo:
-    return ZoneInfo(os.getenv("ASSISTANT_TIMEZONE", "Asia/Kolkata"))
+    from app import owner
+    return owner.zone()
 
 
 def clock_of(text: str, default: time) -> time:
@@ -170,13 +171,21 @@ def clock_of(text: str, default: time) -> time:
 
 
 def quiet_window() -> tuple[time, time]:
-    """VALR_NOTIFY_QUIET "23:00-08:00" -> (start, end), local time."""
+    """VALR_NOTIFY_QUIET "23:00-08:00" -> (start, end), local time: the default."""
     start, _, end = os.getenv("VALR_NOTIFY_QUIET", "23:00-08:00").partition("-")
     return clock_of(start, time(23)), clock_of(end, time(8))
 
 
 def digest_at() -> time:
+    """VALR_NOTIFY_DIGEST_AT: the default digest time."""
     return clock_of(os.getenv("VALR_NOTIFY_DIGEST_AT", "09:00"), time(9))
+
+
+HHMM = re.compile(r"(?:[01]\d|2[0-3]):[0-5]\d")
+
+
+def hhmm(at: time) -> str:
+    return f"{at.hour:02d}:{at.minute:02d}"
 
 
 def urgent_within() -> timedelta:
@@ -197,19 +206,24 @@ class Switches:
     digest: bool = True
     quiet: bool = True
     last_digest_on: date | None = None
-    delivery: str = "both"
+    digest_time: time = time(9)
+    quiet_start: time = time(23)
+    quiet_end: time = time(8)
 
     @classmethod
     def from_row(cls, row: dict[str, Any] | None) -> "Switches":
         row = row or {}
         pick = lambda key, env: row.get(key) if row.get(key) is not None else flag(env)  # noqa: E731
-        delivery = row.get("delivery") or os.getenv("VALR_NOTIFY_DELIVERY", "both").strip()
+        start, end = quiet_window()
+        at = lambda key, default: clock_of(row[key], default) if row.get(key) else default  # noqa: E731
         return cls(pick("immediate", "VALR_NOTIFY_IMMEDIATE"), pick("digest", "VALR_NOTIFY_DIGEST"),
                    pick("quiet", "VALR_NOTIFY_QUIET_HOURS"), row.get("last_digest_on"),
-                   delivery if delivery in DELIVERY else "both")
+                   at("digest_at", digest_at()), at("quiet_start", start), at("quiet_end", end))
 
     def view(self) -> dict[str, Any]:
-        return {"immediate": self.immediate, "digest": self.digest, "quiet": self.quiet, "delivery": self.delivery}
+        return {"immediate": self.immediate, "digest": self.digest, "quiet": self.quiet,
+                "digest_at": hhmm(self.digest_time), "quiet_start": hhmm(self.quiet_start),
+                "quiet_end": hhmm(self.quiet_end)}
 
 
 # What an email means (pure).
@@ -284,7 +298,7 @@ def plain_action(action: str) -> str:
     return (text[:1].lower() + text[1:])[:80] if text else "reply"
 
 
-# Telegram text (pure). No pay figures, phone numbers or email addresses.
+# Text (pure). No pay figures, phone numbers or email addresses.
 
 EMAIL = re.compile(r"[\w.+-]+@[\w-]+(\.[\w-]+)+")
 PHONE = re.compile(r"\+?\d[\d\s().-]{6,}\d")
@@ -303,26 +317,9 @@ def scrub(text: str) -> str:
     return " ".join(text.split()).strip(" ,;:-")
 
 
-IMMEDIATE_PHRASE = {"offer": "sent you an offer", "interview": "wants to schedule (or move) an interview",
-                    "take_home": "sent a take-home assignment"}
-
-
-def telegram_text(note: dict[str, Any]) -> str:
-    """'📩 Acme — recruiter asked for your availability. Open: <link>'."""
-    who = scrub(name_of(note.get("company") or "")) or "A recruiter"
-    kind = note["kind"]
-    if kind == "reply_needed":
-        action = scrub(plain_action(note.get("action") or ""))
-        what = f"recruiter asked you to {action}" if action and action != "reply" else "recruiter asked you for something"
-    elif kind == "calendar":
-        return f"📅 {html.escape(scrub(note.get('title') or ''))}. Open: {html.escape(absolute(note.get('link') or '/valr'))}"
-    else:
-        what = IMMEDIATE_PHRASE.get(kind) or LABELS.get(kind, "update").lower()
-    return f"📩 {html.escape(who)} — {html.escape(what)}. Open: {html.escape(absolute(note.get('link') or '/valr'))}"
-
-
 DIGEST_PHRASE = {"rejection": "said no", "reply": "replied", "recording": "call recording is ready", "offer": "sent an offer", "interview": "wants an interview",
-                 "reply_needed": "asked you for something", "take_home": "sent a take-home", "update": "sent an update"}
+                 "reply_needed": "asked you for something", "take_home": "sent a take-home", "update": "sent an update",
+                 "review": "coach review is ready"}
 
 
 def digest_line(note: dict[str, Any]) -> str:
@@ -332,12 +329,14 @@ def digest_line(note: dict[str, Any]) -> str:
     return f"{who} {DIGEST_PHRASE.get(note['kind'], 'has an update')}"
 
 
-def digest_text(notes: list[dict[str, Any]], most: int = 8) -> str:
+def digest_message(notes: list[dict[str, Any]], unread: int | None = None, most: int = 4) -> dict[str, Any]:
+    """The one digest push: "VALR · 5 updates" and "Acme replied · Kite said no · +3 more"."""
+    from app import webpush
     lines = list(dict.fromkeys(digest_line(n) for n in notes))
-    shown = " · ".join(lines[:most]) + (f" · +{len(lines) - most} more" if len(lines) > most else "")
+    body = " · ".join(lines[:most]) + (f" · +{len(lines) - most} more" if len(lines) > most else "")
     count = len(notes)
-    return (f"🗞 {count} update{'s' if count != 1 else ''}: {html.escape(shown)}. "
-            f"Open: {html.escape(absolute('/valr'))}")
+    return webpush.payload(f"VALR · {count} update{'s' if count != 1 else ''}", body, "/valr", "valr-digest",
+                           unread, False)
 
 
 def absolute(link: str) -> str:
@@ -354,8 +353,8 @@ def local(now: datetime) -> datetime:
     return now.astimezone(zone())
 
 
-def in_quiet_hours(now: datetime) -> bool:
-    start, end = quiet_window()
+def in_quiet_hours(now: datetime, switches: "Switches | None" = None) -> bool:
+    start, end = (switches.quiet_start, switches.quiet_end) if switches else quiet_window()
     at = local(now).time()
     return (start <= at or at < end) if start > end else (start <= at < end)
 
@@ -367,12 +366,12 @@ def urgent(note: dict[str, Any], now: datetime) -> bool:
 
 
 def may_send_now(note: dict[str, Any], now: datetime, switches: Switches) -> bool:
-    return not (switches.quiet and in_quiet_hours(now)) or urgent(note, now)
+    return not (switches.quiet and in_quiet_hours(now, switches)) or urgent(note, now)
 
 
 def digest_due(now: datetime, switches: Switches) -> bool:
     today = local(now)
-    return switches.digest and today.time() >= digest_at() and switches.last_digest_on != today.date()
+    return switches.digest and today.time() >= switches.digest_time and switches.last_digest_on != today.date()
 
 
 # The store (Postgres). Tests use an in-memory stand-in with the same methods.
@@ -389,9 +388,8 @@ class Store:
         """Stored items of the REMOVED kinds: read, and never sent anywhere."""
         await self.c.execute(
             "UPDATE notifications SET read_at = coalesce(read_at, now()), "
-            "tg_state = CASE WHEN tg_state = 'pending' THEN 'skipped' ELSE tg_state END, "
             "push_state = CASE WHEN push_state = 'pending' THEN 'skipped' ELSE push_state END "
-            "WHERE kind = ANY(%s) AND (read_at IS NULL OR tg_state = 'pending' OR push_state = 'pending')",
+            "WHERE kind = ANY(%s) AND (read_at IS NULL OR push_state = 'pending')",
             (list(REMOVED),))
 
     async def recent_for_thread(self, thread_id: str, since: datetime) -> dict[str, Any] | None:
@@ -442,12 +440,6 @@ class Store:
         cursor = await self.c.execute(
             f"SELECT {', '.join(FIELDS)} FROM notifications WHERE lead_id IS NULL AND thread_id IS NOT NULL "
             "AND created_at >= %s", (datetime.now(timezone.utc) - KEEP_FOR,))
-        return [dict(zip(FIELDS, row)) for row in await cursor.fetchall()]
-
-    async def pending(self) -> list[dict[str, Any]]:
-        cursor = await self.c.execute(
-            f"SELECT {', '.join(FIELDS)} FROM notifications WHERE tg_state = 'pending' AND {VISIBLE} "
-            "ORDER BY created_at", (list(REMOVED),))
         return [dict(zip(FIELDS, row)) for row in await cursor.fetchall()]
 
     async def listing(self, unread_only: bool, since: datetime, limit: int = 100) -> list[dict[str, Any]]:
@@ -506,7 +498,7 @@ class Store:
         return [dict(zip(FIELDS, row)) for row in await cursor.fetchall()]
 
     async def switches(self) -> Switches:
-        keys = ("immediate", "digest", "quiet", "last_digest_on", "delivery")
+        keys = ("immediate", "digest", "quiet", "last_digest_on", "digest_at", "quiet_start", "quiet_end")
         cursor = await self.c.execute(f"SELECT {', '.join(keys)} FROM notify_settings WHERE id = 1")
         row = await cursor.fetchone()
         return Switches.from_row(dict(zip(keys, row)) if row else None)
@@ -531,16 +523,13 @@ class Store:
 async def add(store: Any, note: dict[str, Any], now: datetime) -> int | None:
     """Insert one, with the 10-minute per-thread dedupe: a later email in the same thread only
     upgrades the earlier item when it is more important (an offer after a plain reply)."""
-    note = {"importance": importance(note["kind"]), "created_at": now, "tg_state": "pending", "push_state": "pending",
-            **note}
+    note = {"importance": importance(note["kind"]), "created_at": now, "push_state": "pending", **note}
     thread = note.get("thread_id")
     if thread:
         earlier = await store.recent_for_thread(thread, now - DEDUPE)
         if earlier is not None:
             if RANK[note["importance"]] > RANK[earlier["importance"]]:
                 fields = {k: note[k] for k in ("kind", "importance", "title", "body", "action") if k in note}
-                if earlier["tg_state"] == "pending" or earlier["tg_state"] == "digested":
-                    fields["tg_state"] = "pending"
                 if earlier.get("push_state") is not None:
                     fields["push_state"] = "pending"  # Pushed again with the same tag: the phone replaces it.
                 await store.update(earlier["id"], read_at=None, **fields)
@@ -591,7 +580,7 @@ async def from_email(store: Any, email: Any, decision: Any, touch: Any, new_thre
 async def from_incoming(store: Any, email: Any, now: datetime) -> int | None:
     """A new inbound email that the model is about to classify -> an `incoming` bell item at
     once, from its headers ("Priya Raman: Interview availability"), so it is in the app within
-    seconds of arriving. Never pushed nor sent on Telegram (push/tg "hold"): `from_email` then
+    seconds of arriving. Never pushed (push_state "hold"): `from_email` then
     turns it into the real item (pushed) or retracts it (not job mail). Only new mail (under
     VALR_NOTIFY_MAX_AGE_HOURS); once per message."""
     if now - email.at > max_age():
@@ -601,7 +590,7 @@ async def from_incoming(store: Any, email: Any, now: datetime) -> int | None:
     note = {"source_id": f"gmail:{email.id}", "kind": INCOMING, "importance": "digest",
             "title": f"{who}: {subject}"[:140], "body": "Checking whether it is about your job search…",
             "link": "/valr/leads", "gmail_url": gmail_link(email.thread_id), "thread_id": email.thread_id or None,
-            "created_at": now, "arrived_at": email.at, "tg_state": "hold", "push_state": "hold"}
+            "created_at": now, "arrived_at": email.at, "push_state": "hold"}
     created = await store.insert(note)
     if created is not None:
         logger.info("VALR notification latency: email in the bell %.1f s after it arrived",
@@ -666,7 +655,7 @@ def unread_kind(touch: Any, new_thread: bool) -> str | None:
 
 def silent_note(touch: Any, new_thread: bool) -> dict[str, Any] | None:
     """A bell item for a kept inbound email touchpoint, dated when the mail arrived, that is
-    never pushed nor sent on Telegram."""
+    never pushed."""
     if touch.kind != "email" or touch.direction != "in" or not touch.id.startswith("gmail:"):
         return None
     kind = unread_kind(touch, new_thread)
@@ -678,7 +667,7 @@ def silent_note(touch: Any, new_thread: bool) -> dict[str, Any] | None:
             "body": (touch.summary or "")[:240], "company": (touch.company or "")[:120],
             "link": lead_link(lead_id), "gmail_url": touch.url or "", "thread_id": touch.thread or None,
             "lead_id": lead_id or None, "action": (touch.action or "")[:120], "created_at": touch.at,
-            "tg_state": "skipped", "push_state": "skipped"}
+            "push_state": "skipped"}
 
 
 async def missed(store: Any, touch: Any, new_thread: bool, live_since: datetime | None, now: datetime) -> bool:
@@ -726,7 +715,7 @@ async def sync_unread(store: Any, kept: list[Any], unread: set[str] | None, comp
             continue
         loud = await missed(store, touch, touch.id in first_in_thread, live_since, now)
         if loud:  # New to him now: dated now, its arrival kept for the latency figures.
-            note.update(tg_state="pending", push_state="pending", created_at=now, arrived_at=touch.at)
+            note.update(push_state="pending", created_at=now, arrived_at=touch.at)
         if await store.insert(note) is not None:
             out["caught_up" if loud else "added"] += 1
     if unread is not None and complete:
@@ -763,7 +752,7 @@ CALENDAR_CHANGES = ("added", "moved", "cancelled")
 
 
 def when_text(start_utc: str) -> str:
-    """"Mon 19 Oct, 6:00 PM" in ASSISTANT_TIMEZONE."""
+    """"Mon 19 Oct, 6:00 PM" in the owner's time zone."""
     at = local(datetime.fromisoformat(start_utc))
     return f"{at:%a} {at.day} {at:%b}, {at.strftime('%I:%M %p').lstrip('0')}"
 
@@ -805,6 +794,9 @@ PUSH_PHRASE = {**DIGEST_PHRASE, "offer": "sent you an offer", "interview": "want
                "take_home": "sent a take-home assignment", "reply_needed": "asked you for something"}
 
 
+OWN_WORDS = ("briefing", "review", "account")
+
+
 def push_message(note: dict[str, Any], unread: int | None = None) -> dict[str, Any]:
     """{title, body, url, tag, badge, urgent} for static/sw.js. Immediate kinds: "Action needed"."""
     from app import webpush
@@ -817,7 +809,9 @@ def push_message(note: dict[str, Any], unread: int | None = None) -> dict[str, A
         body = (scrub(note.get("title") or "") or "A calendar change") + "."
     else:
         body = f"{who} {PUSH_PHRASE.get(kind, 'has an update')}."
-    if kind == "calendar":
+    if kind in OWN_WORDS:  # VALR's own messages (heads-up, review ready, reconnect): as written.
+        title, body = note.get("title") or LABELS[kind], note.get("body") or ""
+    elif kind == "calendar":
         title = "Calendar" + (f" · {scrub(name_of(note.get('company') or ''))}" if name_of(note.get("company") or "") else "")
     else:
         title = f"Action needed · {who}" if urgent else f"{LABELS.get(kind, 'Update')} · {who}"
@@ -827,22 +821,25 @@ def push_message(note: dict[str, Any], unread: int | None = None) -> dict[str, A
                            unread, urgent)
 
 
-async def push_dispatch(store: Any, now: datetime, switches: Switches, sender: Any) -> dict[str, int]:
-    """Every pending item once: skipped when Telegram-only, nobody is subscribed, it was read
-    already or it is over two days old; held in quiet hours unless urgent."""
-    out = {"pushed": 0, "push_held": 0}
+async def dispatch(store: Any, now: datetime, sender: Any = None) -> dict[str, int]:
+    """One pass over the pending items: immediate ones are pushed now (held in quiet hours
+    unless urgent), digest ones wait for the ONE digest push at the digest time. Skipped (left
+    in the bell only) when nobody is subscribed, it was read already or it is over two days old."""
+    switches = await store.switches()
+    out = {"pushed": 0, "held": 0, "digest": 0}
     pending = await store.push_pending()
-    if not pending:
-        return out
     devices = await sender.subscribers() if sender is not None else 0
-    unread = None
+    unread: int | None = None
+    digest = []
     for note in pending:
-        if switches.delivery == "telegram" or not devices or note.get("read_at") or \
-                note["created_at"] < now - timedelta(days=2):
+        if not devices or note.get("read_at") or note["created_at"] < now - timedelta(days=2):
             await store.update(note["id"], push_state="skipped")
             continue
+        if note["importance"] == "digest" or not switches.immediate:
+            digest.append(note)
+            continue
         if not may_send_now(note, now, switches):
-            out["push_held"] += 1
+            out["held"] += 1
             continue
         if unread is None:
             unread = await store.unread_count(now - KEEP_FOR)
@@ -852,92 +849,42 @@ async def push_dispatch(store: Any, now: datetime, switches: Switches, sender: A
         if result.delivered and note.get("arrived_at"):
             logger.info("VALR notification latency: email pushed %.1f s after it arrived",
                         (now - note["arrived_at"]).total_seconds())
-    return out
-
-
-# Telegram.
-
-async def dispatch(store: Any, now: datetime, bot: Any = None, chat: int | None = None,
-                   sender: Any = None) -> dict[str, int]:
-    """Phone push first (app/webpush.py), then Telegram: immediate items now (quiet hours
-    aside), the daily digest when due. Without a bot or a linked chat nothing is marked for
-    Telegram, so it all goes once Telegram is linked. "Phone push only" skips Telegram while
-    at least one phone is subscribed."""
-    from app import telegram_api
-    switches = await store.switches()
-    out = {"sent": 0, "held": 0, "digest": 0}
-    out |= await push_dispatch(store, now, switches, sender)
-    pending = await store.pending()
-    if switches.delivery == "push" and sender is not None and await sender.subscribers():
-        for note in pending:
-            await store.update(note["id"], tg_state="skipped")
-        return out
-    if bot is None or chat is None:
-        return out
-    stale = now - timedelta(days=2)
-    digest = []
-    for note in pending:
-        if note["created_at"] < stale and note["importance"] == "immediate":
-            await store.update(note["id"], tg_state="skipped")  # Too old to be "immediate" now.
-            continue
-        if note["importance"] == "digest" or not switches.immediate:
-            digest.append(note)
-            continue
-        if not may_send_now(note, now, switches):
-            out["held"] += 1
-            continue
-        try:
-            await bot.send(chat, telegram_text(note))
-            await store.update(note["id"], tg_state="sent", tg_sent_at=now)
-            out["sent"] += 1
-        except telegram_api.TelegramError as error:
-            logger.warning("VALR notification not sent on Telegram: %s", type(error).__name__)
-            await store.update(note["id"], tg_state="failed")
     if digest_due(now, switches):
-        fresh = [n for n in digest if n["created_at"] >= now - timedelta(days=2)]
-        if fresh:
-            try:
-                await bot.send(chat, digest_text(fresh))
-                out["digest"] = len(fresh)
-            except telegram_api.TelegramError as error:
-                logger.warning("VALR digest not sent on Telegram: %s", type(error).__name__)
-                return out
-        for note in digest:
-            await store.update(note["id"], tg_state="digested" if note in fresh else "skipped", tg_sent_at=now)
+        if digest:
+            if unread is None:
+                unread = await store.unread_count(now - KEEP_FOR)
+            result = await sender.send(digest_message(digest, unread), now)
+            for note in digest:
+                await store.update(note["id"], push_state="digested" if result.delivered else "failed",
+                                   push_sent_at=now)
+            out["digest"] = len(digest) if result.delivered else 0
         await store.save_switches(last_digest_on=local(now).date())
     elif not switches.digest:
         for note in digest:
-            if note["importance"] == "digest":
-                await store.update(note["id"], tg_state="skipped")
+            await store.update(note["id"], push_state="skipped")
     return out
 
 
-async def run_dispatch(connection: Any, now: datetime | None = None, bot: Any = None) -> dict[str, int]:
+async def run_dispatch(connection: Any, now: datetime | None = None) -> dict[str, int]:
     """One dispatch pass on a real connection (one pass at a time: an advisory lock)."""
-    from app import telegram_api
+    from app import webpush
     now = now or datetime.now(timezone.utc)
     store = Store(connection)
     await store.setup()
     if not await store.try_lock():
-        return {"sent": 0, "held": 0, "digest": 0, "pushed": 0, "push_held": 0, "locked": 1}
+        return {"pushed": 0, "held": 0, "digest": 0, "locked": 1}
     try:
-        from app import webpush
-        bot = bot or telegram_api.bot()
-        chat = None
-        if bot is not None:
-            await telegram_api.setup(connection)
-            chat = await telegram_api.owner_chat(connection)
-        result = await dispatch(store, now, bot, chat, await webpush.sender(connection))
+        result = await dispatch(store, now, await webpush.sender(connection))
         await store.purge(now - KEEP_FOR)
     finally:
         await store.unlock()
-    if result["sent"] or result["digest"] or result.get("pushed"):
-        logger.info("VALR notifications: %d sent, %d in the digest, %d held for quiet hours, %d pushed",
-                    result["sent"], result["digest"], result["held"], result.get("pushed", 0))
+    if result["pushed"] or result["digest"]:
+        logger.info("VALR notifications: %d pushed, %d in the digest, %d held for quiet hours",
+                    result["pushed"], result["digest"], result["held"])
     return result
 
 
-async def dispatch_now(connection: Any, bot: Any = None, tries: int = 5, wait: float = 0.5) -> dict[str, int] | None:
+async def dispatch_now(connection: Any, tries: int = 5, wait: float = 0.5) -> dict[str, int] | None:
     """Right after a new item is stored (an email, a calendar change, a recording): push it now
     instead of at the loop's next tick (up to VALR_NOTIFY_LOOP_S later). When the loop holds the
     lock it may have listed the pending items before this one was stored, so retry a few times
@@ -945,7 +892,7 @@ async def dispatch_now(connection: Any, bot: Any = None, tries: int = 5, wait: f
     import asyncio
     for attempt in range(tries):
         try:
-            result = await run_dispatch(connection, bot=bot)
+            result = await run_dispatch(connection)
         except Exception as error:  # noqa: BLE001 - the loop sends it on its next tick
             logger.warning("VALR notifications: immediate dispatch failed (%s)", type(error).__name__)
             return None
@@ -956,9 +903,29 @@ async def dispatch_now(connection: Any, bot: Any = None, tries: int = 5, wait: f
     return None
 
 
+async def notify_now(connection: Any, note: dict[str, Any], now: datetime | None = None) -> str:
+    """Add one item to the bell and push it at once (the heads-up, a ready review): 'sent',
+    'no_device' (it stays in the bell), 'failed' or 'duplicate' (its source_id is known)."""
+    from app import webpush
+    now = now or datetime.now(timezone.utc)
+    store = Store(connection)
+    await store.setup()
+    note_id = await add(store, note, now)
+    if note_id is None:
+        return "duplicate"
+    sender = await webpush.sender(connection)
+    if sender is None or not await sender.subscribers():
+        await store.update(note_id, push_state="skipped")
+        return "no_device"
+    unread = await store.unread_count(now - KEEP_FOR)
+    result = await sender.send(push_message({**note, "importance": importance(note["kind"])}, unread), now)
+    await store.update(note_id, push_state="sent" if result.delivered else "failed", push_sent_at=now)
+    return "sent" if result.delivered else "failed"
+
+
 async def loop(connect: Any, stop: Any = None) -> None:
     """The research worker's background task: a dispatch every VALR_NOTIFY_LOOP_S (60) seconds,
-    so held items leave at 08:00 and the digest at 09:00; once an hour, the latency figures of
+    so held items leave when quiet hours end and the digest goes at its time; once an hour, the latency figures of
     the last 24 hours are logged ("VALR notification SLA ...")."""
     import asyncio
     stop = stop or asyncio.Event()

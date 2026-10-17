@@ -22,7 +22,7 @@ document.querySelector("[data-theme-toggle]")?.addEventListener("click", () => {
 });
 
 // Links from before the redesign: /valr#iv-slot-... -> /valr/interviews/slot-..., the
-// scorecard anchors in leads and Telegram post-call reports (/valr#past-<provider>-<id>) ->
+// scorecard anchors in leads and older post-call reports (/valr#past-<provider>-<id>) ->
 // /valr/interviews/past/<provider>-<id>, and the old sections -> their pages.
 const OLD_SECTIONS = {"#performance": "/valr/progress", "#upcoming": "/valr/interviews", "#setup": "/valr/settings",
                       "#notetakers": "/valr/settings#notetakers", "#system": "/valr/settings#advanced"};
@@ -36,10 +36,14 @@ if (location.pathname === "/valr" || location.pathname === "/valr/") {
 }
 if (location.hash === "#advanced") document.getElementById("advanced")?.setAttribute("open", "");
 
-// Menus and the bell (<details>): one open at a time; Escape or a click outside closes them.
+// Menus and the bell (<details>): one open at a time; Escape or a tap outside closes them.
+// "pointerdown", not "click": iOS Safari sends no click for a tap on plain content (text, a
+// card's padding), so a document click listener never hears it and the menu stayed open.
 const popovers = () => document.querySelectorAll("details[data-menu][open], details[data-popover][open]");
-document.addEventListener("click", event => {
+document.addEventListener("pointerdown", event => {
   popovers().forEach(box => { if (!box.contains(event.target)) box.open = false; });
+});
+document.addEventListener("click", event => {
   const item = event.target.closest(".menu-item");
   if (item && !item.matches("[data-sheet]")) setTimeout(() => { const box = item.closest("details"); if (box) box.open = false; }, 0);
 });
@@ -67,8 +71,12 @@ document.addEventListener("click", event => {
     return;
   }
   if (event.target.closest("[data-sheet-close]")) event.target.closest("dialog")?.close();
-  else if (event.target.matches("dialog.sheet")) event.target.close();  // The backdrop.
 });
+// A tap on the backdrop closes the sheet. The listener sits on each dialog: iOS Safari doesn't
+// deliver a backdrop tap to a document listener.
+document.querySelectorAll("dialog.sheet").forEach(dialog => dialog.addEventListener("click", event => {
+  if (event.target === dialog) dialog.close();
+}));
 
 // Filters that apply themselves (the form still works without JavaScript).
 document.addEventListener("change", event => {
@@ -137,11 +145,15 @@ async function mountGlobe() {
       });
       if (view?.supported !== false) {
         toggle?.addEventListener("change", () => view.update(shown()));
-        // Pointing at a "Your move" row turns the globe to that lead.
+        // Pointing at a "Your move" row turns the globe to that lead. Only where there is real
+        // hover: on iPhone a mouseenter that changes the page makes the first tap a hover, so
+        // opening the lead took two taps.
+        const canHover = matchMedia("(hover: hover)").matches;
         document.querySelectorAll(".move-main").forEach(row => {
           const id = new URL(row.href).searchParams.get("lead");
-          row.addEventListener("mouseenter", () => view.hover?.(id));
           row.addEventListener("focus", () => view.hover?.(id));
+          if (!canHover) return;
+          row.addEventListener("mouseenter", () => view.hover?.(id));
           row.addEventListener("mouseleave", () => view.hover?.(null));
         });
         globe.dataset.globeKind = "3d";
@@ -261,7 +273,8 @@ document.querySelector("[data-merge-search]")?.addEventListener("input", event =
   if (!select) return;
   let first = null;
   for (const option of select.options) {
-    option.hidden = Boolean(q) && !option.textContent.toLowerCase().includes(q);
+    // iOS shows hidden options in its picker anyway; disabled ones at least can't be picked.
+    option.hidden = option.disabled = Boolean(q) && !option.textContent.toLowerCase().includes(q);
     if (!option.hidden && !first) first = option;
   }
   if (first) select.value = first.value;

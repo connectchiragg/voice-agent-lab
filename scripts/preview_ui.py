@@ -7,7 +7,9 @@ app page (/valr, /valr/interviews, /valr/leads, /valr/progress, /valr/settings, 
     VALR_DEV_PREVIEW=1 python scripts/preview_ui.py --performance data/performance.json
                                                             # your own scores in the Performance section
     .../valr?scenario=down                                  # the database is down (any page)
-    .../valr?mode=telegram                                  # heads-up mode, Telegram not linked
+    .../valr?push=off                                       # no phone subscribed to notifications
+    .../valr/settings?phone=none                            # no phone on file (?phone=env: from the server)
+    .../valr/profile                                        # the profile (photo, names, time zone)
     .../valr?extras=0                                       # without the other branches' data
     .../valr?theme=light                                    # pin light (or dark) for screenshots
     VALR_DEV_PREVIEW=1 python scripts/preview_ui.py --media /path/to/any.mp4
@@ -49,7 +51,7 @@ def main() -> None:
 
     import uvicorn
 
-    from app import interview_store, interviews, main as app_main, research, valr_dashboard, valr_view, webrtc
+    from app import interview_store, interviews, main as app_main, owner, research, valr_dashboard, valr_view, webrtc
     from app.valr_ui import contracts, routes
     from tests.valr_sample import notetakers_view, sample_recording, sample_view
     from tests.valr_sample_extras import sample_leads
@@ -57,8 +59,17 @@ def main() -> None:
 
     valr_dashboard.enable_dev_preview(args.host)  # Raises unless VALR_DEV_PREVIEW=1 and loopback.
     os.environ["VALR_ADMIN_EMAILS"] = valr_dashboard.PREVIEW_EMAIL
-    state = {"media": "ready", "paused": False, "auto_dial": None, "prep": {}, "notetakers": {"fathom": "connected", "fireflies": "not_connected",
-                                             "granola": "not_connected"}}
+    state = {"media": "ready", "paused": False, "until": None, "auto_dial": None, "prep": {},
+             "notetakers": {"fathom": "connected", "fireflies": "not_connected", "granola": "not_connected"},
+             "google": "connected", "photo": None}
+    # A made-up owner (app/owner.py's cache; nothing is stored). The number is in a test range.
+    profile = {"display_name": "Sam Rivera", "recording_name": "Sam Rivera", "name_pronunciation": "",
+               "timezone": "Asia/Kolkata", "phone_e164": "+919800000001", "phone_removed": False, "photo_etag": None}
+    owner.apply(profile)
+
+    async def no_refresh(*args, **kwargs):
+        return None
+    owner.refresh = no_refresh
     scenario: contextvars.ContextVar[str] = contextvars.ContextVar("scenario", default="full")
     options: contextvars.ContextVar[dict] = contextvars.ContextVar("options", default={})
 
@@ -78,16 +89,25 @@ def main() -> None:
             return FileResponse(args.media, media_type="video/mp4")
         if path.startswith(("/valr/api/notifications", "/valr/api/phone/", "/valr/api/push")):
             return await preview_notify(request, path)
+        if path.startswith(("/valr/api/profile", "/valr/profile/photo", "/valr/api/google/", "/valr/api/data/",
+                            "/valr/api/export", "/logout/all")):
+            return await preview_settings(request, path)
         if path.startswith(("/valr/api/notetakers/", "/valr/api/leads/")) or path in (
-                "/valr/api/recording", "/valr/api/recording/media", "/valr/api/telegram/code", "/valr/api/reach", "/valr/api/prep"):
+                "/valr/api/recording", "/valr/api/recording/media", "/valr/api/reach", "/valr/api/prep", "/valr/api/dials"):
             return await preview_api(request, path)
         options.set({"leads": "small" if request.query_params.get("leads") == "small" else "live",
-                     "telegram": request.query_params.get("mode") == "telegram",
+                     "push_off": request.query_params.get("push") == "off",
                      "extras": request.query_params.get("extras") != "0"})
+        if request.query_params.get("phone") in ("none", "env", "db"):
+            wanted_phone = request.query_params["phone"]
+            owner.apply({**owner._row, "phone_e164": "+919800000001" if wanted_phone == "db" else None,
+                         "phone_removed": wanted_phone == "none"})
+            if wanted_phone == "env":
+                os.environ["VALR_OWNER_PHONE"] = "+919800000002"
         return await call_next(request)
 
     async def preview_api(request, path):
-        """Fake notetaker / recording / Telegram answers; a pasted key is read and dropped."""
+        """Fake notetaker / recording / reach answers; a pasted key is read and dropped."""
         from fastapi.responses import JSONResponse
         if not valr_dashboard.is_preview_request(request):
             return JSONResponse({"detail": "Preview only."}, status_code=403)
@@ -105,8 +125,18 @@ def main() -> None:
         if path == "/valr/api/reach":
             import json
             mode = json.loads(await request.body() or b"{}").get("mode")
+            if mode == "call" and not owner.phone():
+                return JSONResponse({"detail": "Add your phone first: VALR has no number to call."}, status_code=400)
             state["auto_dial"] = mode == "call"
             return JSONResponse({"ok": True, "mode": mode, "message": f"Preview: {mode} saved."})
+        if path == "/valr/api/dials":
+            import json
+            from datetime import datetime, timedelta, timezone
+            body = json.loads(await request.body() or b"{}")
+            state["paused"] = bool(body.get("paused"))
+            days = body.get("days") if state["paused"] else None
+            state["until"] = (datetime.now(timezone.utc) + timedelta(days=days)).isoformat() if days else None
+            return JSONResponse({"ok": True, "message": "Preview: reminders paused." if state["paused"] else "Preview: resumed."})
         if path == "/valr/api/prep":
             import json
             from app.interview_store import prep_item
@@ -117,10 +147,6 @@ def main() -> None:
         if path.startswith("/valr/api/leads/"):
             await request.body()
             return JSONResponse({"ok": True, "message": "Preview: nothing is stored."})
-        if path == "/valr/api/telegram/code":
-            return JSONResponse({"ok": True, "command": "/start 123456", "expires_minutes": 15,
-                                 "link": "https://t.me/example_valr_bot?start=123456",
-                                 "message": "Send /start 123456 to the VALR bot within 15 minutes."})
         provider, action = path.split("/")[4:6]
         label = provider.capitalize()
         if action == "connect":
@@ -134,8 +160,76 @@ def main() -> None:
             return JSONResponse({"ok": True, "found": 3, "new": 1, "message": f"{label}: 3 recordings in the last 7 days, 1 new."})
         return JSONResponse({"ok": True, "message": f"{label}: 2 notes read, 2 new."})
 
-    notes = {"read": set(), "switches": {"immediate": True, "digest": True, "quiet": True, "delivery": "both"},
-             "devices": set()}
+    notes = {"read": set(), "switches": {"immediate": True, "digest": True, "quiet": True, "digest_at": "09:00",
+                                          "quiet_start": "23:00", "quiet_end": "08:00"},
+             "devices": {}, "uploads_off": False}
+
+    async def preview_settings(request, path):
+        """Profile, phone, Google, export and delete, in memory only (nothing is stored or sent)."""
+        import json
+        from fastapi.responses import JSONResponse, Response
+        if not valr_dashboard.is_preview_request(request):
+            return JSONResponse({"detail": "Preview only."}, status_code=403)
+        body = json.loads(await request.body() or b"{}") if request.method == "POST" else {}
+        if path == "/valr/profile/photo":
+            return Response(state["photo"], media_type="image/webp") if state["photo"] else Response(status_code=404)
+        if path == "/valr/api/profile/photo":
+            import base64
+            state["photo"] = base64.b64decode(body.get("image", "").split(",")[-1] or b"")
+            owner.apply({**owner._row, "photo_etag": owner.etag_of(state["photo"])})
+            return JSONResponse({"ok": True, "message": "Photo updated."})
+        if path == "/valr/api/profile/photo/remove":
+            state["photo"] = None
+            owner.apply({**owner._row, "photo_etag": None})
+            return JSONResponse({"ok": True, "message": "Photo removed. Your initials show instead."})
+        if path == "/valr/api/profile/phone":
+            if request.method == "GET":
+                return JSONResponse({"ok": True, **owner.view()["phone"]})
+            try:
+                number = owner.normalize_phone(body.get("phone", ""))
+            except owner.PhoneError as error:
+                return JSONResponse({"detail": str(error)}, status_code=400)
+            owner.apply({**owner._row, "phone_e164": number, "phone_removed": False})
+            return JSONResponse({"ok": True, **owner.view()["phone"], "message": "Phone updated. VALR calls this number from now on."})
+        if path == "/valr/api/profile/phone/remove":
+            owner.apply({**owner._row, "phone_e164": None, "phone_removed": True})
+            state["auto_dial"] = False if state["auto_dial"] else state["auto_dial"]
+            return JSONResponse({"ok": True, "message": "Phone removed. VALR won't call you."})
+        if path == "/valr/api/profile":
+            if request.method == "GET":
+                return JSONResponse({"ok": True, **owner.view()})
+            errors, values = {}, {}
+            for key, label in (("display_name", "Display name"), ("recording_name", "Name in recordings")):
+                if key in body:
+                    try:
+                        values[key] = owner.clean_name(body[key], label)
+                    except owner.InvalidInput as error:
+                        errors[key] = str(error)
+            if "name_pronunciation" in body:
+                try:
+                    values["name_pronunciation"] = owner.clean_pronunciation(body["name_pronunciation"])
+                except owner.InvalidInput as error:
+                    errors["name_pronunciation"] = str(error)
+            if "timezone" in body:
+                if owner.valid_zone(body["timezone"]):
+                    values["timezone"] = body["timezone"]
+                else:
+                    errors["timezone"] = "Pick a time zone from the list."
+            if errors:
+                return JSONResponse({"detail": next(iter(errors.values())), "errors": errors}, status_code=400)
+            owner.apply({**owner._row, **values})
+            return JSONResponse({"ok": True, **owner.view(), "message": "Profile saved."})
+        if path == "/valr/api/google/disconnect":
+            state["google"] = "not_connected"
+            return JSONResponse({"ok": True, "message": "Preview: Google disconnected."})
+        if path == "/valr/api/google/sync":
+            return JSONResponse({"ok": True, "message": "Syncing your calendar and Gmail now."})
+        if path == "/valr/api/export":
+            return Response(b"PK\x05\x06" + b"\x00" * 18, media_type="application/zip",
+                            headers={"Content-Disposition": 'attachment; filename="valr-data-preview.zip"'})
+        if path in ("/valr/api/data/delete", "/logout/all"):
+            return JSONResponse({"ok": True, "next": "/valr/settings", "message": "Preview: nothing is deleted."})
+        return JSONResponse({"detail": "Not in the preview."}, status_code=404)
 
     def preview_items():
         """Fictional notifications, tied to the sample leads by company (so the Leads dots match)."""
@@ -194,21 +288,37 @@ def main() -> None:
             elif path.endswith("/settings"):
                 notes["switches"].update({k: v for k, v in body.items() if k in notes["switches"]})
             elif path == "/valr/api/phone/token":
+                if body.get("action") == "revoke":
+                    notes["uploads_off"] = True
+                    return JSONResponse({"ok": True, "off": True, "message": "Uploads are off."})
+                notes["uploads_off"] = False
                 return JSONResponse({"ok": True, "token": "preview-token-not-real", "message": "Copy it now."})
-        if path.startswith("/valr/api/push"):  # Phone push: a made-up key, devices counted in memory.
+            elif path.endswith("/notifications/test"):
+                return JSONResponse({"ok": True, "message": "Preview: a sample digest would be pushed now."})
+        if path.startswith("/valr/api/push"):  # Phone push: a made-up key, devices in memory.
+            from app import webpush
             if request.method == "POST":
                 body = json.loads(await request.body() or b"{}")
                 if path.endswith("/subscribe"):
-                    notes["devices"].add(str(body.get("endpoint")))
+                    endpoint = str(body.get("endpoint"))
+                    notes["devices"].setdefault(endpoint, {"id": len(notes["devices"]) + 2, "label": webpush.device_label(
+                        request.headers.get("user-agent", "")), "key": webpush.endpoint_key(endpoint),
+                        "added_at": now.isoformat(), "last_ok_at": None, "failures": 0})
                 elif path.endswith("/unsubscribe"):
-                    notes["devices"].discard(str(body.get("endpoint")))
-            out = {"ok": True, "configured": True, "public_key": PREVIEW_VAPID, "devices": len(notes["devices"]),
-                   "delivery": notes["switches"]["delivery"]}
+                    notes["devices"].pop(str(body.get("endpoint")), None)
+                elif path.endswith("/remove"):
+                    notes["devices"] = {k: v for k, v in notes["devices"].items() if v["id"] != body.get("id")}
+            listed = [] if options.get().get("push_off") else (
+                [{"id": 1, "label": "iPhone", "key": "0000000000000000", "added_at": (now - timedelta(days=12)).isoformat(),
+                  "last_ok_at": (now - timedelta(hours=5)).isoformat(), "failures": 0}] + list(notes["devices"].values()))
+            out = {"ok": True, "configured": True, "public_key": PREVIEW_VAPID, "devices": len(listed),
+                   "device_list": listed, "message": "Device removed." if path.endswith("/remove") else ""}
             if path.endswith("/test"):
                 out |= {"delivered": 0, "message": "Preview: nothing is sent."}
             return JSONResponse(out)
         if path == "/valr/api/phone/status":
-            return JSONResponse({"ok": True, "token": True, "last_upload_at": (now - timedelta(hours=3)).isoformat(),
+            return JSONResponse({"ok": True, "token": not notes["uploads_off"], "off": notes["uploads_off"],
+                                 "last_upload_at": (now - timedelta(hours=3)).isoformat(),
                                  "last_status": "done", "waiting": 0, "audio_days": 7})
         unread = sum(1 for i in items if i["id"] not in notes["read"])
         if request.query_params.get("unread") == "1":
@@ -226,21 +336,26 @@ def main() -> None:
 
     async def collect(pool, now=None):
         view = sample_view(paused=state["paused"], scenario=scenario.get(), extras=options.get().get("extras", True))
+        view["dials_paused"]["until"] = state["until"] if state["paused"] else None
+        view["notify"] = dict(notes["switches"])
+        view["setup"]["phone_on_file"] = bool(owner.phone())
+        if options.get().get("push_off"):
+            view["connections"]["push"] = {"configured": True, "devices": []}
         if scenario.get() == "full":
             view["connections"]["notetakers"] = notetakers_view(state["notetakers"])
+            if state["google"] != "connected":
+                view["connections"]["google"].update(state=state["google"], account="", expires_soon=False)
             if real is not None:
                 view["performance"] = real
         for block in view["blocks"]:
             for slot in block["slots"]:
                 slot["prep_done"] = sorted(state["prep"].get(slot["ref"], ()))
         if state["auto_dial"] is not None:
-            view["mode"] = "call" if state["auto_dial"] else "telegram"
+            view["mode"] = "call" if state["auto_dial"] else "heads_up"
             view["reach"] = {"auto_dial": state["auto_dial"], "source": "settings", "default_auto_dial": False}
             return view
         view["reach"] = {"auto_dial": False, "source": "default", "default_auto_dial": False}
-        view["mode"] = "telegram"  # The default: a Telegram heads-up, no automatic call.
-        if options.get().get("telegram"):  # ?mode=telegram: the bot is set up, not linked yet.
-            view["connections"]["telegram"] = {"configured": True, "linked": False, "linked_at": None, "username": None}
+        view["mode"] = "heads_up"  # The default: a push heads-up, no automatic call.
         return view
 
     async def load_leads():

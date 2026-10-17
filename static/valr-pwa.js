@@ -34,7 +34,26 @@ export function deviceLabel(ua = "") {
 
 export function devicesText(count) {
   const n = Number(count) || 0;
-  return n ? `${n} device${n === 1 ? "" : "s"} subscribed.` : "No devices subscribed yet.";
+  return n ? `${n} device${n === 1 ? "" : "s"} subscribed.` : "Phone notifications are off: alerts only reach the bell.";
+}
+
+// A device row's label: "iPhone (this one)", added date; the same rule as app/webpush.device_view.
+export function deviceRow(device, thisKey = "", now = Date.now()) {
+  const mine = Boolean(thisKey) && device.key === thisKey;
+  const when = iso => {
+    if (!iso) return "";
+    const days = Math.floor((now - Date.parse(iso)) / 86400000);
+    return days <= 0 ? "today" : days === 1 ? "yesterday" : `${days} days ago`;
+  };
+  const seen = device.last_ok_at ? `last notified ${when(device.last_ok_at)}` : "not notified yet";
+  const trouble = device.failures ? ` · ${device.failures} failed` : "";
+  return {mine, title: `${device.label}${mine ? " (this one)" : ""}`, sub: `Added ${when(device.added_at)} · ${seen}${trouble}`};
+}
+
+export async function endpointKey(endpoint) {
+  if (!endpoint || !globalThis.crypto?.subtle) return "";
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(endpoint));
+  return [...new Uint8Array(digest)].map(b => b.toString(16).padStart(2, "0")).join("").slice(0, 16);
 }
 
 export function sameKey(a, b) {
@@ -80,9 +99,10 @@ function startCard(registering) {
   const standalone = isStandalone(window);
   const supported = "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
   const devices = card.querySelector("[data-pwa-devices]");
+  const list = card.querySelector("[data-pwa-device-list]");
   const label = card.querySelector("[data-pwa-on-label]");
   if (label) label.textContent = `On for this ${deviceLabel(ua)}`;
-  let server = {configured: false, public_key: "", devices: 0, delivery: "both"};
+  let server = {configured: false, public_key: "", devices: 0, device_list: []};
 
   const show = view => {
     card.querySelectorAll("[data-pwa-view]").forEach(node => { node.hidden = node.dataset.pwaView !== view; });
@@ -92,19 +112,64 @@ function startCard(registering) {
     const registration = await registering;
     return registration?.pushManager ? registration.pushManager.getSubscription() : null;
   };
+  const renderDevices = async subscription => {
+    devices.textContent = devicesText(server.devices);
+    if (!list) return;
+    const mine = await endpointKey(subscription?.endpoint).catch(() => "");
+    list.replaceChildren(...(server.device_list || []).map(device => {
+      const row = deviceRow(device, mine);
+      const item = document.createElement("li");
+      item.className = "device";
+      const text = document.createElement("div");
+      const title = document.createElement("p");
+      title.className = "device-title";
+      title.textContent = row.title;
+      const sub = document.createElement("p");
+      sub.className = "field-help";
+      sub.textContent = row.sub;
+      text.append(title, sub);
+      const actions = document.createElement("div");
+      actions.className = "device-actions";
+      const test = document.createElement("button");
+      test.className = "btn sm";
+      test.type = "button";
+      test.textContent = "Send a test";
+      test.addEventListener("click", async () => {
+        try { const data = await api("/valr/api/push/test", {id: device.id}); server = data; toast(data.message); }
+        catch (error) { toast(error.message); }
+        refresh();
+      });
+      const remove = document.createElement("button");
+      remove.className = "btn sm ghost";
+      remove.type = "button";
+      remove.textContent = "Remove";
+      remove.setAttribute("aria-label", `Remove ${row.title}`);
+      // Asked first by static/valr-settings.js's confirm sheet ([data-confirm]).
+      remove.dataset.confirm = `Remove ${row.title}?`;
+      remove.dataset.confirmBody = "It gets no more VALR notifications until they're turned on again on that device.";
+      remove.dataset.confirmOk = "Remove";
+      remove.addEventListener("click", async () => {
+        try {
+          server = await api("/valr/api/push/remove", {id: device.id});
+          if (row.mine) await (await current())?.unsubscribe();
+          toast(server.message || "Removed.");
+        } catch (error) { toast(error.message); }
+        refresh();
+      });
+      actions.append(test, remove);
+      item.append(text, actions);
+      return item;
+    }));
+  };
   const refresh = async () => {
     const subscription = supported ? await current().catch(() => null) : null;
-    devices.textContent = devicesText(server.devices);
+    await renderDevices(subscription);
     show(viewFor({ios, standalone, supported, configured: server.configured,
                   permission: supported ? Notification.permission : "default", subscribed: Boolean(subscription)}));
   };
 
   api("/valr/api/push").then(data => {
     server = data;
-    card.querySelectorAll("[data-pwa-delivery]").forEach(radio => {
-      radio.checked = radio.value === data.delivery;
-      radio.disabled = false;
-    });
   }).then(async () => {
     // Already subscribed here: tell the server again (it forgets a device the push service dropped).
     const subscription = supported && Notification.permission === "granted" ? await current() : null;
@@ -149,18 +214,6 @@ function startCard(registering) {
     refresh();
   });
 
-  card.querySelectorAll("[data-pwa-delivery]").forEach(radio => radio.addEventListener("change", async () => {
-    if (!radio.checked) return;
-    const before = server.delivery;
-    try {
-      const data = await api("/valr/api/notifications/settings", {delivery: radio.value});
-      server.delivery = data.switches.delivery;
-      toast("Saved.");
-    } catch (error) {
-      card.querySelectorAll("[data-pwa-delivery]").forEach(r => { r.checked = r.value === before; });
-      toast(error.message);
-    }
-  }));
 }
 
 if (typeof document !== "undefined" && typeof window !== "undefined") {

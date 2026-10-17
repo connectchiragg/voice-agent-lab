@@ -27,14 +27,17 @@ Three workflows, all run by the research worker:
   Before each scheduled dial it asks `dials_paused` (the dashboard's pause switch);
   a paused call is skipped.
   Since 2026-10-16 (owner's design, patch `valr-telegram-heads-up`) the T-30 step sends
-  a Telegram heads-up instead of dialling (activity `telegram_heads_up`): the owner taps
-  [Call me now] or [In 10 min] to get the call (an on-demand run of this workflow), or
-  nothing and there is no call. VALR_AUTO_DIAL=1 (activity `briefing_auto_dial`, read
-  at T-30) brings the automatic dial back. Blocks already waiting when this shipped take
-  the new path at their T-30, because the patch is checked there.
+  a heads-up instead of dialling: the owner taps it to get the briefing call, or nothing
+  and there is no call. VALR_AUTO_DIAL=1 or the Settings choice (activity
+  `briefing_auto_dial`, read at T-30) brings the automatic dial back. Since 2026-10-17
+  (patch `valr-push-heads-up`, Telegram removed) the heads-up is a phone push and a bell
+  item (activity `push_heads_up`): "Acme interview in 30 min — tap for your briefing
+  call", opening that interview's page. Blocks already waiting take the push at their
+  T-30, because both patches are checked there; the old activity name
+  (`telegram_heads_up`) is still served, by the push, for a heads-up in flight.
   The on-demand variant ("research tomorrow's interviews" on a call) waits for that
   call to end and for the slots' research, then calls back at once; with `dial_at_utc`
-  (Telegram's [In 10 min]) it first waits until then.
+  it first waits until then.
 
 Workflow code reads time only through workflow.now() and does all I/O in activities.
 Imports only the standard library, temporalio and the pure modules.
@@ -70,6 +73,7 @@ SYNTH_SECONDS = 150
 FULL = ("private", "round", "interviewers", "company")
 DIAL_PAUSE_PATCH = "valr-dial-pause"
 HEADS_UP_PATCH = "valr-telegram-heads-up"
+PUSH_HEADS_UP_PATCH = "valr-push-heads-up"  # The heads-up is a push, not a Telegram message.
 
 
 @dataclass
@@ -377,7 +381,7 @@ class BlockInput:
     dials_per_day: int = BRIEFING_DIALS_PER_DAY
     call_by_utc: str = ""  # On demand: the promised time; dial by then, ready or not.
     ready_keys: list[str] = field(default_factory=list)  # Wait for these (empty: all).
-    dial_at_utc: str = ""  # On demand: not before this (Telegram's "In 10 min").
+    dial_at_utc: str = ""  # On demand: not before this.
 
 
 @dataclass
@@ -533,10 +537,12 @@ class BlockCallWorkflow:
             return False  # Unknown: no automatic call (the owner's default).
 
     async def send_heads_up(self, block: BlockInput) -> str:
+        # Patched: a heads-up already scheduled under the old name replays as it was.
+        name = "push_heads_up" if workflow.patched(PUSH_HEADS_UP_PATCH) else "telegram_heads_up"
         try:
             return await workflow.execute_activity(
-                "telegram_heads_up", HeadsUpInput(block.block_id, block.start_utc,
-                                                  list(self.slot_keys), block.label),
+                name, HeadsUpInput(block.block_id, block.start_utc,
+                                   list(self.slot_keys), block.label),
                 result_type=str, start_to_close_timeout=timedelta(seconds=45),
                 retry_policy=RetryPolicy(maximum_attempts=2))
         except ActivityError as error:

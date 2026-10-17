@@ -1,4 +1,5 @@
-"""Interviews: upcoming (by day) and past, and one page per interview.
+"""Interviews: upcoming (by day), past, and processes (app/valr_ui/processes.py), and one page
+per interview.
 
 Upcoming detail (the briefing, one screen): header with the countdown and a ⋯ menu (Refresh
 research, Fix company, Hear the briefing); then the summary, likely questions and prep
@@ -21,7 +22,8 @@ PEOPLE_ROLE = {"skipped_hr": "Recruiter", "declined": "Declined the invite"}
 
 
 def tabs(active: str, past_count: int) -> str:
-    items = [("upcoming", "Upcoming", "/valr/interviews"), ("past", "Past", "/valr/interviews/past")]
+    items = [("upcoming", "Upcoming", "/valr/interviews"), ("past", "Past", "/valr/interviews/past"),
+             ("processes", "Processes", "/valr/interviews/processes")]
     return ('<nav class="tabs" aria-label="Interviews">' + "".join(
         f'<a href="{h}"{" aria-current=\"page\"" if k == active else ""}>{e(t)}'
         + (f' <span class="count">{past_count}</span>' if k == "past" and past_count else "") + "</a>"
@@ -35,7 +37,7 @@ def reminder_note(block: dict[str, Any], view: dict[str, Any], clock: Clock) -> 
     at = clock.time(block.get("call_at"), zone=False) if block.get("call_at") else ""
     rounds = "both rounds" if n == 2 else f"all {n} rounds"
     if kind == "heads_up":
-        text = (f"One reminder at {at} for {rounds}" if n > 1 else f"Reminder on Telegram at {at}") if at else ""
+        text = (f"One reminder at {at} for {rounds}" if n > 1 else f"Heads-up at {at}") if at else ""
     else:
         text = (f"One briefing call at {at} for {rounds}" if n > 1 else f"Briefing call at {at}") if at else ""
     sent = block.get("heads_up") or {}
@@ -54,7 +56,7 @@ def reminder_note(block: dict[str, Any], view: dict[str, Any], clock: Clock) -> 
     elif sent.get("outcome") in ("calling", "later") and sent.get("call_at"):
         text = f"VALR calls you at {clock.time(sent['call_at'], zone=False)}"
     elif sent.get("outcome") == "sent" or state in ("heads_up_sent", "briefed"):
-        text = text.replace("Reminder on Telegram at", "Reminder sent at").replace("One reminder at", "One reminder sent at")
+        text = text.replace("Heads-up at", "Heads-up sent at").replace("One reminder at", "One reminder sent at")
     if not text and not problem:
         return ""
     glyph = icon("send" if kind == "heads_up" else "phone", 14)
@@ -468,7 +470,7 @@ def review_block(state: str) -> str:
         return ('<p class="muted">Review not available: the coach found no interview to score in this call '
                 '(too short, or no transcript).</p>')
     if state == "sent":
-        return '<p class="muted">The coach review was sent to Telegram; its scorecard appears here shortly.</p>'
+        return '<p class="muted">The coach review is in your notifications; its scorecard appears here shortly.</p>'
     return '<p class="muted" aria-live="polite">Review pending… The coach reviews the call within a few minutes.</p>'
 
 
