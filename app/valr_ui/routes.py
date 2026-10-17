@@ -267,7 +267,8 @@ async def render(request: Request, name: str, **params: str) -> HTMLResponse:
     if name == "home":
         body = home.page(view, clock, items, await load_leads(), notes)
     elif name == "interviews":
-        body = interviews.upcoming_page(await with_slot_names(view), clock)
+        # The Past tab's count must match the Past list: recordings and calendar history included.
+        body = interviews.upcoming_page(await with_slot_names(await with_recordings(await with_details(view))), clock)
     elif name == "interview":
         view = await with_slot_names(view)
         found = interviews.find_slot(view, params["ref"])
