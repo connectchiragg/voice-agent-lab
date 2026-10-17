@@ -150,3 +150,27 @@ def test_a_client_timeout_applies_to_requests_without_their_own():
     gw.client(timeout=60).messages.create(model="claude-haiku-5-5", max_tokens=10, messages=[], timeout=5)
     gw.client().messages.create(model="claude-haiku-5-5", max_tokens=10, messages=[])
     assert [call.get("timeout") for call in openrouter.calls] == [60, 5, None]
+
+
+def test_a_402_skips_openrouter_for_the_cooldown_then_tries_it_again():
+    openrouter, direct = FakeClient(error=status_error(402)), FakeClient()
+    gw = gateway(openrouter, direct)
+    now = [1000.0]
+    gw.clock, gw.cooldown = (lambda: now[0]), 600
+    client = gw.client()
+    client.messages.create(model="claude-haiku-5-5", max_tokens=10, messages=[])
+    client.messages.create(model="claude-haiku-5-5", max_tokens=10, messages=[])
+    assert len(openrouter.calls) == 1 and len(direct.calls) == 2  # No failed round trip on the second.
+    assert gw.stats["cooldown_direct"] == 1
+    now[0] += 601
+    openrouter.error, openrouter.is_byok = None, True  # Credits topped up.
+    client.messages.create(model="claude-haiku-5-5", max_tokens=10, messages=[])
+    assert len(openrouter.calls) == 2 and len(direct.calls) == 2
+
+
+def test_other_openrouter_errors_do_not_start_a_cooldown():
+    openrouter, direct = FakeClient(error=status_error(502)), FakeClient()
+    gw = gateway(openrouter, direct)
+    for _ in range(2):
+        gw.client().messages.create(model="claude-haiku-5-5", max_tokens=10, messages=[])
+    assert len(openrouter.calls) == 2 and gw.stats["cooldown_direct"] == 0

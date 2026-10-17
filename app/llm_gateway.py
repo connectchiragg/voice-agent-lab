@@ -11,7 +11,10 @@ Research worker and profile scripts only; the live voice LLM stays on Groq direc
   OpenRouter returns thinking summaries by default, Anthropic omits them: the gateway
   sends `display: "omitted"` unless the caller set `thinking`.
 - `LLM_GATEWAY_FALLBACK=1` (default): an OpenRouter error (HTTP status or connection)
-  re-runs the request on Anthropic direct, logged as "VALR gateway fallback".
+  re-runs the request on Anthropic direct, logged as "VALR gateway fallback". A 402
+  (OpenRouter out of credits: it does not fix itself between calls) also skips OpenRouter for
+  LLM_GATEWAY_402_COOLDOWN_S (600) seconds, so every call does not pay a failed round trip
+  first (the Gmail classifier sits on the email -> notification path).
 - `LLM_BYOK_GUARD=refuse|warn|off` (default refuse): every OpenRouter response must carry
   `usage.is_byok=true` (it ran on our Anthropic key, not OpenRouter credits). On false,
   "VALR BYOK ALERT" is logged at ERROR; `refuse` also trips the gateway for this process:
@@ -22,6 +25,7 @@ import logging
 import os
 import re
 import threading
+import time
 from collections import Counter
 from typing import Any
 
@@ -73,6 +77,9 @@ class Gateway:
         self.max_retries = max_retries
         self._openrouter, self._direct = openrouter, direct
         self.tripped = False
+        self.cooldown = float(os.getenv("LLM_GATEWAY_402_COOLDOWN_S", "600"))
+        self.skip_until = 0.0  # time.monotonic(): OpenRouter answered 402, go direct until then.
+        self.clock = time.monotonic
         self.stats: Counter[str] = Counter()
         self.lock = threading.Lock()
 
@@ -127,6 +134,8 @@ class Gateway:
             if self.tripped:
                 if not self.fallback:
                     raise ByokRequired("OpenRouter served a request on credits; LLM_BYOK_GUARD=refuse")
+            elif self.fallback and self.clock() < self.skip_until:
+                self._count("cooldown_direct")
             else:
                 try:
                     response = getattr(_resolve(self.openrouter_client(), path), method)(
@@ -135,9 +144,12 @@ class Gateway:
                     if not self.fallback:
                         raise
                     self._count("fallback")
+                    if getattr(error, "status_code", None) == 402 and self.cooldown > 0:
+                        self.skip_until = self.clock() + self.cooldown
                     logger.warning("VALR gateway fallback: OpenRouter failed (%s %s) on %s; "
-                                   "retrying on Anthropic direct", type(error).__name__,
-                                   getattr(error, "status_code", ""), kwargs.get("model"))
+                                   "retrying on Anthropic direct%s", type(error).__name__,
+                                   getattr(error, "status_code", ""), kwargs.get("model"),
+                                   f" (and for the next {self.cooldown:.0f} s)" if self.skip_until > self.clock() else "")
                 else:
                     if method == "create":
                         self.check_byok(response, kwargs.get("model", ""))
