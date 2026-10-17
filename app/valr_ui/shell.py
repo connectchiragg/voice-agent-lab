@@ -189,10 +189,10 @@ def head(title: str, theme: str | None, csrf: str = "") -> str:
 <html lang="en"{theme_attr(theme)}><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="robots" content="noindex"><meta name="referrer" content="no-referrer">{token}
-<meta name="theme-color" content="#f6f7f9" media="(prefers-color-scheme: light)">
-<meta name="theme-color" content="#0b0c0f" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#F4F0E8" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#121426" media="(prefers-color-scheme: dark)">
 <title>{e(title)} · VALR</title>
-<link rel="icon" href="{ICON}">{THEME_BOOT}{FONTS}
+{ICON}{THEME_BOOT}{FONTS}
 <link rel="stylesheet" href="{asset('valr-ds.css')}">{pwa_head()}"""
 
 

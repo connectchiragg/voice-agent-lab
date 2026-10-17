@@ -37,7 +37,7 @@ export function mount(el, data, {onSelect} = {}) {
   el.append(canvas);
   const ctx = canvas.getContext("2d");
   const style = getComputedStyle(el);
-  const color = name => style.getPropertyValue(name).trim() || "#8fd0ff";
+  const color = name => style.getPropertyValue(name).trim() || "#a9aaf0";
   const stageColor = stage => color(`--st-${stage}`) || color("--signal");
   const ink = color("--bone");
 
@@ -110,17 +110,17 @@ export function mount(el, data, {onSelect} = {}) {
     ctx.clearRect(0, 0, width, height);
     // Atmosphere.
     const glow = ctx.createRadialGradient(cx, cy, radius * 0.7, cx, cy, radius * 1.35);
-    glow.addColorStop(0, "rgba(75,139,255,0.10)");
-    glow.addColorStop(1, "rgba(75,139,255,0)");
+    glow.addColorStop(0, "rgba(169,170,240,0.10)");
+    glow.addColorStop(1, "rgba(169,170,240,0)");
     ctx.fillStyle = glow;
     ctx.beginPath(); ctx.arc(cx, cy, radius * 1.35, 0, TAU); ctx.fill();
-    ctx.strokeStyle = "rgba(143,208,255,0.18)";
+    ctx.strokeStyle = "rgba(201,198,242,0.18)";
     ctx.lineWidth = 1;
     ctx.beginPath(); ctx.arc(cx, cy, radius, 0, TAU); ctx.stroke();
     // Surface dots.
     for (const d of dots) {
       const [x, y, z] = screen(rotate(d));
-      ctx.fillStyle = z > 0 ? `rgba(160,190,255,${0.10 + z * 0.32})` : "rgba(160,190,255,0.05)";
+      ctx.fillStyle = z > 0 ? `rgba(214,208,236,${0.10 + z * 0.32})` : "rgba(214,208,236,0.05)";
       ctx.fillRect(x - 0.7, y - 0.7, 1.4, 1.4);
     }
     // Threads.
@@ -138,7 +138,7 @@ export function mount(el, data, {onSelect} = {}) {
     projected.length = 0;
     for (const n of leads) projected.push({n, s: screen(rotate(n.p))});
     projected.sort((a, b) => a.s[2] - b.s[2]);
-    ctx.font = "500 11px Inter, ui-sans-serif, system-ui, sans-serif";
+    ctx.font = "500 11px \"Source Sans 3\", ui-sans-serif, system-ui, sans-serif";
     for (const {n, s} of projected) {
       const [x, y, z] = s;
       const front = z > -0.05;
@@ -162,7 +162,7 @@ export function mount(el, data, {onSelect} = {}) {
       const labelled = front && z > 0.25 && (["interviewing", "final", "offer"].includes(n.lead.stage) || n.lead.waiting_on_you);
       if (labelled || isSel || isHover) {
         const text = n.lead.company;
-        ctx.fillStyle = "rgba(5,7,12,0.7)";
+        ctx.fillStyle = "rgba(21,23,44,0.72)";
         const w = ctx.measureText(text).width;
         ctx.fillRect(x + size + 6, y - 9, w + 10, 18);
         ctx.fillStyle = ink;

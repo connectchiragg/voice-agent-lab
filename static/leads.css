@@ -3,40 +3,40 @@
 
    Each band has a key colour (its warm end) and a "-lo" colour (its cold end); a score is
    drawn on a smooth ramp between the two inside its band, so the step between bands is
-   large and the change within one is small. Blue -> teal -> amber -> red keeps the four
+   large and the change within one is small. Slate blue -> sage teal -> ochre -> terracotta keeps the four
    apart for all three kinds of colour blindness (tests/leads-globe.test.mjs measures it,
    OKLab distance under Machado simulation). Closed is a neutral grey, never "cold".
-   static/leads-globe.js reads these tokens; the globe stage is always dark. */
+   static/leads-globe.js reads these tokens; the globe stage is always deep ink. Muted, earthy tones to sit with Porcelain & Ink. */
 :root {
-  --band-cold-lo: #3553a8; --band-cold: #4f7be6;
-  --band-cool-lo: #23877c; --band-cool: #2fb3a0;
-  --band-warm-lo: #d9b64c; --band-warm: #eda233;
-  --band-hot-lo: #f0703a; --band-hot: #e8392b;
-  --band-closed-lo: #5a6170; --band-closed: #5a6170;
+  --band-cold-lo: #4f5f9c; --band-cold: #8189dc;
+  --band-cool-lo: #418a72; --band-cool: #6cbb92;
+  --band-warm-lo: #c7a55e; --band-warm: #e0a64c;
+  --band-hot-lo: #c25e48; --band-hot: #de5b45;
+  --band-closed-lo: #5e5f6e; --band-closed: #5e5f6e;
 }
 @media (prefers-color-scheme: light) {
   :root:not([data-theme="dark"]) {
-    --band-cold-lo: #5b77c8; --band-cold: #2443ad;
-    --band-cool-lo: #45b3a4; --band-cool: #12a08f;
-    --band-warm-lo: #e0b23e; --band-warm: #d9950f;
-    --band-hot-lo: #cf4e2c; --band-hot: #b02a1d;
-    --band-closed-lo: #c3c8d0; --band-closed: #c3c8d0;
+    --band-cold-lo: #6c74b6; --band-cold: #34488e;
+    --band-cool-lo: #6ba98c; --band-cool: #2c7766;
+    --band-warm-lo: #cda14b; --band-warm: #a8741a;
+    --band-hot-lo: #c9694c; --band-hot: #a03629;
+    --band-closed-lo: #c7c3bb; --band-closed: #c7c3bb;
   }
 }
 :root[data-theme="light"] {
-  --band-cold-lo: #5b77c8; --band-cold: #2443ad;
-  --band-cool-lo: #45b3a4; --band-cool: #12a08f;
-  --band-warm-lo: #e0b23e; --band-warm: #d9950f;
-  --band-hot-lo: #cf4e2c; --band-hot: #b02a1d;
-  --band-closed-lo: #c3c8d0; --band-closed: #c3c8d0;
+  --band-cold-lo: #6c74b6; --band-cold: #34488e;
+  --band-cool-lo: #6ba98c; --band-cool: #2c7766;
+  --band-warm-lo: #cda14b; --band-warm: #a8741a;
+  --band-hot-lo: #c9694c; --band-hot: #a03629;
+  --band-closed-lo: #c7c3bb; --band-closed: #c7c3bb;
 }
-/* The globe sits on a night-sky stage in both themes: the dark set, always. */
+/* The globe sits on the deep-ink stage in both themes: the dark set, always. */
 .hero-globe {
-  --band-cold-lo: #3553a8; --band-cold: #4f7be6;
-  --band-cool-lo: #23877c; --band-cool: #2fb3a0;
-  --band-warm-lo: #d9b64c; --band-warm: #eda233;
-  --band-hot-lo: #f0703a; --band-hot: #e8392b;
-  --band-closed-lo: #5a6170; --band-closed: #5a6170;
+  --band-cold-lo: #4f5f9c; --band-cold: #8189dc;
+  --band-cool-lo: #418a72; --band-cool: #6cbb92;
+  --band-warm-lo: #c7a55e; --band-warm: #e0a64c;
+  --band-hot-lo: #c25e48; --band-hot: #de5b45;
+  --band-closed-lo: #5e5f6e; --band-closed: #5e5f6e;
 }
 
 /* A band swatch and the band word ("● Hot"). --f (0..1) is where the score sits in its band. */
@@ -55,21 +55,21 @@
 /* The globe's legend (Home's stage caption). */
 .band-legend { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 6px; }
 .legend-item { display: inline-flex; align-items: center; gap: 7px; height: 28px; padding: 0 11px 0 9px; border-radius: 999px;
-  background: rgba(255, 255, 255, .06); border: 1px solid rgba(255, 255, 255, .08); color: #e6e9f2; font-size: 0.8125rem; font-weight: 500;
+  background: rgba(243, 239, 230, .06); border: 1px solid rgba(243, 239, 230, .08); color: #EDE8DE; font-size: 0.8125rem; font-weight: 500;
   text-decoration: none !important; transition: background 120ms ease; }
-.legend-item:hover { background: rgba(255, 255, 255, .12); }
+.legend-item:hover { background: rgba(243, 239, 230, .12); }
 .legend-item .band-sw { box-shadow: 0 0 8px 1px color-mix(in oklab, var(--hi) 70%, transparent); }
-.legend-item .num { color: #9aa3b5; font-variant-numeric: tabular-nums; }
-.legend-extra { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; margin-top: 4px; color: #9aa3b5; font-size: 0.75rem; }
+.legend-item .num { color: #A6A2AE; font-variant-numeric: tabular-nums; }
+.legend-extra { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; margin-top: 4px; color: #A6A2AE; font-size: 0.75rem; }
 .legend-size { display: inline-flex; align-items: center; gap: 4px; }
-.legend-size i { display: inline-block; border-radius: 50%; background: #9aa3b5; }
+.legend-size i { display: inline-block; border-radius: 50%; background: #A6A2AE; }
 .legend-size i:nth-child(1) { width: 4px; height: 4px; }
 .legend-size i:nth-child(2) { width: 6px; height: 6px; }
 .legend-size i:nth-child(3) { width: 9px; height: 9px; }
 .legend-note { margin-right: 4px; }
-.globe-toggle { display: inline-flex; align-items: center; gap: 7px; cursor: pointer; color: #c3c9d6; }
-.globe-toggle input { width: 14px; height: 14px; margin: 0; accent-color: #9b9cfc; }
-.globe-toggle .num { color: #9aa3b5; }
+.globe-toggle { display: inline-flex; align-items: center; gap: 7px; cursor: pointer; color: #CFCAC2; }
+.globe-toggle input { width: 14px; height: 14px; margin: 0; accent-color: #A9AAF0; }
+.globe-toggle .num { color: #A6A2AE; }
 
 /* The globe: canvas, labels, leader lines and the tooltip. */
 .globe { position: relative; overflow: hidden; touch-action: pan-y; }
@@ -77,26 +77,26 @@
 .globe-canvas:active { cursor: grabbing; }
 .globe-labels { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
 .globe-label { position: absolute; left: 0; top: 0; display: flex; align-items: center; gap: 6px; padding: 3px 8px 3px 6px; margin: 0;
-  border: 1px solid rgba(255, 255, 255, .08); border-radius: 999px; background: rgba(9, 12, 28, .62);
-  backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); white-space: nowrap; color: #eef0f6;
-  font: 500 11px/1.2 "Inter", ui-sans-serif, system-ui, sans-serif; letter-spacing: .005em;
+  border: 1px solid rgba(243, 239, 230, .08); border-radius: 999px; background: rgba(21, 23, 44, .62);
+  backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); white-space: nowrap; color: #F3EFE6;
+  font: 500 11px/1.2 var(--font-ui); letter-spacing: .005em;
   cursor: pointer; pointer-events: auto; will-change: transform, opacity; -webkit-font-smoothing: antialiased; }
-.globe-label::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--hi, #9aa3b5); flex: none; }
+.globe-label::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--hi, #A6A2AE); flex: none; }
 .globe-label.is-hot { --hi: var(--band-hot); font-weight: 600; border-color: color-mix(in oklab, var(--band-hot) 40%, transparent); }
 .globe-label.is-warm { --hi: var(--band-warm); }
-.globe-label.is-cool { --hi: var(--band-cool); color: rgba(238, 240, 246, .88); }
-.globe-label.is-cold { --hi: var(--band-cold); color: rgba(238, 240, 246, .74); }
-.globe-label.is-closed { --hi: var(--band-closed); color: #9aa3b5; }
+.globe-label.is-cool { --hi: var(--band-cool); color: rgba(243, 239, 230, .88); }
+.globe-label.is-cold { --hi: var(--band-cold); color: rgba(243, 239, 230, .74); }
+.globe-label.is-closed { --hi: var(--band-closed); color: #A6A2AE; }
 .globe-label.is-culled { opacity: 0 !important; pointer-events: none; }
-.globe-label.is-forced, .globe-label:focus-visible { opacity: 1 !important; pointer-events: auto; z-index: 2; background: rgba(9, 12, 28, .92); }
-.globe-label:focus-visible { outline: 2px solid #9b9cfc; outline-offset: 1px; }
+.globe-label.is-forced, .globe-label:focus-visible { opacity: 1 !important; pointer-events: auto; z-index: 2; background: rgba(21, 23, 44, .92); }
+.globe-label:focus-visible { outline: 2px solid #A9AAF0; outline-offset: 1px; }
 .globe-label.is-dim { opacity: .28 !important; }
 .globe-leaders { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
-.globe-leaders line { stroke: rgba(200, 208, 230, .45); stroke-width: 1; }
+.globe-leaders line { stroke: rgba(214, 208, 226, .45); stroke-width: 1; }
 .globe-tip { position: absolute; left: 0; top: 0; z-index: 3; pointer-events: none; padding: 8px 12px; max-width: 300px;
-  border-radius: 10px; background: rgba(9, 12, 28, .94); border: 1px solid rgba(255, 255, 255, .1);
-  box-shadow: 0 12px 32px -8px rgba(0, 0, 0, .6), inset 3px 0 0 var(--tip, #9b9cfc);
-  color: #c3c9d6; font: 500 12px/1.4 "Inter", ui-sans-serif, system-ui, sans-serif; white-space: nowrap; }
-.globe-tip b { color: #fff; font-weight: 600; }
+  border-radius: 10px; background: rgba(21, 23, 44, .94); border: 1px solid rgba(243, 239, 230, .1);
+  box-shadow: 0 12px 32px -8px rgba(6, 7, 16, .6), inset 3px 0 0 var(--tip, #A9AAF0);
+  color: #CFCAC2; font: 500 12px/1.4 var(--font-ui); white-space: nowrap; }
+.globe-tip b { color: #FBF9F4; font-weight: 600; }
 .globe-unsupported::after { content: "Your browser can't draw the globe; the Leads page lists every company.";
-  position: absolute; inset: auto 24px 24px; color: #9aa3b5; font-size: 13px; }
+  position: absolute; inset: auto 24px 24px; color: #A6A2AE; font-size: 13px; }

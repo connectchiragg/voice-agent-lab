@@ -1,35 +1,39 @@
 /* VALR sign-in (app/auth/pages.py): /login and /private. Tokens come from static/valr-ds.css;
-   the page is a night-sky stage with one card, in both themes. */
-.auth-page { min-height: 100vh; background: radial-gradient(110% 80% at 70% 30%, #16204a 0%, #0b1130 40%, #05070d 78%), #05070d;
-  color: #eef0f6; }
+   the page follows the theme: warm porcelain (or ink, in dark) with the mark on its tile. */
+.auth-page { min-height: 100vh; color: var(--text);
+  background: radial-gradient(90% 70% at 28% 40%, color-mix(in oklab, var(--accent) 7%, transparent), transparent 70%), var(--bg); }
 .auth-main { min-height: 100vh; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 440px); align-items: center;
   gap: 48px; max-width: 1040px; margin: 0 auto; padding: 48px 24px; }
 .auth-art { display: grid; place-items: center; }
-.auth-orbit { width: min(420px, 100%); height: auto; filter: drop-shadow(0 0 60px rgba(99, 102, 241, .35)); }
-.auth-orbit .o-line { fill: none; stroke: rgba(170, 180, 255, .22); stroke-width: 1; }
-.auth-orbit .o-ring { fill: none; stroke: rgba(170, 180, 255, .35); stroke-width: 1.2; stroke-dasharray: 2 5; }
-.auth-orbit .o-hot { fill: #e8392b; filter: drop-shadow(0 0 6px #e8392b); }
-.auth-orbit .o-warm { fill: #eda233; }
-.auth-orbit .o-cool { fill: #2fb3a0; }
-.auth-orbit .o-cold { fill: #4f7be6; }
-.auth-orbit .o-sat { fill: #c7c8ff; filter: drop-shadow(0 0 6px #9b9cfc); }
-.auth-card { display: grid; gap: 16px; padding: 36px; border-radius: 20px; background: rgba(14, 18, 38, .72);
-  border: 1px solid rgba(255, 255, 255, .09); backdrop-filter: blur(18px); -webkit-backdrop-filter: blur(18px);
-  box-shadow: 0 30px 80px -20px rgba(0, 0, 0, .6); }
-.auth-card .brand { color: #fff; }
-.auth-card .eyebrow { color: #b8b9ff; margin-top: 8px; }
-.auth-title { font: 400 2.5rem/1.05 var(--font-display); color: #fff; }
-.auth-pitch { color: #c3c9d6; }
-.auth-privacy { color: #9aa3b5; font-size: .8125rem; }
-.auth-privacy a { color: #b8b9ff; }
-.auth-note { padding: 10px 14px; border-radius: 10px; font-size: .875rem; }
-.auth-note.bad { background: rgba(242, 117, 106, .14); color: #ffb2aa; }
-.auth-note.ok { background: rgba(76, 201, 138, .14); color: #9ee6c0; }
-.gbtn { justify-self: start; min-height: 44px; padding: 0 18px; gap: 10px; background: #fff; color: #1f1f1f; border-color: #fff; font-size: .9375rem; }
-.gbtn:hover { background: #eef0ff; border-color: #eef0ff; }
+.auth-tile { display: grid; place-items: center; width: min(300px, 70vw); aspect-ratio: 1; border-radius: 22.37%;
+  background: linear-gradient(180deg, #F7F4EE, #E8E2D5); box-shadow: var(--e3), 0 0 0 1px rgba(21, 23, 44, .05) inset; }
+.auth-mark { width: 58%; height: auto; }
+.auth-mark .m-ink { fill: #15172C; }
+.auth-mark .m-accent { fill: #4B4C9E; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .auth-tile { background: linear-gradient(180deg, #23264A, #15172C); box-shadow: var(--e3), 0 0 0 1px rgba(243, 239, 230, .06) inset; }
+  :root:not([data-theme="light"]) .auth-mark .m-ink { fill: #F3EFE6; }
+  :root:not([data-theme="light"]) .auth-mark .m-accent { fill: #A9AAF0; }
+}
+:root[data-theme="dark"] .auth-tile { background: linear-gradient(180deg, #23264A, #15172C); box-shadow: var(--e3), 0 0 0 1px rgba(243, 239, 230, .06) inset; }
+:root[data-theme="dark"] .auth-mark .m-ink { fill: #F3EFE6; }
+:root[data-theme="dark"] .auth-mark .m-accent { fill: #A9AAF0; }
+.auth-card { display: grid; gap: 16px; padding: 36px; border-radius: 20px; background: var(--surface);
+  border: 1px solid var(--line); box-shadow: var(--e2); }
+.auth-card .eyebrow { color: var(--accent-text); margin-top: 8px; }
+.auth-title { font: 400 2.625rem/1.05 var(--font-display); letter-spacing: -0.02em; color: var(--text); }
+.auth-pitch { color: var(--text-2); }
+.auth-privacy { color: var(--text-3); font-size: var(--fs-sm); }
+.auth-privacy a { color: var(--accent-text); }
+.auth-note { padding: 10px 14px; border-radius: 10px; font-size: var(--fs-14); }
+.auth-note.bad { background: var(--bad-soft); color: var(--bad); }
+.auth-note.ok { background: var(--ok-soft); color: var(--ok); }
+.gbtn { justify-self: start; min-height: 44px; padding: 0 18px; gap: 10px; background: var(--surface); color: var(--text);
+  border-color: var(--line-strong); font-size: var(--fs-base); }
+.gbtn:hover { background: var(--surface-2); border-color: var(--line-strong); }
 @media (max-width: 760px) {
-  .auth-main { grid-template-columns: 1fr; gap: 8px; padding: 24px 16px; align-content: center; }
-  .auth-orbit { width: 180px; }
+  .auth-main { grid-template-columns: 1fr; gap: 20px; padding: 24px 16px; align-content: center; }
+  .auth-tile { width: 132px; }
   .auth-card { padding: 24px; }
   .auth-title { font-size: 2rem; }
 }
