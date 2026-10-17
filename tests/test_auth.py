@@ -402,7 +402,7 @@ def test_csrf_still_guards_actions_for_a_session(client, env, monkeypatch):
     async def setup(connection):
         return None
 
-    async def set_flag(connection, name, enabled):
+    async def set_flag(connection, name, enabled, until=None):
         flags[name] = enabled
 
     monkeypatch.setattr(interview_store, "setup", setup)
@@ -439,10 +439,12 @@ def test_every_route_is_public_or_needs_the_owner():
     public = sorted(path for path in paths if gate.classify(path) == "public")
     assert public == sorted({"/healthz", "/hooks/fathom", "/hooks/gcal", "/hooks/gmail", "/hooks/granola",
                              "/hooks/recording-upload", "/manifest.webmanifest", "/sw.js", "/favicon.ico",
-                             "/hooks/telegram", "/login", "/login/google",
+                             "/login", "/login/google",
                              "/logout", "/oauth/google/callback", "/private", "/static",
                              "/telnyx/webhook", "/ws/telnyx"}), public
-    for path in ("/", "/call", "/ws/voice", "/webrtc/offer", "/webrtc/ice-servers", "/oauth/google/start",
+    for path in ("/", "/call", "/ws/voice", "/webrtc/offer", "/webrtc/ice-servers", "/oauth/google/start", "/logout/all",
+                 "/valr/profile", "/valr/api/profile", "/valr/api/profile/phone", "/valr/api/google/disconnect",
+                 "/valr/api/export", "/valr/api/data/delete", "/valr/profile/photo", "/valr/api/push/remove",
                  "/valr", "/valr/api/state", "/valr/api/dials", "/valr/interviews/{ref}", "/valr/context",
                  "/valr/api/reach", "/valr/api/prep", "/valr/api/leads", "/valr/api/leads/sync",
                  "/valr/api/leads/{lead_id}/override", "/valr/api/recording", "/valr/api/past-interviews",

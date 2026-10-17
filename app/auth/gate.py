@@ -42,7 +42,7 @@ PUBLIC_PATHS = frozenset({
 PUBLIC_PREFIXES = ("/static",)  # Static assets (no data: the pages' data needs the owner).
 # The owner: every page, API, action and voice surface.
 OWNER_PATHS = frozenset({"/", "/call", "/ws/voice", "/webrtc/offer", "/webrtc/ice-servers",
-                         "/oauth/google/start"})
+                         "/oauth/google/start", "/logout/all"})  # Sign out of all devices: owner + CSRF.
 OWNER_PREFIXES = ("/valr",)  # /valr, /valr/api/*, /valr/interviews/..., /valr/context.
 # Owner routes whose handler also accepts its own bearer token (a Mac-side job).
 BEARER_PATHS = frozenset({"/valr/context"})

@@ -140,6 +140,14 @@ async def statuses(connection: Any) -> dict[str, dict[str, Any]]:
                      "last_error": row[5]} for row in await cursor.fetchall()}
 
 
+async def activity(connection: Any) -> dict[str, dict[str, Any]]:
+    """provider -> {new_7d (recordings received in the last 7 days), last_webhook_at}."""
+    cursor = await connection.execute(
+        "SELECT provider, count(*) FILTER (WHERE received_at >= now() - interval '7 days'), "
+        "max(received_at) FILTER (WHERE origin = 'webhook') FROM notetaker_recordings GROUP BY provider")
+    return {row[0]: {"new_7d": int(row[1] or 0), "last_webhook_at": row[2]} for row in await cursor.fetchall()}
+
+
 # Recordings.
 
 async def upsert_recording(connection: Any, recording: dict[str, Any], origin: str,

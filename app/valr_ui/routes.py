@@ -10,7 +10,10 @@ POST-only, owner-only and CSRF-checked in app/valr_dashboard.py.
     /valr/leads                    tabs, filters (?tab=&stage=&q=) and list (?lead=<id> opens one and
                                    reads its notifications)
     /valr/progress                 trends, then what they mean (/valr/performance redirects here)
-    /valr/settings                 connections, reminders, Advanced (/valr/system redirects here)
+    /valr/settings                 set-up, profile summary, connections, calls and reminders,
+                                   notifications, call recordings, data and account
+                                   (/valr/system redirects here)
+    /valr/profile                  photo, names, pronunciation, time zone, phone, account
 
 Every page carries the notification bell; its unread count, Home's "New" strip and the
 Leads dots all come from one load_notes() call, so they always agree.
@@ -26,16 +29,17 @@ from typing import Any
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
-from app import research, valr_dashboard, valr_page
-from app.valr_ui import attention, contracts, home, interviews, leads, past, performance, settings, shell
+from app import owner, research, valr_dashboard, valr_page
+from app.valr_ui import attention, contracts, home, interviews, leads, past, performance, profile, settings, shell
 
 logger = logging.getLogger("uvicorn.error")
 router = APIRouter()
 # The leads branch's loader, "module:function" -> async fn(pool) -> its /valr/api/leads JSON.
 LEADS_SOURCE = "app.leads_web:collect"
 TITLES = {"home": "Home", "interviews": "Interviews", "interview": "Interview", "past": "Past interviews",
-          "past_one": "Past interview", "leads": "Leads", "progress": "Progress", "settings": "Settings"}
-NAV_OF = {"interview": "interviews", "past": "interviews", "past_one": "interviews"}
+          "past_one": "Past interview", "leads": "Leads", "progress": "Progress", "settings": "Settings",
+          "profile": "Profile"}
+NAV_OF = {"interview": "interviews", "past": "interviews", "past_one": "interviews", "profile": "settings"}
 NO_NOTES = {"items": [], "unread": 0, "leads": {}}
 
 
@@ -247,14 +251,15 @@ def e_(text: str) -> str:
 
 
 async def render(request: Request, name: str, **params: str) -> HTMLResponse:
-    # The Leads page shows recruiters' addresses: owner only, like GET /valr/api/leads.
-    email = await (valr_dashboard.owner if name == "leads" else valr_dashboard.viewer)(request)
+    # Leads (recruiters' addresses), Settings and Profile (the owner's own details): owner only.
+    email = await (valr_dashboard.owner if name in ("leads", "settings", "profile") else valr_dashboard.viewer)(request)
     try:
         view = await valr_dashboard.state_view()
     except Exception as error:  # noqa: BLE001 - a page that says so, not a stack trace or JSON.
         logger.warning("VALR page unavailable: %s", type(error).__name__)
         return HTMLResponse(valr_page.error_page("The database didn't answer."), status_code=503,
                             headers=valr_dashboard.NO_CACHE)
+    await owner.refresh()  # The profile (name, photo, phone) at most a minute old.
     clock = valr_page.Clock(view.get("zone") or "UTC", datetime.fromisoformat(view["generated_at"]))
     items = attention.items(view)
     query = request.query_params
@@ -301,7 +306,11 @@ async def render(request: Request, name: str, **params: str) -> HTMLResponse:
                           tab=query.get("tab", "")[:6], closed=query.get("closed") == "1", unread=notes["leads"])
     elif name == "progress":
         body = performance.page(view, clock, await load_leads())
+    elif name == "profile":
+        body = profile.page(view, clock, email)
     else:
+        view = {**view, "_email": email, "_host": valr_dashboard.dashboard_host(),
+                "_query": {"google_error": query.get("google_error", "")[:20], "connected": query.get("connected", "")[:20]}}
         body = settings.page(view, clock, items)
     html = shell.layout(view, email, valr_dashboard.csrf_token(email), NAV_OF.get(name, name), title, body,
                         theme=query.get("theme"), bell=shell.bell(notes, items, clock),
@@ -350,7 +359,12 @@ async def settings_page(request: Request) -> HTMLResponse:
     return await render(request, "settings")
 
 
+@router.get("/valr/profile", response_class=HTMLResponse)
+async def profile_page(request: Request) -> HTMLResponse:
+    return await render(request, "profile")
+
+
 @router.get("/valr/system")
 async def system_page(request: Request) -> RedirectResponse:
     await valr_dashboard.viewer(request)
-    return RedirectResponse("/valr/settings#advanced", status_code=301)
+    return RedirectResponse("/valr/settings", status_code=301)

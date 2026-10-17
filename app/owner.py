@@ -418,7 +418,9 @@ async def refresh(connection: Any = None, force: bool = False) -> None:
                                                          connect_timeout=5) as own:
             await setup(own)
             await load(own)
-    except Exception as error:  # noqa: BLE001 - keep the last values
+    except Exception as error:  # noqa: BLE001 - keep the last values; try again in a minute
+        global _loaded_at
+        _loaded_at = time.monotonic()
         logger.warning("VALR owner profile unavailable: %s", type(error).__name__)
 
 

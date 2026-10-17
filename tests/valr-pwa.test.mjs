@@ -3,7 +3,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {readFileSync} from "node:fs";
 import vm from "node:vm";
-import {devicesText, isIos, isStandalone, keyBytes, sameKey, viewFor} from "../static/valr-pwa.js";
+import {deviceRow, devicesText, endpointKey, isIos, isStandalone, keyBytes, sameKey, viewFor} from "../static/valr-pwa.js";
 
 const IPHONE = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Version/18.0 Mobile/15E148 Safari/604.1";
 
@@ -37,7 +37,7 @@ test("VAPID key decoding and comparison", () => {
   assert.equal(sameKey(bytes.buffer, keyBytes("BPk-_w")), true);
   assert.equal(sameKey(bytes.buffer, keyBytes("BPk-AA")), false);
   assert.equal(sameKey(null, bytes), false);
-  assert.equal(devicesText(0), "No devices subscribed yet.");
+  assert.equal(devicesText(0), "Phone notifications are off: alerts only reach the bell.");
   assert.equal(devicesText(1), "1 device subscribed.");
   assert.equal(devicesText(2), "2 devices subscribed.");
 });
@@ -90,4 +90,14 @@ test("a click focuses an open VALR window, or opens one", async () => {
   await done;
   assert.deepEqual(navigated, ["https://valr.example.test/valr/leads?lead=l1"]);
   assert.equal(sw.opened.length, 1);
+});
+
+test("the device list marks this device and says when each was last notified", async () => {
+  const now = Date.parse("2026-10-17T12:00:00Z");
+  const device = {id: 3, label: "iPhone", key: "abc", added_at: "2026-10-05T09:00:00Z", last_ok_at: "2026-10-17T07:00:00Z", failures: 0};
+  assert.deepEqual(deviceRow(device, "abc", now), {mine: true, title: "iPhone (this one)", sub: "Added 12 days ago · last notified today"});
+  assert.equal(deviceRow({...device, last_ok_at: null, failures: 2}, "zzz", now).sub, "Added 12 days ago · not notified yet · 2 failed");
+  const key = await endpointKey("https://web.push.apple.com/fictional");
+  assert.match(key, /^[0-9a-f]{16}$/);  // The same hash as app/webpush.endpoint_key.
+  assert.equal(await endpointKey(""), "");
 });
