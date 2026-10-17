@@ -1,90 +1,79 @@
-"""Settings: one short page.
+"""Settings: one short page, every row the same pattern (status, one line of what it's for,
+the actions), no folds.
 
-- "Finish setting up" (every step a link or button that does it), only until it is done.
-- Connections: Google, Telegram, the notetakers (with their connect forms) and the phone.
-- Reminders: a Telegram heads-up or an automatic call, and Pause.
-- Advanced (folded, /valr/settings#advanced; /valr/system redirects here): usage limits,
-  research spend, the calendar sync, post-call delivery, the research log and VALR's
-  dial-in number.
+0. Finish setting up: only until done; every step can be finished here, without SSH.
+1. Profile: avatar, name and the masked phone → Edit profile (/valr/profile).
+2. Connections: Google (both syncs, Sync now, Reconnect, Disconnect) and the notetakers.
+3. Calls & reminders: your phone (add, change, remove), the heads-up or the automatic call
+   (with Pause for a day, a week or until resumed), VALR's own number.
+4. Notifications: the alerts (immediate, the daily digest push, quiet hours, their times and
+   a sample), this device's phone notifications and every subscribed device.
+5. Call recordings: the Mac app, the iPhone shortcut and the upload token (on or off).
+6. Data & account: the month's research spend, export, delete, sign-in and sign out everywhere.
 
-Statuses come from the real state; nothing here is shown unless it is useful or broken.
+Statuses come from the real state. static/valr-settings.js runs the forms and confirms;
+static/valr-pwa.js the device card; static/valr-notify.js the alert switches and recordings.
 """
 from typing import Any
 
-from app.valr_page import Clock, chip, e, meter, money, phone_label
+from app import owner
+from app.valr_page import Clock, chip, e, money, phone_label
 from app.valr_ui import attention, contracts, pwa
-from app.valr_ui.shell import icon, page_head
+from app.valr_ui.shell import asset, icon, page_head
 
 STATE = {"connected": ("Connected", "ok"), "not_connected": ("Not connected", "warn"),
          "error": ("Needs a fix", "bad"), "unknown": ("Not checked yet", "muted")}
 STEP_STATE = {"done": ("Done", "ok"), "todo": ("To do", "info"), "attention": ("Needs a fix", "warn")}
-REPORT_STATUS = {"sent": ("Sent on Telegram", "ok"), "pending_telegram": ("Waiting for Telegram", "warn"),
-                 "queued": ("Queued", "info"), "processing": ("Being reviewed", "info"), "failed": ("Failed", "bad")}
-RUN_STATUS = {"done": ("Done", "ok"), "cached": ("Reused", "info"), "partial": ("Partial", "warn"),
-              "running": ("Running", "info"), "booked": ("Queued", "info")}
+GOOGLE_ERRORS = {
+    "cancelled": "You cancelled on Google's screen, so nothing changed.",
+    "failed": "Google didn't confirm the connection. Try again.",
+    "expired": "That link expired. Start again with Connect.",
+    "account": "That was a different Google account. Pick the one VALR is set up for.",
+    "unavailable": "Google sign-in isn't available on this server right now.",
+}
 
 
-def row(anchor: str, title: str, glyph: str, status: str, body: str, action: str = "") -> str:
+def row(anchor: str, title: str, glyph: str, status: str, body: str, action: str = "", media: str = "") -> str:
+    """One settings row. `media` replaces the icon tile (a logo or an avatar)."""
+    lead = media or f'<span class="set-icon" aria-hidden="true">{icon(glyph, 18)}</span>'
     return f"""
 <li class="set-row" id="{anchor}">
-  <span class="set-icon" aria-hidden="true">{icon(glyph, 18)}</span>
+  {lead}
   <div class="set-main"><div class="set-title-row"><h3 class="set-title">{e(title)}</h3>{status}</div><div class="set-body">{body}</div></div>
   {f'<div class="set-action">{action}</div>' if action else ''}
 </li>"""
 
 
-def google_row(view: dict[str, Any], clock: Clock) -> str:
-    g = view["connections"]["google"]
-    state = g.get("state")
-    expiring = [i for i in attention.google_items(view) if i["key"] == "google_expiring"]
-    if state == "connected":
-        status = chip("Connected", "ok") + (f' {chip(expiring[0]["title"], "warn")}' if expiring else "")
-        body = (f'<p class="muted">{e(g.get("account") or "Your Google account")} · read-only: calendar invites and '
-                'job emails.</p>')
-        action = '<a class="btn sm" href="/oauth/google/start">Reconnect</a>'
-    elif state == "reconnect_needed":
-        status, body = chip("Expired", "bad"), '<p class="muted">New invites and emails won\'t show up until you reconnect.</p>'
-        action = '<a class="btn sm primary" href="/oauth/google/start">Reconnect Google</a>'
-    else:
-        status = chip("Not connected", "warn") if state == "not_connected" else chip("Not checked yet", "muted")
-        body = '<p class="muted">So VALR can see your interview invites and job emails. Read-only.</p>'
-        action = '<a class="btn sm primary" href="/oauth/google/start">Connect Google</a>'
-    if not g.get("configured"):
-        action = '<span class="muted">Google sign-in isn\'t available yet.</span>'
-    return row("google", "Google", "mail", status, body, action)
+def section(anchor: str, title: str, rows: str) -> str:
+    return (f'<section class="section set-section" aria-labelledby="g-{anchor}"><div class="section-head">'
+            f'<h2 id="g-{anchor}" class="section-title">{e(title)}</h2></div>'
+            f'<ul class="set-list card">{rows}</ul></section>')
 
 
-def telegram_row(view: dict[str, Any], clock: Clock) -> str:
-    tg = view["connections"].get("telegram") or {}
-    if not tg.get("configured"):
-        return row("telegram", "Telegram", "send", chip("Not available yet", "muted"),
-                   '<p class="muted">The VALR bot isn\'t set up yet, so reminders can\'t be sent.</p>')
-    if tg.get("linked"):
-        who = f"Connected as @{tg['username']}" if tg.get("username") else "Connected"
-        return row("telegram", "Telegram", "send", chip(who, "ok"),
-                   '<p class="muted">Reminders arrive in your VALR chat 30 minutes before each interview.</p>',
-                   '<button class="btn sm" type="button" data-action="tgtest">Send a test</button>'
-                   '<button class="btn sm ghost" type="button" data-action="tglink">Reconnect</button>')
-    pending = (view.get("post_call") or {}).get("pending")
-    waiting = (f'<p class="field-help warn">{pending} post-call report{"s are" if pending != 1 else " is"} waiting for Telegram.</p>'
-               if pending else "")
-    return row("telegram", "Telegram", "send", chip("Not connected", "warn"), f"""
-<p class="muted">One tap: Telegram opens the VALR bot, you press <b>Start</b>, and you're connected.</p>{waiting}
-<div class="tg-link" data-tg-panel hidden>
-  <a class="btn primary" data-tg-open href="#" target="_blank" rel="noopener noreferrer">Open Telegram</a>
-  <div class="qr" data-tg-qr aria-hidden="true"></div>
-  <p class="muted" data-tg-help></p>
-</div>""", '<button class="btn sm primary" type="button" data-action="tglink">Connect Telegram</button>')
+def confirm_attrs(title: str, body: str, ok: str) -> str:
+    """valr-settings.js asks first ([data-confirm]) in a small sheet, then runs the action."""
+    return f' data-confirm="{e(title)}" data-confirm-body="{e(body)}" data-confirm-ok="{e(ok)}"'
 
 
-def setup(view: dict[str, Any]) -> str:
-    """The set-up checklist; gone once every step is done. Granola is optional, never a step."""
+def avatar(size: str = "", label: str = "") -> str:
+    """The owner's photo, else his initials (the same in the top bar)."""
+    name = owner.name()
+    initials = "".join(part[0] for part in name.split()[:2]).upper() or "?"
+    cls = f"avatar-face {size}".strip()
+    if owner.photo_etag():
+        return (f'<img class="{cls}" src="/valr/profile/photo?v={e(owner.photo_etag())}" alt="{e(label)}" '
+                f'width="64" height="64" data-avatar>')
+    return f'<span class="{cls} initials" aria-hidden="true" data-avatar>{e(initials)}</span>'
+
+
+# 0. Finish setting up.
+
+def steps(view: dict[str, Any]) -> list[tuple[str, str, str, str]]:
     from app.notetakers import ui as notetaker_ui
     google = view["connections"]["google"]
-    tg = view["connections"].get("telegram") or {}
     takers = (view.get("connections") or {}).get("notetakers") or {}
+    push = (view.get("connections") or {}).get("push") or {}
     s = view["setup"]
-    number = phone_label(s["valr_number"])
     g_done = google["state"] == "connected"
     g_state = "done" if g_done else "attention" if google["state"] != "not_connected" else "todo"
     g_action = ("" if g_done else '<a class="btn sm primary" href="/oauth/google/start">'
@@ -92,88 +81,235 @@ def setup(view: dict[str, Any]) -> str:
     required = [t for t in takers.values() if not t.get("optional")]
     refused = any(t["state"] == "refused" for t in required) and not any(notetaker_ui.is_on(t) for t in required)
     n_state = "attention" if refused else "done" if any(notetaker_ui.is_on(t) for t in required) else "todo"
-    steps = [("Connect Google", g_state, "So VALR can see your interview invites and job emails. Read-only.", g_action),
-             ("Connect a notetaker", n_state, "Fathom or Fireflies: VALR reviews each recorded interview and plays it back here.",
-              "" if n_state == "done" else (notetaker_ui.summary_buttons(takers) or '<a class="btn sm" href="#notetakers">Notetakers</a>'))]
-    if view.get("mode") == "telegram":
-        if tg.get("linked"):
-            steps.append(("Connect Telegram", "done", "Reminders arrive in your VALR chat.", ""))
-        elif tg.get("configured"):
-            steps.append(("Connect Telegram", "todo", "VALR sends a reminder there 30 minutes before each interview.",
-                          '<button class="btn sm primary" type="button" data-action="tglink">Open Telegram</button>'))
-        else:
-            steps.append(("Connect Telegram", "attention", "The VALR bot isn't installed on the server yet.", ""))
-    steps += [
-        ("Confirm your phone number", "done" if s["phone_on_file"] else "todo",
-         "VALR only ever calls the number on file." if s["phone_on_file"] else
-         "Add your number to the server settings and restart VALR.", ""),
+    devices = len(push.get("devices") or [])
+    talk = ('<a class="btn sm" href="/call">Talk in browser</a>'
+            + ('<button class="btn sm primary" type="button" data-action="callnow">Call my phone</button>'
+               if s["phone_on_file"] else ""))
+    return [
+        ("Connect Google", g_state, "So VALR can see your interview invites and job emails. Read-only.", g_action),
+        ("Connect a notetaker", n_state, "Fathom or Fireflies: VALR reviews each recorded interview and plays it back here.",
+         "" if n_state == "done" else (notetaker_ui.summary_buttons(takers) or '<a class="btn sm" href="#notetakers">Notetakers</a>')),
+        ("Add your phone", "done" if s["phone_on_file"] else "todo",
+         "VALR only ever calls the number you add here.",
+         "" if s["phone_on_file"] else '<button class="btn sm primary" type="button" data-phone-edit>Add phone</button>'),
+        ("Turn on phone notifications", "done" if devices else "todo",
+         "Heads-ups before interviews and alerts reach your lock screen.",
+         "" if devices else '<a class="btn sm" href="#phone-push">Set up</a>'),
         ("Make a test call", "done" if s["test_call_done"] else "todo",
-         f"Call {number} and ask \"what's on my calendar today?\"",
-         "" if s["test_call_done"] else f'<a class="btn sm" href="tel:{e(s["valr_number"])}">Call VALR</a>'),
+         "Ask VALR \"what's on my calendar today?\"", "" if s["test_call_done"] else talk),
     ]
-    done = sum(1 for _, state, _, _ in steps if state == "done")
-    if done == len(steps):
+
+
+def setup(view: dict[str, Any]) -> str:
+    """The set-up checklist; gone once every step is done. Granola is optional, never a step."""
+    todo = steps(view)
+    done = sum(1 for _, state, _, _ in todo if state == "done")
+    if done == len(todo):
         return ""
     items = "".join(f"""
 <li class="step{' done' if state == 'done' else ''}">
   <span class="step-mark" aria-hidden="true">{icon('check', 14) if state == 'done' else i}</span>
   <div class="step-body"><p class="step-title">{e(title)}</p><p class="muted">{e(text)}</p></div>
   <div class="step-action">{action if state != 'done' and action else chip(*STEP_STATE[state])}</div>
-</li>""" for i, (title, state, text, action) in enumerate(steps, 1))
-    pct = round(done / len(steps) * 100)
+</li>""" for i, (title, state, text, action) in enumerate(todo, 1))
+    pct = round(done / len(todo) * 100)
     return f"""
 <section class="card setup" id="setup" aria-labelledby="setup-title">
-  <div class="card-head"><h2 class="card-title" id="setup-title">Finish setting up</h2><span class="card-meta">{done} of {len(steps)} done</span></div>
+  <div class="card-head"><h2 class="card-title" id="setup-title">Finish setting up</h2><span class="card-meta">{done} of {len(todo)} done</span></div>
   <div class="progress-bar" role="progressbar" aria-label="Set-up progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="{pct}"><i style="width:{pct}%"></i></div>
   <ol class="steps">{items}</ol>
 </section>"""
 
 
-def notetaker_row(view: dict[str, Any]) -> str:
-    """valr-notetakers' cards: status, the connect form (the key is posted, never shown again),
-    "Check for new recordings", and Granola's export upload."""
+# 1. Profile.
+
+def profile_row(view: dict[str, Any]) -> str:
+    me = owner.view()
+    phone = me["phone"]["masked"] or "No phone yet"
+    name = me["display_name"] or "Add your name"
+    return row("profile", name, "users", "", f'<p class="num">{e(phone)} · {e(me["timezone"])}</p>',
+               '<a class="btn sm" href="/valr/profile">Edit profile</a>',
+               media=f'<span class="set-media">{avatar()}</span>')
+
+
+# 2. Connections.
+
+def synced(clock: Clock, label: str, when: str | None) -> str:
+    return f"{label} synced {clock.when(when)}" if when else f"{label} not synced yet"
+
+
+def google_row(view: dict[str, Any], clock: Clock) -> str:
+    g = view["connections"]["google"]
+    cal = view["connections"].get("calendar") or {}
+    gmail = view["connections"].get("gmail") or {}
+    state = g.get("state")
+    query = view.get("_query") or {}
+    problem = GOOGLE_ERRORS.get(query.get("google_error", ""), "")
+    note = f'<p class="field-help bad" role="alert">{e(problem)}</p>' if problem else ""
+    disconnect = ('<button class="btn sm ghost" type="button" data-settings-action="google-disconnect"'
+                  + confirm_attrs("Disconnect Google?", "VALR stops seeing new invites and job emails. Leads and "
+                                  "interviews already found stay. You can connect again any time.", "Disconnect")
+                  + '>Disconnect</button>')
+    if not g.get("configured"):
+        return row("google", "Google", "mail", chip("Not available", "muted"),
+                   '<p class="muted">Google sign-in isn\'t set up on this server yet.</p>' + note)
+    if state == "connected":
+        expiring = [i for i in attention.google_items(view) if i["key"] == "google_expiring"]
+        status = chip("Connected", "ok") + (f' {chip(expiring[0]["title"], "warn")}' if expiring else "")
+        lines = [synced(clock, "Calendar", cal.get("last_sync_at")), synced(clock, "Gmail", gmail.get("last_sync_at"))]
+        failed = '<p class="field-help warn">The last calendar sync failed: try Sync now.</p>' if cal.get("last_error") else ""
+        body = (f'<p>{e(g.get("account") or "Your Google account")} · read-only: calendar invites and job emails.</p>'
+                f'<p class="muted">{" · ".join(lines)}</p>{failed}{note}')
+        action = ('<button class="btn sm" type="button" data-settings-action="google-sync">Sync now</button>'
+                  '<a class="btn sm ghost" href="/oauth/google/start">Reconnect</a>' + disconnect)
+        return row("google", "Google", "mail", status, body, action)
+    if state == "reconnect_needed":
+        return row("google", "Google", "mail", chip("Access expired", "bad"),
+                   '<p>New invites and emails won\'t show up until you reconnect.</p>' + note,
+                   '<a class="btn sm primary" href="/oauth/google/start">Reconnect Google</a>' + disconnect)
+    status = chip("Not connected", "warn") if state == "not_connected" else chip("Not checked yet", "muted")
+    return row("google", "Google", "mail", status,
+               '<p>So VALR can see your interview invites and job emails. Read-only.</p>' + note,
+               '<a class="btn sm primary" href="/oauth/google/start">Connect Google</a>')
+
+
+def notetaker_row(view: dict[str, Any], clock: Clock) -> str:
+    """The three notetaker cards (app/notetakers/ui.py): logo, state, account, last sync, the
+    actions; the API key is posted, never shown again."""
     from app.notetakers import ui as notetaker_ui
     takers = view["connections"].get("notetakers") if isinstance(view["connections"].get("notetakers"), dict) else {}
     if takers:
-        body = notetaker_ui.cards(takers)
+        body = notetaker_ui.cards(takers, clock)
     else:  # Status unavailable: what the imported recordings show.
         states = contracts.notetakers(view["connections"], attention.imported(view))
         body = '<ul class="mini-rows">' + "".join(
             f'<li class="mini-row"><span>{e(t["label"])}</span>{chip(*STATE[t["state"]])}</li>' for t in states) + "</ul>"
     return row("notetakers", "Notetakers", "video", "",
-               '<p class="muted">VALR reviews your recorded interviews to coach you. Fathom or Fireflies is enough; '
+               '<p>VALR reviews your recorded interviews to coach you. Fathom or Fireflies is enough; '
                'Granola is optional.</p>' + body)
 
 
+# 3. Calls & reminders.
+
+PHONE_FORM = """
+<form class="inline-form" data-phone-form hidden autocomplete="off" novalidate>
+  <label class="field-label" for="phone-input">Your mobile number</label>
+  <div class="field-row"><input class="input" id="phone-input" name="phone" type="tel" inputmode="tel" autocomplete="tel"
+    maxlength="24" placeholder="+91 98765 43210" aria-describedby="phone-help phone-error" required>
+    <button class="btn primary" type="submit">Save</button></div>
+  <p class="field-help" id="phone-help">With the country code. A 10-digit Indian mobile works too.</p>
+  <p class="field-help bad" id="phone-error" data-phone-error role="alert" hidden></p>
+  <div><button class="btn sm ghost" type="button" data-phone-cancel>Cancel</button></div>
+</form>"""
+
+
 def phone_row(view: dict[str, Any]) -> str:
-    s = view["setup"]
-    return row("phone", "Your phone", "phone", chip("On file", "ok") if s.get("phone_on_file") else chip("Missing", "bad"),
-               '<p class="muted">VALR only ever calls the number on file. It isn\'t shown here.</p>')
+    me = owner.view()["phone"]
+    used = '<p class="muted">Used for Call my phone, automatic calls, and recognising you when you call VALR.</p>'
+    if not me["set"]:
+        return row("phone", "Your phone", "phone", chip("Not added", "warn"),
+                   '<p>Add your phone so VALR can call you.</p>' + PHONE_FORM,
+                   '<button class="btn sm primary" type="button" data-phone-edit>Add phone</button>')
+    source = ' <span class="muted">· from server settings</span>' if me["source"] == "env" else ""
+    remove = ('<button class="btn sm ghost" type="button" data-settings-action="phone-remove"'
+              + confirm_attrs("Remove your phone?", "VALR won't be able to call you, and calls from this number "
+                              "won't be recognised as you. Automatic calls switch to heads-ups. Talk in browser "
+                              "still works.", "Remove")
+              + '>Remove</button>')
+    return row("phone", "Your phone", "phone", chip("On file", "ok"),
+               f'<p class="num big-num">{e(me["masked"])}{source}</p>{used}{PHONE_FORM}',
+               '<button class="btn sm" type="button" data-phone-edit>Change</button>' + remove)
 
 
-def reach_row(view: dict[str, Any]) -> str:
-    """Telegram heads-up (the default) or an automatic call, stored on the server; and Pause."""
-    telegram = view.get("mode") == "telegram"
+def pause_label(view: dict[str, Any], clock: Clock) -> str:
+    until = (view.get("dials_paused") or {}).get("until")
+    if not until:
+        return "Paused"
+    moment = clock.local(until)
+    return f"Paused until {moment:%a} {moment.day} {moment:%b}"
+
+
+def reach_row(view: dict[str, Any], clock: Clock) -> str:
+    """The heads-up (default) or an automatic call, stored on the server; and Pause."""
+    heads_up = view.get("mode") != "call"
     reach = view.get("reach") or {}
     paused = (view.get("dials_paused") or {}).get("enabled")
-    how = ("A Telegram message 30 minutes before each interview. Tap Call me in it for the briefing call; no reply, no call."
-           if telegram else "VALR calls you 30 minutes before each interview, once. No retries.")
-    default = "Telegram heads-up" if not reach.get("default_auto_dial") else "automatic call"
+    phone = owner.phone()
+    push = (view.get("connections") or {}).get("push") or {}
+    how = ("A notification on your phone 30 minutes before each interview. Tap it for the briefing call; "
+           "no tap, no call." if heads_up else "VALR calls you 30 minutes before each interview, once. No retries.")
+    default = "heads-up" if not reach.get("default_auto_dial") else "automatic call"
     source = "Your choice." if reach.get("source") == "settings" else f"The default ({default})."
+    call_off = ' disabled aria-describedby="reach-needs-phone"' if not phone and heads_up else ""
     toggle = (f'<div class="seg" role="group" aria-label="How VALR reminds you">'
-              f'<button type="button" data-action="reach" data-mode="telegram" aria-pressed="{"true" if telegram else "false"}">Telegram heads-up</button>'
-              f'<button type="button" data-action="reach" data-mode="call" aria-pressed="{"false" if telegram else "true"}">Automatic call</button></div>')
-    return row("calls", "Before each interview", "clock", chip("Paused", "warn") if paused else "",
-               f'{toggle}<p class="muted">{e(how)} {e(source)}</p>',
-               f'<button class="btn sm" type="button" data-action="dials" data-paused="{"false" if paused else "true"}" '
-               f'aria-pressed="{"true" if paused else "false"}">{"Resume reminders" if paused else "Pause reminders"}</button>')
+              f'<button type="button" data-action="reach" data-mode="heads_up" aria-pressed="{"true" if heads_up else "false"}">Heads-up</button>'
+              f'<button type="button" data-action="reach" data-mode="call" aria-pressed="{"false" if heads_up else "true"}"{call_off}>Automatic call</button></div>')
+    warn = ""
+    if heads_up and push.get("configured") and not push.get("devices"):
+        warn = ('<p class="field-help warn">Phone notifications are off, so heads-ups only reach the bell. '
+                '<a href="#phone-push">Enable them</a>.</p>')
+    if not phone:
+        warn += '<p class="field-help" id="reach-needs-phone">Automatic calls need your phone: <a href="#phone">add it</a>.</p>'
+    if paused:
+        action = ('<button class="btn sm" type="button" data-action="dials" data-paused="false" aria-pressed="true">'
+                  'Resume</button>')
+    else:
+        options = "".join(f'<button class="menu-item" role="menuitem" type="button" data-action="dials" data-paused="true"'
+                          f' data-days="{days}"><span>{e(label)}</span></button>'
+                          for days, label in (("1", "For 1 day"), ("7", "For 1 week"), ("", "Until I resume")))
+        action = (f'<details class="menu pause-menu" data-menu><summary class="btn sm">{icon("pause", 14)}Pause…</summary>'
+                  f'<div class="menu-pop align-end" role="menu">{options}</div></details>')
+    return row("calls", "Before each interview", "clock", chip(pause_label(view, clock), "warn") if paused else "",
+               f'{toggle}<p class="muted">{e(how)} {e(source)}</p>{warn}', action)
 
 
-def run_row(job: dict[str, Any], clock: Clock) -> str:
-    took = "" if job["duration_s"] is None else f"{job['duration_s']:.0f} s · "
-    return (f'<li><span>{e(job["topic"])}</span><span class="kv-end">{chip(*RUN_STATUS.get(job["status"], ("Failed", "bad")))}'
-            f'<span class="muted num">{clock.when(job["created_at"])} · {took}{money(job["spend_usd"])}</span></span></li>')
+def number_row(view: dict[str, Any]) -> str:
+    number = view["setup"]["valr_number"]
+    note = ("A US number: calling it from India costs international rates. Talk in browser is free."
+            if number.startswith("+1") else "Call it any time and ask about your day.")
+    return row("dial-in", "VALR's number", "phone", "",
+               f'<p><a class="num big-num" href="tel:{e(number)}">{e(phone_label(number))}</a></p><p class="muted">{e(note)}</p>',
+               f'<button class="btn sm" type="button" data-copy="{e(number)}">Copy</button>'
+               '<a class="btn sm ghost" href="/call">Talk in browser</a>')
 
+
+# 4. Notifications.
+
+def hours(selected: str, name: str, label: str) -> str:
+    whole = [f"{h:02d}:00" for h in range(24)]
+    options = "".join(f'<option value="{v}"{" selected" if selected == v else ""}>'
+                      f'{(int(v[:2]) % 12) or 12}:00 {"AM" if int(v[:2]) < 12 else "PM"}</option>' for v in whole)
+    if selected and selected not in whole:
+        options = f'<option value="{e(selected)}" selected>{e(selected)}</option>' + options
+    return (f'<label class="time-pick"><span class="sr-only">{e(label)}</span>'
+            f'<select class="input sm" data-notif-time="{name}" disabled>{options}</select></label>')
+
+
+def alerts_row(view: dict[str, Any]) -> str:
+    """The alert switches and times (app/notifications.py); static/valr-notify.js loads and saves them."""
+    times = view.get("notify") or {}
+    digest_at = times.get("digest_at", "09:00")
+    start, end = times.get("quiet_start", "23:00"), times.get("quiet_end", "08:00")
+
+    def switch(key: str, title: str, help_: str, extra: str = "") -> str:
+        return (f'<div class="notif-line"><label class="switch notif-switch"><input type="checkbox" data-notif-switch="{key}" disabled>'
+                f'<span class="switch-ui" aria-hidden="true"></span><span><span class="switch-title">{e(title)}</span>'
+                f'<span class="field-help">{e(help_)}</span></span></label>{extra}</div>')
+    body = ('<div class="notif-switches">'
+            + switch("immediate", "Immediate alerts", "Offers, interview invites, replies that need you, ready reviews "
+                     "and calendar changes in the next 48 hours: one push each.")
+            + switch("digest", "Daily digest", "Rejections, other replies and later calendar changes, in one push.",
+                     f'<div class="time-row">at {hours(digest_at, "digest_at", "Digest time")}</div>')
+            + switch("quiet", "Quiet hours", "Pushes wait until the end, except an interview in the next 12 hours.",
+                     f'<div class="time-row">{hours(start, "quiet_start", "Quiet hours start")} to '
+                     f'{hours(end, "quiet_end", "Quiet hours end")}</div>')
+            + '</div><p class="muted">Everything also stays in the bell for 30 days. Times are in your time zone '
+            f'({e(owner.zone_name())}).</p>')
+    return row("alerts", "Alerts", "bell", "", body,
+               '<button class="btn sm" type="button" data-settings-action="sample-digest">Send a sample digest</button>')
+
+
+# 5. Call recordings.
 
 IPHONE_STEPS = [
     "During a call, tap More → Call Recording. iPhone announces it to both people; tell the other person first.",
@@ -200,17 +336,21 @@ def mac_download() -> str:
             f'<p class="field-help rec-sha">SHA-256 <code class="token">{e(release["sha256"])}</code></p>')
 
 
-def phone_recordings_row() -> str:
-    """Call recordings from the iPhone: record on the iPhone, VALR for Mac sends them (or the
-    iPhone Shortcut does), the shared upload token, and the last upload. static/valr-notify.js
+def phone_recordings_row(host: str = "") -> str:
+    """Call recordings: iPhone call recording (via the Mac app) or Truecaller (via the Shortcut),
+    the shared upload token (show once, rotate, turn off), and the last upload. static/valr-notify.js
     fills the status from /valr/api/phone/status and runs the token buttons."""
     iphone = "".join(f"<li>{e(step)}</li>" for step in IPHONE_STEPS) + (
         '<li>It reaches VALR automatically through the Mac app (below), or tap Share → Send to VALR on the iPhone '
         '(<a href="/valr/settings/phone-help">iPhone shortcut steps</a>).</li>')
     mac = "".join(f"<li>{e(step)}</li>" for step in MAC_STEPS)
+    address = f"https://{host}/hooks/recording-upload" if host else "/hooks/recording-upload"
     body = (
-        '<p class="muted">VALR transcribes each call, adds it to Past interviews and the coach reviews it. '
+        '<p>Recordings come from iPhone call recording (through VALR for Mac) or Truecaller (through the Shortcut). '
+        'VALR transcribes each call, adds it to Past interviews and the coach reviews it. '
         'The audio is stored encrypted and deleted a week later.</p>'
+        '<section class="rec-part" aria-labelledby="rec-status"><h4 class="sub-title" id="rec-status">Status</h4>'
+        '<p class="muted" data-phone-status>Checking…</p></section>'
         '<section class="rec-part" aria-labelledby="rec-iphone"><h4 class="sub-title" id="rec-iphone">Record calls on iPhone</h4>'
         f'<ol class="notif-steps">{iphone}</ol></section>'
         '<section class="rec-part" aria-labelledby="rec-mac"><h4 class="sub-title" id="rec-mac">VALR for Mac</h4>'
@@ -219,73 +359,61 @@ def phone_recordings_row() -> str:
         '<li>Only call recordings are sent; note text never leaves your Mac.</li></ul></section>'
         '<section class="rec-part" aria-labelledby="rec-token"><h4 class="sub-title" id="rec-token">Upload token</h4>'
         '<p class="field-help">The Mac app and the iPhone shortcut share the same token. Rotating it means pasting the new one into both.</p>'
-        '<div class="rec-buttons"><button class="btn sm" type="button" data-phone-action="show">Show upload token</button>'
-        '<button class="btn sm ghost" type="button" data-phone-action="rotate">Rotate token</button></div>'
+        '<div class="rec-buttons" data-phone-on><button class="btn sm" type="button" data-phone-action="show">Show upload token</button>'
+        '<button class="btn sm ghost" type="button" data-phone-action="rotate"'
+        + confirm_attrs("Rotate the upload token?", "VALR for Mac and the iPhone Shortcut stop sending until you paste "
+                        "the new token into both.", "Rotate") + '>Rotate token</button>'
+        '<button class="btn sm ghost" type="button" data-phone-action="revoke"'
+        + confirm_attrs("Turn off uploads?", "The token stops working at once. Recordings already in Past interviews "
+                        "stay. Turn uploads on again for a new token.", "Turn off") + '>Turn off uploads</button></div>'
+        '<div class="rec-buttons" data-phone-off hidden><button class="btn sm primary" type="button" data-phone-action="rotate">'
+        'Turn uploads on</button></div>'
         '<div class="notif-token" data-phone-token hidden><code class="token" data-phone-token-value></code>'
         '<button class="btn sm" type="button" data-phone-copy>Copy</button>'
         '<p class="field-help">Copy it now: it won’t be shown again.</p></div>'
-        '<p class="field-help">Upload address: <code class="token" data-phone-url>/hooks/recording-upload</code></p></section>'
-        '<section class="rec-part" aria-labelledby="rec-status"><h4 class="sub-title" id="rec-status">Status</h4>'
-        '<p class="muted" data-phone-status>Checking…</p></section>')
+        f'<p class="field-help">Upload address: <code class="token" data-phone-url>{e(address)}</code></p></section>')
     return row("phone-recordings", "Phone call recordings", "mic", "", body)
 
 
-def alerts_row() -> str:
-    """Telegram alert switches (app/notifications.py); static/valr-notify.js loads and saves them."""
-    switches = "".join(
-        f'<label class="switch notif-switch"><input type="checkbox" data-notif-switch="{key}" disabled>'
-        f'<span class="switch-ui" aria-hidden="true"></span><span><span class="switch-title">{e(title)}</span>'
-        f'<span class="field-help">{e(help_)}</span></span></label>'
-        for key, title, help_ in (("immediate", "Immediate alerts", "Offers, interview invites, replies that need you and calendar changes in the next 48 hours"),
-                                  ("digest", "Daily digest at 09:00", "Rejections, other replies and later calendar changes"),
-                                  ("quiet", "Quiet hours 23:00–08:00", "Only interviews in the next 12 hours get through")))
-    return row("alerts", "Telegram alerts", "bell", "", f'<div class="notif-switches">{switches}</div>')
+# 6. Data & account.
+
+def data_row(view: dict[str, Any]) -> str:
+    spend = view.get("spend") or {}
+    cap = (spend.get("interview_limits") or {}).get("month_usd")
+    line = (f'Research spend this month: <span class="num">{money(spend.get("month_usd"))}</span>'
+            + (f' of <span class="num">{money(cap)}</span>' if cap else "") + ".")
+    delete = ('<button class="btn sm danger" type="button" data-settings-action="data-delete"'
+              + confirm_attrs("Delete all your VALR data?", "Interviews, briefings, leads, notifications, recordings, "
+                              "transcripts, scorecards and settings are deleted, Google is disconnected and every "
+                              "device is signed out. This can't be undone. Export first if you want a copy.",
+                              "Delete everything")
+              + ' data-confirm-type="DELETE">Delete my data</button>')
+    return row("data", "Your data", "file-text", "",
+               f'<p>{line}</p><p class="muted">The export is a zip of JSON files: everything VALR keeps about your '
+               'search, without audio, keys or tokens.</p>',
+               '<a class="btn sm" href="/valr/api/export" download>Export my data</a>' + delete)
 
 
-def advanced(view: dict[str, Any], clock: Clock) -> str:
-    """Limits, spend, the calendar sync, post-call delivery, the research log, the dial-in number."""
-    s, lim = view["spend"], view["spend"]["interview_limits"]
-    dials = view.get("dials") or {}
-    meters = "".join(meter(dials[k]["used"], dials[k]["limit"], title,
-                           f"{'?' if dials[k]['used'] is None else dials[k]['used']} of {dials[k]['limit']}")
-                     for k, title in (("briefing", "Briefing calls today"), ("callback", "Research call-backs today"))
-                     if k in dials)
-    meters += meter(s["today_jobs"], lim["jobs_per_day"], "Research runs today", f"{s['today_jobs']} of {lim['jobs_per_day']}")
-    meters += meter(s["month_usd"], lim["month_usd"], "Research spend this month", f"{money(s['month_usd'])} of {money(lim['month_usd'])}")
-    cal = view["connections"].get("calendar") or {}
-    synced = f"Last synced {clock.when(cal['last_sync_at'])}." if cal.get("last_sync_at") else "Not synced yet."
-    if cal.get("last_error"):
-        synced += " The last sync failed."
-    pc = view.get("post_call") or {}
-    reports = "".join(f'<li><span>{e(r["title"] or "Interview")}</span><span class="kv-end">{chip(*REPORT_STATUS.get(r["status"], (r["status"], "muted")))}'
-                      f'<span class="muted num">{clock.when(r["updated_at"]) if r.get("updated_at") else ""}</span></span></li>'
-                      for r in pc.get("recent") or [])
-    runs = "".join(run_row(job, clock) for job in view.get("jobs") or [])
-    number = view["setup"]["valr_number"]
-    return f"""
-<details class="fold card advanced" id="advanced"><summary><span class="fold-title">Advanced</span>
-  <span class="fold-sub">Limits, spend, research log, post-call reports, VALR's number</span>{icon('chevron-down', 18)}</summary>
-  <div class="fold-body adv-grid">
-    <section class="adv" id="limits"><h3 class="sub-title">Usage</h3><div class="meters">{meters}</div>
-      <p class="muted">VALR stops for the day at a limit, and tells you when one is close. Each interview's research is capped at {money(lim['job_usd'])}.</p></section>
-    <section class="adv" id="dial-in"><h3 class="sub-title">VALR's number</h3>
-      <p><a class="num big-link" href="tel:{e(number)}">{e(phone_label(number))}</a></p>
-      <p class="muted">Call it any time from your phone and ask about your day.</p>
-      <h3 class="sub-title">Calendar</h3><p class="muted">{synced}</p>
-      <button class="btn sm" type="button" data-action="sync">Sync calendar now</button></section>
-    <section class="adv wide" id="reports"><h3 class="sub-title">Post-call reports</h3>
-      {f'<ul class="kv-rows">{reports}</ul>' if reports else '<p class="muted">None yet.</p>'}</section>
-    <section class="adv wide" id="runs"><h3 class="sub-title">Research log</h3>
-      {f'<ul class="kv-rows">{runs}</ul>' if runs else '<p class="muted">None yet.</p>'}</section>
-  </div>
-</details>"""
+def account_row(email: str) -> str:
+    who = f'<p>Signed in with Google as <b class="email">{e(email)}</b>.</p>' if email else ""
+    return row("account", "Account", "log-out", "",
+               who + '<p class="muted">Signing out everywhere ends every session, the iPhone app included.</p>',
+               '<button class="btn sm" type="button" data-settings-action="logout-all"'
+               + confirm_attrs("Sign out of all devices?", "Every browser and the iPhone app must sign in again.",
+                               "Sign out everywhere")
+               + '>Sign out of all devices</button>')
 
 
 def page(view: dict[str, Any], clock: Clock, items: list[dict[str, Any]]) -> str:
-    return f"""{page_head("Settings")}
+    email = str(view.get("_email") or "")
+    connected = (view.get("_query") or {}).get("connected") == "google"
+    toast = '<p class="sr-only" data-toast-on-load="Google connected.">Google connected.</p>' if connected else ""
+    return f"""{page_head("Settings")}{toast}
 {setup(view)}
-<section class="section" aria-labelledby="g-conn"><div class="section-head"><h2 id="g-conn" class="section-title">Connections</h2></div>
-  <ul class="set-list card">{google_row(view, clock)}{telegram_row(view, clock)}{notetaker_row(view)}{phone_recordings_row()}{phone_row(view)}</ul></section>
-<section class="section" aria-labelledby="g-rem"><div class="section-head"><h2 id="g-rem" class="section-title">Reminders</h2></div>
-  <ul class="set-list card">{reach_row(view)}{alerts_row()}{pwa.card()}</ul></section>
-{advanced(view, clock)}"""
+{section("profile", "Profile", profile_row(view))}
+{section("conn", "Connections", google_row(view, clock) + notetaker_row(view, clock))}
+{section("calls", "Calls & reminders", phone_row(view) + reach_row(view, clock) + number_row(view))}
+{section("notify", "Notifications", alerts_row(view) + pwa.card())}
+{section("rec", "Call recordings", phone_recordings_row(str(view.get("_host") or "")))}
+{section("data", "Data & account", data_row(view) + account_row(email))}
+<script type="module" src="{asset('valr-settings.js')}"></script>"""

@@ -1,6 +1,5 @@
 """The multi-page VALR app (app/valr_ui): Access on every page, the needs-attention model,
-the page wording rules, the plug-in contracts, Telegram's one-tap link, and no PII in the
-fixtures."""
+the page wording rules, the plug-in contracts, and no PII in the fixtures."""
 import asyncio
 import html
 import json
@@ -15,7 +14,7 @@ pytest.importorskip("fastapi", reason="the pages run in the app's venv")
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from app import interview_store, research, telegram_api, valr_dashboard, valr_view
+from app import interview_store, research, valr_dashboard, valr_view
 from app.valr_ui import attention, contracts, routes, wording
 from tests.valr_sample import sample_view
 from tests.valr_sample_extras import sample_leads, sample_recording_row
@@ -121,7 +120,7 @@ def test_every_page_needs_a_verified_access_login(client):
         assert page.status_code == 200, path
         assert page.headers["cache-control"] == "no-store" and page.headers["x-frame-options"] == "DENY"
         assert 'name="csrf-token"' in page.text and 'aria-current="page"' in page.text
-    for old, new in (("/valr/system", "/valr/settings#advanced"), ("/valr/performance", "/valr/progress")):
+    for old, new in (("/valr/system", "/valr/settings"), ("/valr/performance", "/valr/progress")):
         assert client.get(old).status_code == 403
         moved = client.get(old, headers=GOOD, follow_redirects=False)
         assert moved.status_code == 301 and moved.headers["location"] == new
@@ -154,36 +153,25 @@ def test_a_database_outage_is_a_page_on_every_route(client):
 
 
 def test_actions_stay_post_owner_and_csrf(client, monkeypatch):
-    for path in ("/valr/api/telegram/test", "/valr/api/telegram/code", "/valr/api/dials", "/valr/api/call-now"):
+    for path in ("/valr/api/dials", "/valr/api/call-now", "/valr/api/profile/phone/remove", "/valr/api/google/sync"):
         assert client.get(path, headers=GOOD).status_code == 405
     csrf = client.get("/valr", headers=GOOD).text.split('name="csrf-token" content="', 1)[1].split('"', 1)[0]
     headers = {**GOOD, "Content-Type": "application/json", "X-CSRF-Token": csrf}
-    sent = []
+    synced = []
 
-    class Bot:
-        async def send(self, chat, text, keyboard=None):
-            sent.append((chat, text))
-            return 1
-
-    async def none(connection):
-        return None
-
-    async def chat(connection):
-        return 42
-
-    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "1:x")
-    monkeypatch.setenv("TELEGRAM_WEBHOOK_SECRET", "y" * 40)
-    monkeypatch.setattr(telegram_api, "bot", lambda: Bot())
-    monkeypatch.setattr(telegram_api, "setup", none)
-    monkeypatch.setattr(telegram_api, "owner_chat", chat)
-    assert client.post("/valr/api/telegram/test", content="{}", headers=GOOD).status_code in (403, 415)
-    assert client.post("/valr/api/telegram/test", content="{}",
-                       headers={**headers, "Cf-Access-Jwt-Assertion": "guest"}).status_code == 403
-    assert client.post("/valr/api/telegram/test", content="{}",
-                       headers={**headers, "Origin": "https://evil.example"}).status_code == 403
-    assert sent == []
-    ok = client.post("/valr/api/telegram/test", content="{}", headers=headers)
-    assert ok.status_code == 200 and sent and sent[0][0] == 42
+    async def sync_now(reason):
+        synced.append(reason)
+        return True
+    from app import interviews, leads_web
+    monkeypatch.setattr(interviews, "sync_now", sync_now)
+    monkeypatch.setattr(leads_web, "start_sync", sync_now)
+    path = "/valr/api/google/sync"
+    assert client.post(path, content="{}", headers=GOOD).status_code in (403, 415)
+    assert client.post(path, content="{}", headers={**headers, "Cf-Access-Jwt-Assertion": "guest"}).status_code == 403
+    assert client.post(path, content="{}", headers={**headers, "Origin": "https://evil.example"}).status_code == 403
+    assert synced == []
+    ok = client.post(path, content="{}", headers=headers)
+    assert ok.status_code == 200 and synced == ["dashboard", "manual"] and "calendar and Gmail" in ok.json()["message"]
 
 
 # What the pages say.
@@ -204,8 +192,8 @@ def test_home_hits_you_with_right_now(client):
     order = [page.index(x) for x in ("Next interview", "Juniper", "System design", "data-countdown", "Open briefing",
                                      "Your move", 'id="leads-raw"', "Coming up")]
     assert order == sorted(order)
-    assert "Reminder on Telegram at" in page or "Briefing call at" in page
-    for gone in ("Status", "All good", "Nothing is broken", "Next Telegram heads-up", "To do", "live leads"):
+    assert "Heads-up on your phone at" in page or "Briefing call at" in page
+    for gone in ("Status", "All good", "Nothing is broken", "Telegram", "To do", "live leads"):
         assert gone not in words, gone
     data = json.loads(page.split('id="leads-data">', 1)[1].split("</script>", 1)[0])
     assert len(data["leads"]) == len(leads["leads"]) and {s["key"] for s in data["stages"]} >= {"offer", "interviewing"}
@@ -360,21 +348,39 @@ def test_lead_corrections_are_on_the_lead_card(client):
 
 def test_settings_reflect_reality(client):
     page = html.unescape(client.get("/valr/settings", headers=GOOD).text)
-    assert "Connected as @sample_owner" in page and 'data-action="tgtest"' in page
+    order = [page.index(f'id="g-{a}"') for a in ("profile", "conn", "calls", "notify", "rec", "data")]
+    assert order == sorted(order)  # Profile, Connections, Calls & reminders, Notifications, Recordings, Data.
     assert "Fathom" in page and "Optional" in page  # Granola: optional, never a to-do.
     assert 'id="setup"' not in page  # Every step is done in this sample: no checklist, no count.
-    assert "of 4 essentials" not in page and 'id="advanced"' in page
+    assert "Advanced" not in page and 'id="advanced"' not in page and "Research log" not in page
+    assert "Telegram" not in page and "Where alerts go" not in page
     assert 'data-connect="fathom"' in page and 'type="password"' in page  # The connect form, empty.
-    assert 'data-action="reach" data-mode="telegram" aria-pressed="true"' in page
-    assert 'data-action="reach" data-mode="call" aria-pressed="false"' in page and "The default (Telegram heads-up)" in page
-    for gone in ("Live updates", "How VALR checks it", "while the app is in testing", "Plays the recording right here"):
-        assert gone not in re.sub(r'<p class="small nt-video">.*?</p>', "", page), gone
+    assert 'data-action="reach" data-mode="heads_up" aria-pressed="true"' in page
+    assert 'data-action="reach" data-mode="call" aria-pressed="false"' in page and "The default (heads-up)" in page
+    assert "Calendar synced" in page and "Gmail synced" in page and 'data-settings-action="google-disconnect"' in page
+    assert "+1 228 888 8007" in page and 'data-copy="+12288888007"' in page  # VALR's number, in Calls.
+    assert "Research spend this month" in page and 'href="/valr/api/export"' in page
+    assert "Sign out of all devices" in page and OWNER in page
+    for gone in ("Live updates", "How VALR checks it", "while the app is in testing"):
+        assert gone not in page, gone
+
+
+def test_settings_never_show_the_full_phone(client):
+    from app import owner
+    owner.apply({"phone_e164": "+919800000001", "display_name": "Sam Rivera"})
+    try:
+        for path in ("/valr/settings", "/valr/profile"):
+            page = client.get(path, headers=GOOD).text
+            assert "9800000001" not in page and "+91 ••••• •0001" in page, path
+        assert "Sam Rivera" in client.get("/valr/profile", headers=GOOD).text
+    finally:
+        owner.reset()
 
 
 def test_reach_mode_is_an_owner_csrf_post_stored_server_side(client, monkeypatch):
     stored = {}
 
-    async def set_flag(connection, name, enabled):
+    async def set_flag(connection, name, enabled, until=None):
         stored[name] = enabled
     monkeypatch.setattr(interview_store, "set_flag", set_flag)
     assert client.get("/valr/api/reach", headers=GOOD).status_code == 405
@@ -385,10 +391,19 @@ def test_reach_mode_is_an_owner_csrf_post_stored_server_side(client, monkeypatch
                        headers={**headers, "Cf-Access-Jwt-Assertion": "guest"}).status_code == 403
     assert client.post("/valr/api/reach", content='{"mode": "sometimes"}', headers=headers).status_code == 400
     assert stored == {}
+    from app import owner
+    owner.apply({"phone_removed": True})
+    try:  # Automatic calls need a phone on file.
+        refused = client.post("/valr/api/reach", content='{"mode": "call"}', headers=headers)
+        assert refused.status_code == 400 and "phone" in refused.json()["detail"] and stored == {}
+    finally:
+        owner.reset()
+    monkeypatch.setenv("VALR_OWNER_PHONE", "+919800000001")
     ok = client.post("/valr/api/reach", content='{"mode": "call"}', headers=headers)
     assert ok.status_code == 200 and stored == {interview_store.AUTO_DIAL: True}
-    client.post("/valr/api/reach", content='{"mode": "telegram"}', headers=headers)
+    client.post("/valr/api/reach", content='{"mode": "heads_up"}', headers=headers)
     assert stored == {interview_store.AUTO_DIAL: False}
+    assert client.post("/valr/api/reach", content='{"mode": "telegram"}', headers=headers).status_code == 400
 
 
 def test_the_stored_choice_overrides_the_env_default(monkeypatch):
@@ -435,7 +450,6 @@ def base_view(**changes) -> dict:
     view = sample_view()
     view["connections"]["google"].update(expires_soon=False)
     view["connections"]["notetakers"] = {"fathom": {"state": "connected"}}
-    view["connections"]["telegram"] = {"configured": True, "linked": True}
     for key, value in changes.items():
         view[key] = value
     return view
@@ -474,7 +488,7 @@ def test_attention_heads_up_missed_call_limits_and_order():
     by = {i["key"]: i for i in items}
     assert by[f"heads-up-{upcoming['id']}"]["fix"]["action"] == "callnow"  # Still time: call now.
     assert by["missed-b-past"]["fix"] is None and by["missed-b-past"]["level"] == "warn"
-    assert by["dials-briefing"]["fix"]["href"] == "/valr/settings#limits"
+    assert by["dials-briefing"]["fix"]["href"] == "/valr/settings#data"
     assert by["budget"]["level"] == "warn" and by["calendar"]["fix"]["action"] == "sync"
     assert by["paused"]["level"] == "info" and by["paused"]["fix"]["data"] == {"paused": "false"}
     levels = [attention.LEVELS[i["level"]] for i in items]
@@ -482,15 +496,27 @@ def test_attention_heads_up_missed_call_limits_and_order():
     assert all(i["fix"] is None or i["fix"].get("href") or i["fix"].get("action") for i in items)
 
 
-def test_attention_telegram_phone_and_notetakers():
-    view = base_view(mode="telegram")
-    view["connections"]["telegram"] = {"configured": True, "linked": False}
+def test_attention_push_phone_and_notetakers():
+    view = base_view(mode="heads_up")
+    view["connections"]["push"] = {"configured": True, "devices": []}
     view["setup"]["phone_on_file"] = False
     view["connections"]["notetakers"] = {"fathom": {"state": "not_connected"}, "fireflies": {"state": "refused"},
                                          "granola": {"state": "refused"}}
-    found = keys(view)
-    assert "telegram" in found and "phone" in found and "notetaker" in found and "notetaker-fireflies" in found
-    assert not any("granola" in k for k in found)  # Optional: never an issue.
+    by = {i["key"]: i for i in attention.items(view)}
+    assert by["push"]["title"] == "Phone notifications are off" and by["push"]["fix"]["href"] == "/valr/settings#phone-push"
+    assert by["phone"]["level"] == "info"  # Heads-ups need no phone; automatic calls do.
+    assert "notetaker" in by and "notetaker-fireflies" in by and "telegram" not in by
+    assert not any("granola" in k for k in by)  # Optional: never an issue.
+    view["mode"] = "call"
+    assert {i["key"]: i for i in attention.items(view)}["phone"]["level"] == "bad"
+
+
+def test_a_heads_up_with_no_phone_subscribed_says_so():
+    view = base_view()
+    block = attention.next_slot(view)[0]
+    block["heads_up"] = {"outcome": "no_device"}
+    item = next(i for i in attention.items(view) if i["key"] == f"heads-up-{block['id']}")
+    assert "only in the bell" in item["detail"] and item["level"] == "warn"
 
 
 def test_todos_are_three_at_most_and_useful():
@@ -574,55 +600,6 @@ def test_notetaker_status_maps_to_one_state():
                                                 "granola": {"state": "not_connected", "optional": True}}}, set())
     assert [r["state"] for r in rows] == ["connected", "error", "not_connected"]
     assert rows[1]["error"] and rows[0]["server"]
-
-
-# Telegram: one tap.
-
-def test_deep_link_and_bot_username(monkeypatch):
-    assert telegram_api.deep_link("valr_bot", "123456") == "https://t.me/valr_bot?start=123456"
-    for bad in (("valr bot", "1"), ("valr_bot", "a" * 65), ("valr_bot", "x y")):
-        with pytest.raises(ValueError):
-            telegram_api.deep_link(*bad)
-    monkeypatch.setattr(telegram_api, "_bot_username", None)
-    monkeypatch.setenv("TELEGRAM_BOT_USERNAME", "@from_env_bot")
-    assert asyncio.run(telegram_api.bot_username()) == "from_env_bot"
-    monkeypatch.delenv("TELEGRAM_BOT_USERNAME")
-    calls = []
-
-    def handler(request):
-        calls.append(request.url.path)
-        return httpx.Response(200, json={"ok": True, "result": {"username": "valr_sample_bot"}})
-    bot = telegram_api.Bot("1:TEST", httpx.AsyncClient(transport=httpx.MockTransport(handler)))
-    assert asyncio.run(telegram_api.bot_username(bot)) == "valr_sample_bot"
-    assert asyncio.run(telegram_api.bot_username(bot)) == "valr_sample_bot" and len(calls) == 1  # Cached.
-
-
-def test_a_deep_link_start_links_and_keeps_the_username(monkeypatch):
-    monkeypatch.setenv("TELEGRAM_WEBHOOK_SECRET", "s" * 40)
-    state = {}
-
-    class Cursor:
-        def __init__(self, row):
-            self.row = row
-
-        async def fetchone(self):
-            return self.row
-
-    class Connection:
-        async def execute(self, sql, params=()):
-            if sql.startswith("INSERT INTO telegram_link"):
-                state.update(mac=params[0], expires=params[1], tries=0)
-            elif sql.startswith("UPDATE telegram_link SET chat_id"):
-                state.update(chat=params[0], username=params[2])
-            elif sql.startswith("SELECT code_mac"):
-                return Cursor((state["mac"], state["expires"], state["tries"]))
-            return Cursor(None)
-
-    now = datetime.now(timezone.utc)
-    code = asyncio.run(telegram_api.new_code(Connection(), now))
-    assert telegram_api.START_PAYLOAD.match(code)  # Fits t.me/<bot>?start=.
-    assert asyncio.run(telegram_api.redeem(Connection(), 7, code, now, username="sample_owner"))
-    assert state["chat"] == 7 and state["username"] == "sample_owner"
 
 
 # No PII in fixtures or the UI code.

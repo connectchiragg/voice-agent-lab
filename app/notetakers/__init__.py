@@ -32,11 +32,13 @@ INFO: dict[str, dict[str, Any]] = {
     "fathom": {
         "label": "Fathom", "key_label": "Fathom API key",
         "key_help": "In Fathom: Settings → API Access → Generate API key.",
+        "key_url": "https://developers.fathom.ai/api-overview", "webhook_env": "FATHOM_WEBHOOK_SECRET",
         "gets": "Recordings, transcripts and summaries; new ones arrive by webhook.",
         "video": "player", "import": False},
     "fireflies": {
         "label": "Fireflies", "key_label": "Fireflies API key",
         "key_help": "In Fireflies: Integrations → Fireflies API → copy the API key.",
+        "key_url": "https://docs.fireflies.ai/fundamentals/authorization",
         "gets": "Past meetings (history import); audio or video plays here when your Fireflies plan allows it.",
         "video": "player", "import": False},
     "granola": {
@@ -44,6 +46,7 @@ INFO: dict[str, dict[str, Any]] = {
         "optional": True,
         "key_help": "In Granola (desktop): Settings → Connectors → API keys. Needs a Business or "
                     "Enterprise plan; on other plans, upload the CSV export from Settings instead.",
+        "key_url": "https://docs.granola.ai/introduction", "webhook_env": "GRANOLA_WEBHOOK_SECRET",
         "gets": "Notes, summaries and transcripts. Granola records no audio or video.",
         "video": "none", "import": True},
     "phone": {  # Uploaded from the iPhone (app/phone_recordings.py): nothing to connect, so hidden.
@@ -99,20 +102,30 @@ async def disconnect(connection: Any, provider: str) -> bool:
 
 
 async def status_view(connection: Any) -> dict[str, dict[str, Any]]:
-    """Per provider: state (connected | refused | server | not_connected), account, times; no key."""
+    """Per provider: state (connected | refused | server | not_connected), account, times, how
+    many recordings arrived in the last 7 days, the webhook (set up? last delivery), the
+    API-key help link; never the key."""
     await store.setup(connection)
     rows = await store.statuses(connection)
+    activity = await store.activity(connection)
     out = {}
     for name, info in INFO.items():
         if info.get("hidden"):
             continue
         row = rows.get(name)
         state = row["state"] if row else ("server" if env_key(name) else "not_connected")
+        seen = activity.get(name) or {}
+        webhook = None
+        if info.get("webhook_env"):
+            webhook = {"configured": bool(os.getenv(info["webhook_env"], "").strip()),
+                       "last_at": _iso(seen.get("last_webhook_at"))}
         out[name] = {"label": info["label"], "state": state, "account": (row or {}).get("account") or "",
                      "connected_at": _iso((row or {}).get("connected_at")),
                      "last_ok_at": _iso((row or {}).get("last_ok_at")),
+                     "new_7d": int(seen.get("new_7d") or 0), "webhook": webhook,
                      "can_store": bool(token_key()), "optional": bool(info.get("optional")),
-                     **{k: info[k] for k in ("key_label", "key_help", "gets", "video", "import")}}
+                     **{k: info[k] for k in ("key_label", "key_help", "gets", "video", "import")},
+                     "key_url": info.get("key_url", "")}
     return out
 
 
