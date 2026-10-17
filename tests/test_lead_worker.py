@@ -185,6 +185,17 @@ async def rows(connect, sql, *args):
         return await cursor.fetchall()
 
 
+def spy_dispatch(monkeypatch):
+    """notifications.dispatch_now replaced by a recorder (items stay pending, nothing is sent)."""
+    from app import notifications
+    calls = []
+
+    async def record(connection, bot=None, tries=5, wait=0.5):
+        calls.append(datetime.now(timezone.utc))
+    monkeypatch.setattr(notifications, "dispatch_now", record)
+    return calls
+
+
 @needs_postgres
 def test_backfill_then_history_then_recovery(world, monkeypatch):
     gmail, activities, connect, key = world
@@ -360,8 +371,9 @@ def test_each_run_fetches_at_most_the_per_run_cap(world, monkeypatch):
 
 
 @needs_postgres
-def test_the_bell_follows_gmail_unread_mail_silently_and_new_mail_still_notifies(world):
+def test_the_bell_follows_gmail_unread_mail_silently_and_new_mail_still_notifies(world, monkeypatch):
     gmail, activities, connect, _ = world
+    pushed = spy_dispatch(monkeypatch)
     now = datetime.now(timezone.utc)
     inbound = next(e for e, item in EMAILS if item["step"] == "model" and item["expect"] == "keep")
     for message_id, age in (("nw1", timedelta(days=5)), ("nw2", timedelta(days=6))):
@@ -385,3 +397,149 @@ def test_the_bell_follows_gmail_unread_mail_silently_and_new_mail_still_notifies
     bell = {r[0]: r[1:] for r in asyncio.run(rows(connect, "SELECT source_id, read_at IS NOT NULL, push_state "
                                                             "FROM notifications"))}
     assert bell == {"gmail:nw1": (True, "skipped"), "gmail:nw3": (False, "pending")}  # Read; the new one pushes.
+    assert len(pushed) == 1 and second.notified == 1  # Pushed right after its batch, not at the loop's tick.
+
+
+# Latency.
+
+@needs_postgres
+def test_mail_arriving_during_a_backfill_is_looked_at_first_and_notifies(world, monkeypatch):
+    gmail, activities, connect, _ = world
+    pushed = spy_dispatch(monkeypatch)
+    monkeypatch.setenv("VALR_LEADS_FETCH_PER_RUN", "5")  # A backfill that needs several runs.
+    first = asyncio.run(activities.gmail_sync(GmailSyncInput("poll")))
+    assert first.mode == "backfill" and first.more and first.notified == 0  # Old mail is not news.
+    started = asyncio.run(rows(connect, "SELECT backfill_started_at FROM gmail_state"))[0][0]
+    inbound = next(e for e, item in EMAILS if item["step"] == "model" and item["expect"] == "keep")
+    fresh = dataclasses.replace(inbound, id="live1", thread_id="t-live1", at=started + timedelta(seconds=30))
+    gmail.messages["live1"] = raw_message(fresh)
+    gmail.history, gmail.history_id = ["live1"], 5100
+    gmail.calls.clear()
+    second = asyncio.run(activities.gmail_sync(GmailSyncInput("resume")))
+    assert second.mode == "backfill" and gets(gmail)[0] == "live1"  # Before the month of older mail.
+    bell = asyncio.run(rows(connect, "SELECT source_id, push_state FROM notifications"))
+    assert ("gmail:live1", "pending") in bell and len(pushed) >= 1
+    assert all(r[0] == "gmail:live1" or r[1] == "skipped" for r in bell)  # Older mail: silent at most.
+    assert asyncio.run(rows(connect, "SELECT history_id FROM gmail_state")) == [(5000,)]  # Baseline kept.
+
+
+@needs_postgres
+def test_a_classifier_failure_on_new_mail_runs_the_sync_again_soon(world, monkeypatch):
+    gmail, activities, connect, _ = world
+    spy_dispatch(monkeypatch)
+    asyncio.run(activities.gmail_sync(GmailSyncInput("poll")))  # The backfill.
+    inbound = next(e for e, item in EMAILS if item["step"] == "model" and item["expect"] == "keep")
+    gmail.messages["f1"] = raw_message(dataclasses.replace(inbound, id="f1", thread_id="t-f1",
+                                                           at=datetime.now(timezone.utc) - timedelta(minutes=1)))
+    gmail.history, gmail.history_id = ["f1"], 5100
+
+    def down(email, owners):
+        raise RuntimeError("model unavailable")
+    activities._classify = down
+    failed = asyncio.run(activities.gmail_sync(GmailSyncInput("push", 5100)))
+    assert failed.deferred == 1 and failed.retry and failed.more  # The workflow runs again in ~30 s.
+    activities._classify = fake_classify
+    gmail.history = []
+    again = asyncio.run(activities.gmail_sync(GmailSyncInput("resume")))
+    assert again.kept == 1 and not again.more and again.notified == 1
+
+
+@needs_postgres
+def test_the_fast_check_starts_a_sync_only_for_mail_no_push_picked_up(world, monkeypatch):
+    gmail, activities, connect, _ = world
+    monkeypatch.setenv("VALR_LEADS", "1")
+    started = []
+
+    async def start(reason):
+        started.append(reason)
+    from app import interview_worker
+    tokens = []
+    real_access = interview_worker.gmail_access
+
+    async def access(connection, client):
+        tokens.append(1)
+        return await real_access(connection, client)
+    monkeypatch.setattr(interview_worker, "gmail_access", access)
+    check = lead_worker.GmailCheck(connect, start, activities.http)
+    assert asyncio.run(check.tick()) == "backfill"  # Nothing before the backfill is done.
+    spy_dispatch(monkeypatch)
+    asyncio.run(activities.gmail_sync(GmailSyncInput("poll")))
+    assert asyncio.run(check.tick()) == "idle"
+    inbound = next(e for e, item in EMAILS if item["step"] == "model" and item["expect"] == "keep")
+    gmail.messages["p1"] = raw_message(dataclasses.replace(inbound, id="p1", thread_id="t-p1"))
+    gmail.history = ["p1"]
+    assert asyncio.run(check.tick()) == "waiting"  # A push-started sync gets one interval first.
+    assert asyncio.run(check.tick()) == "started" and started == ["check"]
+    asyncio.run(activities.gmail_sync(GmailSyncInput("check")))
+    assert asyncio.run(check.tick()) == "idle"  # Decided now; the stored historyId moved on.
+    gmail.history_gone = True
+    assert asyncio.run(check.tick()) == "started" and started == ["check", "check"]  # The sync recovers.
+    assert len(tokens) == 3  # Two syncs fetch their own; the check fetched once for its 5 ticks.
+
+
+def test_the_fast_check_is_off_without_leads(monkeypatch):
+    monkeypatch.setenv("VALR_LEADS", "0")
+    check = lead_worker.GmailCheck(lambda: None, lambda reason: None)
+    assert asyncio.run(check.tick()) == "off"
+    monkeypatch.setenv("VALR_GMAIL_CHECK_S", "0")
+    asyncio.run(lead_worker.check_loop(lambda: None, lambda reason: None))  # Returns at once.
+
+
+def test_the_backfill_leaves_model_calls_for_new_mail(monkeypatch):
+    monkeypatch.setenv("VALR_LEADS_LLM_PER_DAY", "300")
+    monkeypatch.delenv("VALR_LEADS_LLM_RESERVE", raising=False)
+    assert lead_worker.llm_reserve() == 50
+    budget = lead_worker.Budget(51, True, lead_worker.llm_reserve())
+    assert budget.take() and not budget.take()  # The last 50 are for live mail.
+    monkeypatch.setenv("VALR_LEADS_LLM_PER_DAY", "8")
+    assert lead_worker.llm_reserve() == 2  # At most a quarter of a small budget.
+
+
+@needs_postgres
+def test_the_push_path_puts_the_email_in_the_bell_before_the_classifier_answers(world, monkeypatch):
+    gmail, activities, connect, _ = world
+    pushed = spy_dispatch(monkeypatch)
+    asyncio.run(activities.gmail_sync(GmailSyncInput("poll")))  # The backfill.
+    inbound = next(e for e, item in EMAILS if item["step"] == "model" and item["expect"] == "keep")
+    arrived = datetime.now(timezone.utc) - timedelta(seconds=3)
+    for message_id in ("job1", "junk1"):
+        gmail.messages[message_id] = raw_message(dataclasses.replace(inbound, id=message_id, thread_id=f"t-{message_id}",
+                                                                     at=arrived))
+    gmail.history, gmail.history_id = ["job1", "junk1"], 5100
+    seen_while_classifying = {}
+
+    def slow_model(email, owners):
+        # The model is still thinking: the bell must already show the email.
+        with psycopg.connect(os.environ["VALR_TEST_POSTGRES"]) as sync:
+            seen_while_classifying[email.id] = sync.execute(
+                "SELECT kind FROM notifications WHERE source_id = %s", (f"gmail:{email.id}",)).fetchone()
+        decided = fake_classify(email, owners)
+        return dataclasses.replace(decided, keep=email.id == "job1")
+    activities._classify = slow_model
+    result = asyncio.run(activities.gmail_sync(GmailSyncInput("push", 5100)))
+    assert seen_while_classifying == {"job1": ("incoming",), "junk1": ("incoming",)}
+    bell = {r[0]: r[1:] for r in asyncio.run(rows(connect, "SELECT source_id, kind, push_state, "
+                                                            "extract(epoch FROM created_at - arrived_at) FROM notifications"))}
+    assert set(bell) == {"gmail:job1"}  # The dropped one was retracted.
+    kind, push_state, latency = bell["gmail:job1"]
+    assert kind == "interview" and push_state == "pending" and len(pushed) == 1 and result.notified == 1
+    assert 0 <= float(latency) < 10  # Counted from when it first showed, not from the classification.
+
+
+@needs_postgres
+def test_without_pubsub_the_check_syncs_new_mail_at_once(world, monkeypatch):
+    gmail, activities, connect, _ = world
+    monkeypatch.setenv("VALR_LEADS", "1")
+    monkeypatch.delenv("VALR_GMAIL_TOPIC")
+    monkeypatch.delenv("VALR_GMAIL_CHECK_S", raising=False)
+    assert lead_worker.check_every() == 15
+    started = []
+
+    async def start(reason):
+        started.append(reason)
+    spy_dispatch(monkeypatch)
+    asyncio.run(activities.gmail_sync(GmailSyncInput("poll")))
+    check = lead_worker.GmailCheck(connect, start, activities.http)
+    gmail.messages["q1"] = raw_message(dataclasses.replace(EMAILS[0][0], id="q1", thread_id="t-q1"))
+    gmail.history = ["q1"]
+    assert asyncio.run(check.tick()) == "started" and started == ["check"]  # No push to wait for.

@@ -4,11 +4,15 @@ Where they come from (all in the research worker):
 
 - a KEPT job-search email (app/lead_worker.py, `process`): `from_email` decides the kind from
   the classifier's decision. Dropped mail, newsletters, job-board alerts, his own sent mail and
-  automatic "application received" receipts never notify. Only incremental passes notify
-  (never the first backfill), and only for mail under VALR_NOTIFY_MAX_AGE_HOURS (48) old;
+  automatic "application received" receipts never notify. Incremental passes notify, and a
+  backfill only for mail that arrived after it started (old mail is not news), and only for
+  mail under VALR_NOTIFY_MAX_AGE_HOURS (48) old;
 - every kept inbound job email that is still UNREAD in Gmail (`sync_unread`, after each Gmail
   sync): older mail too, up to 30 days, so the bell shows all his unread job mail. These items
   are created silently (push and Telegram "skipped"): only genuinely new mail pings the phone.
+  A safety net: an unread, recent (48 h) kept email of a notifying kind that arrived after the
+  backfill began and still has no item (nothing in its thread either) was missed, so it is
+  added as a normal, pushed item (`missed`, "caught_up").
   The unread set is one messages.list ("is:unread newer_than:30d") per sync, plus the UNREAD
   label changes in the Gmail history. Reading the mail in Gmail reads its item; marking it
   unread again in Gmail brings the dot back. Reading an item in VALR does not touch Gmail
@@ -44,6 +48,11 @@ old; an unread one stays in the bell up to 30 days (KEEP_FOR), dated by when it 
 Dedupe: one notification per Gmail thread within 10 minutes (a later, more important email in
 the same thread upgrades it instead); every source has a unique `source_id`, so a re-run never
 repeats one. Items older than 30 days drop off the list.
+
+Latency: Gmail's Pub/Sub push starts a sync within seconds (app/leads_web.py); the worker's
+fast check (app/lead_worker.GmailCheck, every 30 s) catches a push that never came; the item is
+stored as soon as its batch is classified, and pushed right then (`dispatch_now`), not at the
+dispatch loop's next tick. Calendar changes and processed recordings push the same way.
 
 Phone push (app/webpush.py, the Home Screen app): every new item is pushed once, unread, within
 two days, to every subscribed device; quiet hours hold it like an immediate Telegram alert (an
@@ -82,7 +91,8 @@ KINDS = IMMEDIATE + DIGEST + ("calendar",)  # calendar: immediate within 48 hour
 # Inferred, not events: never created now; stored ones are hidden (`hide_removed`, `VISIBLE`).
 REMOVED = ("stage", "waiting", "quiet", "new_lead")
 VISIBLE = "NOT (kind = ANY(%s))"
-LABELS = {"offer": "Offer", "interview": "Interview invite", "reply_needed": "Asked for something",
+INCOMING = "incoming"  # A new email shown before it is classified (`incoming`), then settled.
+LABELS = {INCOMING: "New email", "offer": "Offer", "interview": "Interview invite", "reply_needed": "Asked for something",
           "take_home": "Take-home", "rejection": "Not moving forward", "reply": "Reply", "update": "Update",
           "recording": "Call recording", "calendar": "Calendar"}
 RANK = {"immediate": 2, "digest": 1}
@@ -126,6 +136,10 @@ DO $$ BEGIN
     ALTER TABLE notifications ADD COLUMN push_sent_at timestamptz;
   END IF;
   IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                 WHERE table_name = 'notifications' AND column_name = 'arrived_at') THEN
+    ALTER TABLE notifications ADD COLUMN arrived_at timestamptz;  -- Gmail's internalDate: the latency SLA
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns
                  WHERE table_name = 'notify_settings' AND column_name = 'delivery') THEN
     ALTER TABLE notify_settings ADD COLUMN delivery text;  -- both | push | telegram
   END IF;
@@ -133,7 +147,7 @@ END $$;
 """
 FIELDS = ("id", "source_id", "kind", "importance", "title", "body", "company", "link", "gmail_url", "thread_id",
           "lead_id", "action", "interview_at", "created_at", "read_at", "tg_state", "tg_sent_at",
-          "push_state", "push_sent_at")
+          "push_state", "push_sent_at", "arrived_at")
 DELIVERY = ("both", "push", "telegram")  # Telegram + phone push, phone push only, Telegram only.
 
 
@@ -381,9 +395,10 @@ class Store:
             (list(REMOVED),))
 
     async def recent_for_thread(self, thread_id: str, since: datetime) -> dict[str, Any] | None:
+        """The newest settled item of the thread (an unclassified `incoming` one does not count)."""
         cursor = await self.c.execute(
             f"SELECT {', '.join(FIELDS)} FROM notifications WHERE thread_id = %s AND created_at >= %s "
-            "ORDER BY created_at DESC LIMIT 1", (thread_id, since))
+            "AND kind <> %s ORDER BY created_at DESC LIMIT 1", (thread_id, since, INCOMING))
         row = await cursor.fetchone()
         return dict(zip(FIELDS, row)) if row else None
 
@@ -401,6 +416,23 @@ class Store:
             "ON CONFLICT (source_id) DO NOTHING RETURNING id", tuple(note[k] for k in keys))
         row = await cursor.fetchone()
         return int(row[0]) if row else None
+
+    async def get_source(self, source_id: str) -> dict[str, Any] | None:
+        cursor = await self.c.execute(f"SELECT {', '.join(FIELDS)} FROM notifications WHERE source_id = %s",
+                                      (source_id,))
+        row = await cursor.fetchone()
+        return dict(zip(FIELDS, row)) if row else None
+
+    async def delete(self, note_id: int) -> None:
+        await self.c.execute("DELETE FROM notifications WHERE id = %s", (note_id,))
+
+    async def latencies(self, since: datetime) -> list[tuple[float, float | None]]:
+        """(seconds from the email's arrival to its bell item, to its push or None) for the live
+        email items created since `since` (silent unread-mail items carry no arrived_at)."""
+        cursor = await self.c.execute(
+            "SELECT extract(epoch FROM created_at - arrived_at), extract(epoch FROM push_sent_at - arrived_at) "
+            "FROM notifications WHERE arrived_at IS NOT NULL AND created_at >= %s", (since,))
+        return [(float(r[0]), float(r[1]) if r[1] is not None else None) for r in await cursor.fetchall()]
 
     async def update(self, note_id: int, **values: Any) -> None:
         sets = ", ".join(f"{k} = %s" for k in values)
@@ -532,19 +564,90 @@ async def from_recording(store: Any, provider: str, external_id: str, company: s
 
 
 async def from_email(store: Any, email: Any, decision: Any, touch: Any, new_thread: bool, now: datetime) -> int | None:
-    """A kept email -> a notification (or nothing). Inbound mail only."""
-    if not decision.keep or touch.direction != "in" or now - email.at > max_age():
-        return None
-    kind = email_kind(decision.category, decision.action_requested, decision.stage_hint, new_thread,
-                      email.subject, decision.summary)
+    """A kept email -> a notification (or nothing). Inbound mail only. Its `incoming` item, when
+    there is one, is replaced (keeping when it appeared) or, when it does not notify, retracted."""
+    incoming = await store.get_source(f"gmail:{email.id}")
+    if incoming is not None and incoming["kind"] != INCOMING:
+        return None  # Settled already (a re-run).
+    kind = None
+    if decision.keep and touch.direction == "in" and now - email.at <= max_age():
+        kind = email_kind(decision.category, decision.action_requested, decision.stage_hint, new_thread,
+                          email.subject, decision.summary)
+    if incoming is not None:
+        await store.delete(incoming["id"])
     if kind is None:
         return None
     note = {"source_id": f"gmail:{email.id}", "kind": kind,
             "title": linkedin_title(touch) or email_title(kind, touch.company, decision.action, new_thread),
             "body": (decision.summary or "")[:240], "company": (touch.company or "")[:120],
             "link": lead_link(""), "gmail_url": touch.url or "", "thread_id": getattr(touch, "thread", "") or email.thread_id,
-            "action": (decision.action or "")[:120]}
+            "action": (decision.action or "")[:120], "arrived_at": email.at}
+    if incoming is not None:
+        note["created_at"] = incoming["created_at"]  # In the bell since then: the SLA counts from it.
+        note["read_at"] = incoming.get("read_at")  # Read in Gmail (or the bell) already: no push.
     return await add(store, note, now)
+
+
+async def from_incoming(store: Any, email: Any, now: datetime) -> int | None:
+    """A new inbound email that the model is about to classify -> an `incoming` bell item at
+    once, from its headers ("Priya Raman: Interview availability"), so it is in the app within
+    seconds of arriving. Never pushed nor sent on Telegram (push/tg "hold"): `from_email` then
+    turns it into the real item (pushed) or retracts it (not job mail). Only new mail (under
+    VALR_NOTIFY_MAX_AGE_HOURS); once per message."""
+    if now - email.at > max_age():
+        return None
+    who = " ".join((email.from_name or email.from_email.split("@")[-1] or "Someone").split())[:60]
+    subject = " ".join((email.subject or "(no subject)").split())[:120]
+    note = {"source_id": f"gmail:{email.id}", "kind": INCOMING, "importance": "digest",
+            "title": f"{who}: {subject}"[:140], "body": "Checking whether it is about your job search…",
+            "link": "/valr/leads", "gmail_url": gmail_link(email.thread_id), "thread_id": email.thread_id or None,
+            "created_at": now, "arrived_at": email.at, "tg_state": "hold", "push_state": "hold"}
+    created = await store.insert(note)
+    if created is not None:
+        logger.info("VALR notification latency: email in the bell %.1f s after it arrived",
+                    (now - email.at).total_seconds())
+    return created
+
+
+def gmail_link(thread_id: str) -> str:
+    from app import gmail_api
+    return gmail_api.thread_url(thread_id) if thread_id else ""
+
+
+async def retract_incoming(store: Any, email_id: str) -> bool:
+    """A dropped email: its `incoming` item goes (it was not job mail)."""
+    found = await store.get_source(f"gmail:{email_id}")
+    if found is None or found["kind"] != INCOMING:
+        return False
+    await store.delete(found["id"])
+    return True
+
+
+SLA_P95_S = 10.0  # The owner, 2026-10-17: a new email in the app within 5-10 s (p95 10 s, p50 5 s).
+SLA_P50_S = 5.0
+
+
+def percentile(values: list[float], share: float) -> float | None:
+    """Nearest-rank percentile; None for no values."""
+    if not values:
+        return None
+    ordered = sorted(values)
+    return ordered[min(len(ordered) - 1, max(0, int(-(-share * len(ordered) // 1)) - 1))]
+
+
+async def latency_report(store: Any, now: datetime, window: timedelta = timedelta(hours=24)) -> dict[str, Any]:
+    """{count, p50_s, p95_s, max_s, push_p50_s, push_p95_s, sla_p50_s, sla_p95_s, met} for the email
+    items of the last `window`: Gmail's arrival time -> the bell item, and -> the phone push."""
+    rows = await store.latencies(now - window)
+    shown = [max(0.0, a) for a, _ in rows]
+    pushed = [max(0.0, b) for _, b in rows if b is not None]
+    p95 = percentile(shown, 0.95)
+    rnd = lambda v: round(v, 1) if v is not None else None  # noqa: E731
+    return {"window_h": window.total_seconds() / 3600, "count": len(shown), "p50_s": rnd(percentile(shown, 0.5)),
+            "p95_s": rnd(p95), "max_s": rnd(max(shown) if shown else None),
+            "push_count": len(pushed), "push_p50_s": rnd(percentile(pushed, 0.5)),
+            "push_p95_s": rnd(percentile(pushed, 0.95)), "sla_p50_s": SLA_P50_S, "sla_p95_s": SLA_P95_S,
+            "met": None if p95 is None else p95 <= SLA_P95_S}
 
 
 # Unread mail (app/lead_worker.py, after each Gmail sync).
@@ -578,8 +681,21 @@ def silent_note(touch: Any, new_thread: bool) -> dict[str, Any] | None:
             "tg_state": "skipped", "push_state": "skipped"}
 
 
+async def missed(store: Any, touch: Any, new_thread: bool, live_since: datetime | None, now: datetime) -> bool:
+    """A kept inbound email that `from_email` would have pushed but that has no item: new since
+    `live_since` (not old mail from a backfill), recent, of a notifying kind, and no item for
+    its thread within the dedupe window (that one already covers it)."""
+    if live_since is None or touch.at < live_since or now - touch.at > max_age():
+        return False
+    if email_kind(touch.category or "", touch.action_requested, touch.stage_hint or "", new_thread,
+                  touch.title or "", touch.summary or "") is None:
+        return False
+    return not (touch.thread and await store.recent_for_thread(touch.thread, touch.at - DEDUPE))
+
+
 async def sync_unread(store: Any, kept: list[Any], unread: set[str] | None, complete: bool,
-                      changes: dict[str, bool], now: datetime, first_in_thread: set[str] = frozenset()) -> dict[str, int]:
+                      changes: dict[str, bool], now: datetime, first_in_thread: set[str] = frozenset(),
+                      live_since: datetime | None = None) -> dict[str, int]:
     """Makes the bell match Gmail's unread job mail.
 
     `kept`: the kept email touchpoints of the last 30 days; `unread`: Gmail's unread message
@@ -587,12 +703,16 @@ async def sync_unread(store: Any, kept: list[Any], unread: set[str] | None, comp
     list was not cut short; `changes`: {message id: True (marked unread) | False (read)} from
     the Gmail history; `first_in_thread`: touch ids that started their thread.
 
-    - an unread kept inbound email without an item gets one, silently;
+    - an unread kept inbound email without an item gets one, silently, unless it is a missed
+      new event (`missed`: it arrived after `live_since`, under VALR_NOTIFY_MAX_AGE_HOURS ago,
+      is of a kind `from_email` notifies, and nothing in its thread is in the bell): then it
+      is pushed like any new email ("caught_up"), so a failed or skipped `from_email` never
+      loses one;
     - an unread item whose mail is read in Gmail is read (only when the list is complete, or
       the history says so: a cut list never reads anything by mistake);
     - an item whose mail was marked unread again in Gmail (history) is unread again.
     Reading an item in VALR is kept: a mail that stays unread in Gmail does not undo it."""
-    out = {"added": 0, "read": 0, "unread": 0}
+    out = {"added": 0, "read": 0, "unread": 0, "caught_up": 0}
     since = now - KEEP_FOR
     items = await store.email_items(since)
     # The list is fetched after the history, so it wins; without it, the history alone.
@@ -602,8 +722,13 @@ async def sync_unread(store: Any, kept: list[Any], unread: set[str] | None, comp
         if message_id not in unread_now or message_id in items or touch.at < since:
             continue
         note = silent_note(touch, touch.id in first_in_thread)
-        if note is not None and await store.insert(note) is not None:
-            out["added"] += 1
+        if note is None:
+            continue
+        loud = await missed(store, touch, touch.id in first_in_thread, live_since, now)
+        if loud:  # New to him now: dated now, its arrival kept for the latency figures.
+            note.update(tg_state="pending", push_state="pending", created_at=now, arrived_at=touch.at)
+        if await store.insert(note) is not None:
+            out["caught_up" if loud else "added"] += 1
     if unread is not None and complete:
         read = {i for i in items if i not in unread}
     else:
@@ -724,6 +849,9 @@ async def push_dispatch(store: Any, now: datetime, switches: Switches, sender: A
         result = await sender.send(push_message(note, unread), now)
         await store.update(note["id"], push_state="sent" if result.delivered else "failed", push_sent_at=now)
         out["pushed"] += bool(result.delivered)
+        if result.delivered and note.get("arrived_at"):
+            logger.info("VALR notification latency: email pushed %.1f s after it arrived",
+                        (now - note["arrived_at"]).total_seconds())
     return out
 
 
@@ -791,7 +919,7 @@ async def run_dispatch(connection: Any, now: datetime | None = None, bot: Any = 
     store = Store(connection)
     await store.setup()
     if not await store.try_lock():
-        return {"sent": 0, "held": 0, "digest": 0, "pushed": 0, "push_held": 0}
+        return {"sent": 0, "held": 0, "digest": 0, "pushed": 0, "push_held": 0, "locked": 1}
     try:
         from app import webpush
         bot = bot or telegram_api.bot()
@@ -809,16 +937,46 @@ async def run_dispatch(connection: Any, now: datetime | None = None, bot: Any = 
     return result
 
 
+async def dispatch_now(connection: Any, bot: Any = None, tries: int = 5, wait: float = 0.5) -> dict[str, int] | None:
+    """Right after a new item is stored (an email, a calendar change, a recording): push it now
+    instead of at the loop's next tick (up to VALR_NOTIFY_LOOP_S later). When the loop holds the
+    lock it may have listed the pending items before this one was stored, so retry a few times
+    (~2 s). None when it could not run (the loop then sends it). Never raises."""
+    import asyncio
+    for attempt in range(tries):
+        try:
+            result = await run_dispatch(connection, bot=bot)
+        except Exception as error:  # noqa: BLE001 - the loop sends it on its next tick
+            logger.warning("VALR notifications: immediate dispatch failed (%s)", type(error).__name__)
+            return None
+        if not result.get("locked"):
+            return result
+        if attempt + 1 < tries:
+            await asyncio.sleep(wait)
+    return None
+
+
 async def loop(connect: Any, stop: Any = None) -> None:
     """The research worker's background task: a dispatch every VALR_NOTIFY_LOOP_S (60) seconds,
-    so held items leave at 08:00 and the digest at 09:00."""
+    so held items leave at 08:00 and the digest at 09:00; once an hour, the latency figures of
+    the last 24 hours are logged ("VALR notification SLA ...")."""
     import asyncio
     stop = stop or asyncio.Event()
     every = float(os.getenv("VALR_NOTIFY_LOOP_S", "60"))
+    reported: datetime | None = None
     while not stop.is_set():
         try:
             async with await connect() as connection:
                 await run_dispatch(connection)
+                now = datetime.now(timezone.utc)
+                if reported is None or now - reported >= timedelta(hours=1):
+                    reported = now
+                    report = await latency_report(Store(connection), now)
+                    if report["count"]:
+                        logger.info("VALR notification SLA (24 h): %d emails, p50 %s s, p95 %s s, max %s s "
+                                    "(target p95 <= %g s: %s); push p50 %s s, p95 %s s", report["count"],
+                                    report["p50_s"], report["p95_s"], report["max_s"], SLA_P95_S,
+                                    "met" if report["met"] else "MISSED", report["push_p50_s"], report["push_p95_s"])
         except Exception as error:  # noqa: BLE001 - keep the worker alive
             logger.warning("VALR notifications loop: %s", type(error).__name__)
         try:

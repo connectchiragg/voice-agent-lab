@@ -9,6 +9,11 @@
   A pass that could not finish (summary.more: the 150-message cap per run, or Gmail's rate
   limit, mode "paused-ratelimit") continues as new after MORE_AFTER, or RESUME_AFTER when
   rate limited, until the backfill is done (behind the patch BACKFILL_RESUME_PATCH).
+  Latency (the owner's SLA: a new email in the app within 10 s, p95): no 2-second settle
+  before the first pass (NO_SETTLE_PATCH; a burst of pushes still makes one more pass, not
+  many), and a push that arrives during the lead rebuild is no longer lost: the workflow runs
+  again right after it (POKE_AFTER_REFRESH_PATCH). Before, such a push waited for the next
+  push or the 30-minute poll (seen in production: an email picked up 4 minutes late).
 - `GmailWatchWorkflow`: renews users.watch (activity `gmail_watch`). The Schedule
   `valr-gmail-watch` runs it once a day; Google ends a watch after 7 days.
 
@@ -26,6 +31,8 @@ POLL_SCHEDULE = "valr-gmail-poll"
 WATCH_SCHEDULE = "valr-gmail-watch"
 BACKFILL_RESUME_PATCH = "gmail-backfill-resume"
 PAUSED = "paused-ratelimit"
+NO_SETTLE_PATCH = "gmail-no-settle"
+POKE_AFTER_REFRESH_PATCH = "gmail-poke-after-refresh"
 RESUME_AFTER = timedelta(minutes=2)  # After a rate limit.
 MORE_AFTER = timedelta(seconds=30)  # After a run that hit the per-run cap.
 
@@ -46,8 +53,10 @@ class GmailSyncSummary:
     llm_calls: int = 0
     usd: float = 0.0
     error: str = ""
-    more: bool = False  # Not finished (per-run cap or rate limit): run again soon.
+    more: bool = False  # Not finished (per-run cap, rate limit, a classifier failure): run again soon.
     left: int = 0  # Messages listed but not looked at yet.
+    notified: int = 0  # New bell items (pushed right away).
+    retry: bool = False  # A recent email was deferred by a classifier error.
 
 
 @dataclass
@@ -75,7 +84,8 @@ class GmailSyncWorkflow:
 
     @workflow.run
     async def run(self, request: GmailSyncInput) -> GmailSyncSummary:
-        await workflow.sleep(timedelta(seconds=2))  # Let a burst of pushes settle.
+        if not workflow.patched(NO_SETTLE_PATCH):
+            await workflow.sleep(timedelta(seconds=2))  # Old runs: let a burst of pushes settle.
         summary = GmailSyncSummary()
         for _ in range(3):
             self.pokes = 0
@@ -94,6 +104,8 @@ class GmailSyncWorkflow:
         if summary.more and workflow.patched(BACKFILL_RESUME_PATCH):
             await workflow.sleep(RESUME_AFTER if summary.mode == PAUSED else MORE_AFTER)
             workflow.continue_as_new(GmailSyncInput("resume"))
+        if self.pokes and workflow.patched(POKE_AFTER_REFRESH_PATCH):
+            workflow.continue_as_new(GmailSyncInput("push"))  # Mail that came during the rebuild.
         return summary
 
     @workflow.signal

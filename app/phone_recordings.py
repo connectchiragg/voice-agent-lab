@@ -680,7 +680,9 @@ class Processor:
             from app import notifications
             store = notifications.Store(connection)
             await store.setup()
-            await notifications.from_recording(store, PROVIDER, upload_id, company, row.get("other_name") or "", now)
+            if await notifications.from_recording(store, PROVIDER, upload_id, company,
+                                                  row.get("other_name") or "", now) is not None:
+                await notifications.dispatch_now(connection)  # Pushed now, not at the loop's next tick.
         except Exception as error:  # noqa: BLE001 - the recording is processed either way.
             logger.warning("VALR phone recording notification failed: %s", type(error).__name__)
 

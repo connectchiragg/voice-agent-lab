@@ -84,7 +84,7 @@ def test_a_rate_limited_or_capped_pass_resumes_after_a_wait_until_done():
                 assert any(e.HasField("marker_recorded_event_attributes") for e in history.events)
                 timers = [e.timer_started_event_attributes.start_to_fire_timeout.seconds for e in history.events
                           if e.HasField("timer_started_event_attributes")]
-                assert timers == [2, 120]  # The push settle, then the rate-limit pause.
+                assert timers == [120]  # No settle before the pass (the SLA); the rate-limit pause.
                 await Replayer(workflows=[GmailSyncWorkflow], workflow_runner=workflow_runner()).replay_workflow(history)
 
     asyncio.run(main())
@@ -135,5 +135,40 @@ def test_a_workflow_started_before_the_patch_replays_on_the_new_code():
                 await handle.result()
                 history = await handle.fetch_history()
         await Replayer(workflows=[GmailSyncWorkflow], workflow_runner=workflow_runner()).replay_workflow(history)
+
+    asyncio.run(main())
+
+
+def test_a_push_during_the_lead_rebuild_makes_another_pass_at_once():
+    calls = []
+    in_refresh, release = asyncio.Event(), asyncio.Event()
+
+    @activity.defn(name="gmail_sync")
+    async def gmail_sync(request: GmailSyncInput) -> GmailSyncSummary:
+        calls.append(("sync", request.reason))
+        return GmailSyncSummary(mode="history", fetched=1)
+
+    @activity.defn(name="leads_refresh")
+    async def leads_refresh(reason: str) -> RefreshSummary:
+        calls.append(("refresh", reason))
+        if len(calls) == 2:
+            in_refresh.set()
+            await release.wait()
+        return RefreshSummary()
+
+    async def main():
+        async with await WorkflowEnvironment.start_time_skipping() as env:
+            async with Worker(env.client, task_queue=TASK_QUEUE, workflows=[GmailSyncWorkflow],
+                              workflow_runner=workflow_runner(), activities=[gmail_sync, leads_refresh]):
+                start = dict(id="valr-gmail-sync", task_queue=TASK_QUEUE, start_signal="poke",
+                             id_conflict_policy=WorkflowIDConflictPolicy.USE_EXISTING)
+                handle = await env.client.start_workflow(GmailSyncWorkflow.run, GmailSyncInput("push", 10), **start)
+                await in_refresh.wait()
+                # A new email's push while the leads are being rebuilt (~20 s in production).
+                await env.client.start_workflow(GmailSyncWorkflow.run, GmailSyncInput("push", 11), **start)
+                await asyncio.sleep(0.3)
+                release.set()
+                await handle.result()
+        assert calls == [("sync", "push"), ("refresh", "push"), ("sync", "push"), ("refresh", "push")]
 
     asyncio.run(main())

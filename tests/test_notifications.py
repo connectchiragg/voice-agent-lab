@@ -1,6 +1,7 @@
 """Notifications: which emails notify, the dedupe, quiet hours and the digest, Telegram text
 without PII, calendar changes, the removed inferred kinds, and the owner-only API. All names, addresses and numbers are fictional."""
 import asyncio
+import dataclasses
 import json
 import os
 from datetime import datetime, timedelta, timezone
@@ -42,8 +43,20 @@ class MemoryStore:
                 r["tg_state"] = "skipped" if r["tg_state"] == "pending" else r["tg_state"]
                 r["push_state"] = "skipped" if r.get("push_state") == "pending" else r.get("push_state")
 
+    async def get_source(self, source_id):
+        return next((r for r in self.rows if r["source_id"] == source_id), None)
+
+    async def delete(self, note_id):
+        self.rows = [r for r in self.rows if r["id"] != note_id]
+
+    async def latencies(self, since):
+        return [((r["created_at"] - r["arrived_at"]).total_seconds(),
+                 (r["push_sent_at"] - r["arrived_at"]).total_seconds() if r.get("push_sent_at") else None)
+                for r in self.rows if r.get("arrived_at") and r["created_at"] >= since]
+
     async def recent_for_thread(self, thread_id, since):
-        found = [r for r in self.rows if r.get("thread_id") == thread_id and r["created_at"] >= since]
+        found = [r for r in self.rows if r.get("thread_id") == thread_id and r["created_at"] >= since
+                 and r["kind"] != n.INCOMING]
         return max(found, key=lambda r: r["created_at"]) if found else None
 
     async def recent_for_lead(self, lead_id, since):
@@ -495,7 +508,7 @@ def test_unread_kept_emails_appear_and_read_ones_do_not():
             kept_touch("o1", NOW - timedelta(days=1), direction="out"),     # His own mail.
             kept_touch("n1", NOW - timedelta(days=1), category="newsletter")]
     out = run(n.sync_unread(store, kept, {"u1", "u2", "o1", "n1", "x9"}, True, {}, NOW, {"gmail:u2"}))
-    assert out == {"added": 2, "read": 0, "unread": 0}
+    assert out == {"added": 2, "read": 0, "unread": 0, "caught_up": 0}
     rows = {r["source_id"]: r for r in store.rows}
     assert set(rows) == {"gmail:u1", "gmail:u2"}
     assert rows["gmail:u1"]["created_at"] == NOW - timedelta(days=3)  # Dated when it arrived: grouped by day.
@@ -568,3 +581,131 @@ def test_max_age_push_48_hours_bell_30_days():
     run(n.sync_unread(store, kept, {"m3", "m29", "m31"}, True, {}, NOW, set()))
     assert {r["source_id"] for r in store.rows} == {"gmail:m3", "gmail:m29"}  # In the bell, silently.
     assert run(n.dispatch(store, NOW, None, None, sender=sender))["pushed"] == 0
+
+
+# Latency: a missed new email is caught up loudly; new items are pushed right away.
+
+def test_a_missed_new_email_is_caught_up_and_pushed_old_or_covered_ones_stay_silent():
+    store, sender = MemoryStore(), PushSender()
+    live = NOW - timedelta(days=1)  # The backfill began then: mail after it is news.
+    run(store.insert({"source_id": "gmail:c0", "kind": "reply", "importance": "digest", "title": "x",
+                      "thread_id": "t-covered", "created_at": NOW - timedelta(minutes=30),
+                      "tg_state": "pending", "push_state": "sent"}))
+    kept = [kept_touch("m1", NOW - timedelta(minutes=4), category="scheduling"),       # Missed: pushed.
+            kept_touch("old", live - timedelta(hours=1), category="scheduling"),       # Before the backfill.
+            kept_touch("aged", NOW - timedelta(hours=50), category="scheduling"),      # Over 48 h: not news.
+            kept_touch("c1", NOW - timedelta(minutes=25), thread="t-covered"),         # Its thread is in the bell.
+            dataclasses.replace(kept_touch("ack", NOW - timedelta(minutes=3), category="application_update"),
+                                title="Thank you for applying")]  # An automatic receipt: never pushed.
+    out = run(n.sync_unread(store, kept, {"m1", "old", "aged", "c1", "ack"}, True, {}, NOW, set(), live))
+    assert out["caught_up"] == 1 and out["added"] == 4
+    loud = {r["source_id"] for r in store.rows if r["push_state"] == "pending"}
+    assert loud == {"gmail:m1"}
+    assert store.by_source("gmail:m1")["kind"] == "interview"
+    assert run(n.dispatch(store, NOW, None, None, sender=sender))["pushed"] == 1 and len(sender.sent) == 1
+    # Without a live mark (the first backfill not begun), everything stays silent.
+    quiet = MemoryStore()
+    assert run(n.sync_unread(quiet, kept[:1], {"m1"}, True, {}, NOW, set()))["caught_up"] == 0
+
+
+def test_dispatch_now_retries_while_the_loop_holds_the_lock(monkeypatch):
+    results = [{"locked": 1}, {"locked": 1}, {"pushed": 1}]
+    calls = []
+
+    async def fake(connection, now=None, bot=None):
+        calls.append(connection)
+        return results.pop(0)
+    monkeypatch.setattr(n, "run_dispatch", fake)
+    assert run(n.dispatch_now("conn", wait=0)) == {"pushed": 1} and len(calls) == 3
+    results[:] = [{"locked": 1}] * 5
+    assert run(n.dispatch_now("conn", tries=2, wait=0)) is None  # The loop sends it on its tick.
+
+    async def broken(connection, now=None, bot=None):
+        raise RuntimeError("db gone")
+    monkeypatch.setattr(n, "run_dispatch", broken)
+    assert run(n.dispatch_now("conn", wait=0)) is None  # Never raises.
+
+
+def test_a_calendar_change_is_pushed_at_once():
+    from app import interview_worker as w
+    from app.interview_types import SlotDiff
+    import unittest.mock as mock
+    pushed = []
+
+    async def created(store, event, change, now, before_utc=""):
+        return 7
+
+    async def dispatch_now(connection, bot=None, tries=5, wait=0.5):
+        pushed.append(connection)
+
+    owners = {"owner@example.test"}
+    with mock.patch.object(n, "from_calendar", created), mock.patch.object(n, "dispatch_now", dispatch_now), \
+            mock.patch.object(n.Store, "setup", lambda self: asyncio.sleep(0)):
+        run(w.notify_calendar("conn", [(cal_event(), SlotDiff(["new"]))], {"seen": cal_event("seen")}, False,
+                              NOW, owners))
+        assert pushed == ["conn"]
+        run(w.notify_calendar("conn", [(cal_event(), SlotDiff(["new"]))], {}, True, NOW, owners))
+        assert pushed == ["conn"]  # The seeding sync creates nothing, so nothing to push.
+
+
+# The SLA: a new email is in the bell before the model classifies it.
+
+def test_an_incoming_email_shows_at_once_then_becomes_the_real_item_or_goes():
+    store, sender = MemoryStore(), PushSender()
+    mail = email("m1", "t-m1", subject="Interview availability", at=NOW - timedelta(seconds=4))
+    assert run(n.from_incoming(store, mail, NOW)) is not None
+    row = store.by_source("gmail:m1")
+    assert row["kind"] == n.INCOMING and row["title"] == "Riya Sen: Interview availability"
+    assert (row["push_state"], row["tg_state"]) == ("hold", "hold") and row["arrived_at"] == mail.at
+    assert run(n.dispatch(store, NOW, Bot(), chat=1, sender=sender))["pushed"] == 0  # Not pushed yet.
+    assert run(n.from_incoming(store, mail, NOW)) is None  # Once per message.
+    # The model kept it: the same bell entry becomes the real one, dated when it first showed.
+    later = NOW + timedelta(seconds=3)
+    run(n.from_email(store, mail, decision("scheduling"), touch(), False, later))
+    row = store.by_source("gmail:m1")
+    assert row["kind"] == "interview" and row["created_at"] == NOW and row["push_state"] == "pending"
+    assert len(store.rows) == 1
+    assert run(n.dispatch(store, later, None, None, sender=sender))["pushed"] == 1
+    # Another one the model dropped: retracted.
+    junk = email("m2", "t-m2", subject="Webinar", at=NOW)
+    run(n.from_incoming(store, junk, NOW))
+    assert run(n.retract_incoming(store, "m2")) and store.by_source("gmail:m2") is None
+    assert not run(n.retract_incoming(store, "m1"))  # A settled item is never retracted.
+    # Kept but not news (an automatic receipt): retracted too.
+    receipt = email("m3", "t-m3", subject="Thank you for applying", at=NOW)
+    run(n.from_incoming(store, receipt, NOW))
+    assert run(n.from_email(store, receipt, decision("application_update"), touch(), False, later)) is None
+    assert store.by_source("gmail:m3") is None
+    # Old mail never shows as incoming.
+    assert run(n.from_incoming(store, email("m4", at=NOW - timedelta(days=3)), NOW)) is None
+
+
+def test_two_incoming_emails_in_one_thread_settle_into_one_item():
+    store = MemoryStore()
+    first, second = email("a1", "t-x", at=NOW - timedelta(seconds=5)), email("a2", "t-x", at=NOW - timedelta(seconds=4))
+    run(n.from_incoming(store, first, NOW))
+    run(n.from_incoming(store, second, NOW))
+    run(n.from_email(store, first, decision("scheduling"), touch(), False, NOW))
+    run(n.from_email(store, second, decision("scheduling"), touch(), False, NOW))
+    assert [r["source_id"] for r in store.rows] == ["gmail:a1"]  # The 10-minute thread dedupe still holds.
+
+
+def test_the_latency_report_against_the_sla():
+    store = MemoryStore()
+    for i, seconds in enumerate([2, 3, 4, 4, 5, 5, 6, 7, 8, 12]):
+        run(store.insert({"source_id": f"gmail:l{i}", "kind": "reply", "importance": "digest", "title": "x",
+                          "created_at": NOW, "arrived_at": NOW - timedelta(seconds=seconds),
+                          "push_sent_at": NOW + timedelta(seconds=1), "tg_state": "sent", "push_state": "sent"}))
+    run(store.insert({"source_id": "gmail:silent", "kind": "reply", "importance": "digest", "title": "x",
+                      "created_at": NOW - timedelta(days=3), "tg_state": "skipped", "push_state": "skipped"}))
+    report = run(n.latency_report(store, NOW))
+    assert report["count"] == 10 and report["p50_s"] == 5.0 and report["p95_s"] == 12.0 and report["max_s"] == 12.0
+    assert report["push_p50_s"] == 6.0 and report["met"] is False and report["sla_p95_s"] == 10.0
+    assert run(n.latency_report(MemoryStore(), NOW))["met"] is None  # Nothing measured yet.
+    assert n.percentile([1.0], 0.95) == 1.0 and n.percentile([], 0.5) is None
+
+
+def test_the_latency_endpoint_is_owner_only(client):
+    assert client.get("/valr/api/notifications/latency").status_code == 403
+    data = client.get("/valr/api/notifications/latency", headers=client.good).json()
+    assert data["ok"] and data["sla_p95_s"] == 10.0 and "p95_s" in data
