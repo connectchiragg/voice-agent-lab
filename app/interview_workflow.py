@@ -55,6 +55,7 @@ TASK_QUEUE = "voice-research"
 RESEARCH_LEAD = timedelta(minutes=60)
 # Before 2026-10-16 (kept for the replay of blocks started earlier): T-15, T-10, T-5.
 CALL_LEADS = (timedelta(minutes=15), timedelta(minutes=10), timedelta(minutes=5))
+ON_DEMAND_SINGLE_PATCH = "on-demand-single-call"
 SINGLE_CALL_LEAD = timedelta(minutes=30)  # Now: one call at T-30, no retries.
 MIN_LEFT_TO_CALL = timedelta(minutes=5)
 SINGLE_CALL_PATCH = "valr-single-call-t30"
@@ -449,7 +450,10 @@ class BlockCallWorkflow:
                     break
                 await self.sleep(min(READY_POLL, max(deadline - workflow.now(), timedelta(seconds=1))))
             first = workflow.now()
-            times = [first + timedelta(minutes=5) * index for index in range(len(CALL_LEADS))]
+            if workflow.patched(ON_DEMAND_SINGLE_PATCH):
+                times = [first]  # "Call me" rings once: no retries (owner's choice, 2026-10-17).
+            else:
+                times = [first + timedelta(minutes=5) * index for index in range(len(CALL_LEADS))]
         elif workflow.patched(SINGLE_CALL_PATCH):
             # One call, 30 minutes before the block (owner's choice, 2026-10-16); no retries.
             due = start - SINGLE_CALL_LEAD
