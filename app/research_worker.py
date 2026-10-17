@@ -224,7 +224,9 @@ async def show_blocks(start_workflows: bool) -> None:
     from app.interview_types import group_blocks
     from app.interview_workflow import BlockCallWorkflow, InterviewSlotWorkflow
     from app.interview_types import slot_workflow_id
-    zone = ZoneInfo(os.getenv("ASSISTANT_TIMEZONE", "Asia/Kolkata"))
+    from app import owner
+    await owner.refresh(force=True)
+    zone = owner.zone()
     now = datetime.now(timezone.utc)
     client = await temporal_client() if start_workflows else None
     if client is not None:
@@ -277,8 +279,11 @@ async def call_now_cli(ref: str) -> None:
     """`call-now [next|<slot>]`: brief the owner by phone now (research first if needed)."""
     from app import call_now, calendar_sync, interview_store, interview_worker
     from app.interview_types import brief_is_current
+    from app import owner
+    await owner.refresh(force=True)
     if not interview_worker.owner_phone():
-        sys.exit("VALR_OWNER_PHONE is not set.")
+        print("No phone on file: add it in VALR Settings › Calls & reminders.", file=sys.stderr)
+        raise SystemExit(1)
     now = datetime.now(timezone.utc)
     async with await connect() as connection:
         events = await calendar_sync.upcoming(connection, now - timedelta(minutes=30), now + timedelta(days=8))
@@ -360,7 +365,8 @@ async def main() -> None:
     from app import notifications, phone_recordings
     reports = asyncio.create_task(post_call.loop(connect)) if post_call.enabled() else None
     # The bell's Telegram side (held items at 08:00, the 09:00 digest) and phone recordings.
-    background = [asyncio.create_task(notifications.loop(connect))]
+    from app import owner  # The owner's profile (name, zone, phone), re-read every minute.
+    background = [asyncio.create_task(notifications.loop(connect)), asyncio.create_task(owner.keep_fresh())]
     if phone_recordings.enabled():
         background.append(asyncio.create_task(phone_recordings.loop(connect)))
     try:

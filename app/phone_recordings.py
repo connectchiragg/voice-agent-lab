@@ -362,9 +362,14 @@ def strip_phones(text: str) -> str:
     return " ".join(PHONE_LIKE.sub(" ", text or "").split())
 
 
+def owner_zone_name() -> str:
+    from app import owner
+    return owner.zone_name()
+
+
 def from_filename(filename: str, zone: str = "") -> tuple[str, datetime | None]:
     """'Riya Sen 2026-10-17 14-30-12.m4a' -> ('Riya Sen', 2026-10-17 14:30:12 local). A name made
-    only of digits (a phone number) becomes ''. Times are local (ASSISTANT_TIMEZONE)."""
+    only of digits (a phone number) becomes ''. Times are local (the owner's time zone)."""
     from zoneinfo import ZoneInfo
     stem = os.path.splitext(os.path.basename(filename or ""))[0][:200]
     when = None
@@ -374,7 +379,7 @@ def from_filename(filename: str, zone: str = "") -> tuple[str, datetime | None]:
         try:
             local = datetime(int(g["y"] or g["y2"]), int(g["m"] or g["m2"]), int(g["d"] or g["d2"]),
                              int(g["H"] or 0), int(g["M"] or 0), int(g["S"] or 0))
-            when = local.replace(tzinfo=ZoneInfo(zone or os.getenv("ASSISTANT_TIMEZONE", "Asia/Kolkata")))
+            when = local.replace(tzinfo=ZoneInfo(zone or owner_zone_name()))
             stem = stem[:match.start()] + " " + stem[match.end():]
         except ValueError:
             when = None
@@ -793,7 +798,8 @@ def candidate_name() -> str:
         from app.profile.config import settings
         return settings().candidate_name
     except Exception:  # noqa: BLE001
-        return os.getenv("VALR_CANDIDATE_NAME", "").strip()
+        from app import owner
+        return owner.recording_name()
 
 
 async def loop(connect: Callable[[], Any], stop: asyncio.Event | None = None) -> None:

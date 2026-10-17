@@ -37,7 +37,7 @@ from temporalio.client import Client
 from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
 from temporalio.service import RPCError
 
-from app import (calendar_sync, google_oauth, interview_store, interview_types, research_jobs,
+from app import (calendar_sync, google_oauth, interview_store, interview_types, owner, research_jobs,
                  telegram_api)
 from app.interview_types import (Person, SlotEvent, attendee_role, company_key, group_blocks,
                                  people, slot_workflow_id)
@@ -59,15 +59,17 @@ def owner_emails() -> set[str]:
 
 
 def owner_phone() -> str:
-    return os.getenv("VALR_OWNER_PHONE", "").strip()
+    """The owner's phone now (app/owner.py: the Profile's, else VALR_OWNER_PHONE)."""
+    return owner.phone()
 
 
 def owner_key() -> str:
-    return f"tel:{owner_phone()}" if owner_phone() else ""
+    """The stable owner key: caller memory, limits and workflows survive a new number."""
+    return owner.KEY
 
 
 def zone() -> ZoneInfo:
-    return ZoneInfo(os.getenv("ASSISTANT_TIMEZONE", "Asia/Kolkata"))
+    return owner.zone()
 
 
 def clock(moment: datetime) -> str:

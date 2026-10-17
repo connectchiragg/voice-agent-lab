@@ -377,7 +377,7 @@ async def call_me_now(request: Request) -> JSONResponse:
     from app import call_now
     from app.interview_worker import owner_key, owner_phone
     if not owner_phone():
-        raise HTTPException(503, "VALR_OWNER_PHONE is not set.")
+        raise HTTPException(409, "Add your phone in Settings first: VALR has no number to call.")
     now = datetime.now(timezone.utc)
     async with research.pool.connection() as connection:
         await calendar_sync.setup(connection)

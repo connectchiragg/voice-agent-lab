@@ -248,6 +248,8 @@ async def lifespan(conninfo: Callable[[], str]) -> AsyncIterator[None]:
         await pool.open(wait=True, timeout=5)
         async with pool.connection() as connection:
             await research_jobs.setup(connection)
+            from app import owner  # The owner's profile into the cache (app/owner.py).
+            await owner.refresh(connection, force=True)
     except Exception as error:
         logger.warning("Postgres unavailable for VALR research (%s); research is off.",
                        type(error).__name__)
