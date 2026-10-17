@@ -290,6 +290,28 @@ def test_place_call_only_dials_the_number_that_asked():
             PlaceCallInput("callback-abc", 1, CALLER, "+15550009999", "x")))
 
 
+def test_place_call_rings_the_owners_current_number(monkeypatch):
+    from app import owner
+    dialled = []
+
+    def telnyx(request):
+        dialled.append(json.loads(request.content)["to"])
+        return httpx.Response(200, json={"data": {"call_control_id": "cc-1"}})
+    activities = callback_worker.Activities(None, DialSettings("key"), httpx.AsyncClient(
+        transport=httpx.MockTransport(telnyx)))
+    monkeypatch.setattr(owner, "refresh", lambda *a, **k: asyncio.sleep(0))
+    owner.apply({"phone_e164": "+919800000002", "legacy_keys": ["tel:+919800000001"]})
+    try:
+        for key in (owner.KEY, "tel:+919800000001"):  # A workflow from before the stable key too.
+            assert asyncio.run(activities.place_call(PlaceCallInput("briefing-x", 1, key, "+919800000001", "x"))) == "cc-1"
+        assert dialled == ["+919800000002", "+919800000002"]
+        owner.apply({"phone_removed": True})
+        with pytest.raises(ApplicationError, match="no phone"):
+            asyncio.run(activities.place_call(PlaceCallInput("briefing-x", 2, owner.KEY, "", "x")))
+    finally:
+        owner.reset()
+
+
 # Webhooks for a callback's call.
 
 def callback_event(kind, event_id, **payload):

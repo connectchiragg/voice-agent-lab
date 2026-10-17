@@ -22,7 +22,7 @@ document.querySelector("[data-theme-toggle]")?.addEventListener("click", () => {
 });
 
 // Links from before the redesign: /valr#iv-slot-... -> /valr/interviews/slot-..., the
-// scorecard anchors in leads and Telegram post-call reports (/valr#past-<provider>-<id>) ->
+// scorecard anchors in leads and older post-call reports (/valr#past-<provider>-<id>) ->
 // /valr/interviews/past/<provider>-<id>, and the old sections -> their pages.
 const OLD_SECTIONS = {"#performance": "/valr/progress", "#upcoming": "/valr/interviews", "#setup": "/valr/settings",
                       "#notetakers": "/valr/settings#notetakers", "#system": "/valr/settings#advanced"};

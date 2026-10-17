@@ -1,6 +1,6 @@
 # VALR on your iPhone: the Home Screen app and lock-screen notifications
 
-VALR can live on your iPhone's Home Screen like an app. Once it's there, it can send real notifications to your lock screen, so you can turn off the Telegram alerts if you like.
+VALR can live on your iPhone's Home Screen like an app. Once it's there, it can send real notifications to your lock screen, and every alert also stays in the bell.
 
 Every job email and update that shows in VALR's bell also comes to your phone. The ones that need you (an offer, an interview invite, a recruiter asking for something, a take-home) say **Action needed**. Notifications never show pay figures, phone numbers or email addresses.
 
@@ -20,15 +20,13 @@ Every job email and update that shows in VALR's bell also comes to your phone. T
 7. Tap **Enable notifications**. iPhone asks *"VALR" Would Like to Send You Notifications*: tap **Allow**.
 8. The card now says **On for this iPhone**. Tap **Send test**. Within a few seconds you should get **VALR test notification ✅**, also on the lock screen.
 
-## Choose where alerts go
+## Alerts and devices
 
-In the same card, under **Where alerts go**:
+VALR has no other channel: alerts are the bell inside the app plus these phone notifications.
 
-1. **Telegram + phone push** (the default): both, as now.
-2. **Phone push only**: Telegram alerts and the 09:00 digest stop. Use this once the test notification works. Until at least one phone is subscribed, VALR keeps using Telegram, so nothing is lost.
-3. **Telegram only**: no phone notifications.
-
-**Quiet hours** (23:00–08:00, in the Telegram alerts card) hold phone notifications too, except an interview in the next 12 hours. Held ones arrive at 08:00.
+1. **Settings › Notifications › Alerts**: immediate alerts (one push each), the daily digest (one push at 09:00, or the time you pick) and quiet hours (23:00–08:00 by default, also editable). Quiet hours hold notifications except an interview in the next 12 hours; held ones arrive when they end. **Send a sample digest** shows what the digest looks like.
+2. **Devices** lists every phone or browser that gets notifications. **Send a test** checks one; **Remove** stops a lost or old phone, from any device.
+3. With no device subscribed, everything stays in the bell and Settings says **Phone notifications are off**.
 
 ## Good to know
 
@@ -54,6 +52,5 @@ A separate Home Screen button, **Send recordings to VALR**, sends all your saved
 2. **Add them to `.env` on the VM:** `VALR_VAPID_PUBLIC`, `VALR_VAPID_PRIVATE` and `VALR_VAPID_SUBJECT` (`mailto:` and your owner address). Both the app and the research worker read `.env`; the worker sends most notifications.
    - Keep the private key secret. Never commit it.
    - New keys mean every phone must tap **Enable notifications** again.
-3. **Optional:** `VALR_NOTIFY_DELIVERY` (`both`, `push` or `telegram`) sets the starting choice. Settings overrides it.
 4. **Cloudflare Access:** while Access still guards the site, add a **Bypass** policy (like the one for `/hooks/gmail`) for `/manifest.webmanifest`, `/sw.js` and `/static/icons/*`. iPhone fetches these without your login cookie when you add the app. They hold nothing private.
 5. **What's sent:** standard Web Push with VAPID. Each notification has a 12-hour TTL and `Urgency: high` for the Action needed ones, `normal` for the rest. Apple's push service delivers it. A subscription that Apple reports gone (404 or 410) is deleted.

@@ -11,7 +11,9 @@ moment the caller asks for it until it is answered, cancelled or given up:
 3. It waits for the app's Telnyx webhook to signal the result (`call_result`):
    answered, or no answer, busy, failed. (Voicemail counts as answered: Telnyx's
    answering-machine detection is a paid add-on, so it is not enabled.)
-4. Not answered: it waits RETRY_AFTER and tries again, MAX_ATTEMPTS in all.
+4. Not answered: that's final. Since 2026-10-17 (owner's choice, patch
+   `valr-callback-single-attempt`) a callback rings once (MAX_ATTEMPTS); callbacks
+   booked before keep LEGACY_MAX_ATTEMPTS, RETRY_AFTER apart.
 
 While it waits, `reschedule` (an update: the caller gets yes or no at once)
 moves the timer and `cancel` (a signal) ends it; `status` is a query.
@@ -32,7 +34,9 @@ from temporalio.exceptions import ActivityError
 from temporalio.worker.workflow_sandbox import SandboxedWorkflowRunner, SandboxRestrictions
 
 TASK_QUEUE = "voice-callbacks"
-MAX_ATTEMPTS = 3
+MAX_ATTEMPTS = 1
+LEGACY_MAX_ATTEMPTS = 3  # Callbacks started before the single-attempt patch.
+SINGLE_ATTEMPT_PATCH = "valr-callback-single-attempt"
 RETRY_AFTER = timedelta(minutes=15)
 MAX_DIALS_PER_DAY = 5  # All callers together, per UTC day.
 # From dialling to the webhook's answer or hangup. Telnyx rings for
@@ -196,6 +200,8 @@ class CallbackWorkflow:
         self.status = CallbackStatus("scheduled", request.due_at_utc,
                                      request.reason[:MAX_REASON_CHARS], request.timezone)
         self.quiet_hours = request.quiet_hours
+        # Patched: callbacks already waiting replay without the marker and keep three tries.
+        attempts = MAX_ATTEMPTS if workflow.patched(SINGLE_ATTEMPT_PATCH) else LEGACY_MAX_ATTEMPTS
         try:
             self.due = parse_utc(request.due_at_utc)
             validate_due(self.due, workflow.now(), request.timezone, self.quiet_hours)
@@ -219,8 +225,8 @@ class CallbackWorkflow:
                 return self.finish("completed")
             if self.cancelled:
                 return self.finish("cancelled")
-            if attempt.number >= MAX_ATTEMPTS:
-                return self.finish("failed", f"no answer after {MAX_ATTEMPTS} attempts")
+            if attempt.number >= attempts:
+                return self.finish("failed", "no answer" if attempts == 1 else f"no answer after {attempts} attempts")
             self.set_due(workflow.now() + RETRY_AFTER)
             self.status.state = "retry_wait"
 

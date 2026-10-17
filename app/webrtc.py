@@ -14,7 +14,7 @@ Per call:
 - context: the VALR page's inline "Talk here" panel (static/valr-call.js) sends an
   `intent`. The call then gets the phone call's context: "brief_next" loads the brief "Call
   me" would give (app/interviews.prepare_web_call), else general owner mode, and VALR
-  speaks first. The owner's browser key is his phone key (memory.owner_alias): one memory.
+  speaks first. The owner's browser key is his phone key (app/owner.canonical): one memory.
   Every offer needs the owner and the page's CSRF token (valr_dashboard.action_owner);
   `POST /webrtc/hangup {call_id}` ends a call at once.
 - control: a data channel named "control" carries the same events as the

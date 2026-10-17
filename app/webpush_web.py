@@ -7,10 +7,13 @@ in some cases, and they hold nothing private.
   so a deploy reaches the phone on its next launch.
 
 Owner only (the session or Access login; POSTs also need the CSRF token, same origin, JSON):
-- `GET /valr/api/push`: {configured, public_key, devices, delivery}.
+- `GET /valr/api/push`: {configured, public_key, devices (a count), device_list: [{id, label,
+  key, added_at, last_ok_at, failures}]}. `key` is a short hash of the endpoint, so the page
+  can mark "this device"; endpoints never leave the server.
 - `POST /valr/api/push/subscribe` {endpoint, keys: {p256dh, auth}}: stores this device.
 - `POST /valr/api/push/unsubscribe` {endpoint}: forgets it.
-- `POST /valr/api/push/test`: "VALR test notification ✅" to every subscribed device.
+- `POST /valr/api/push/remove` {id}: forgets any device (a lost or old phone).
+- `POST /valr/api/push/test` {id?}: "VALR test notification ✅" to every device, or one.
 """
 from __future__ import annotations
 
@@ -20,7 +23,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from app import notifications, research, valr_dashboard, webpush
+from app import research, valr_dashboard, webpush
 
 router = APIRouter()
 NO_CACHE = valr_dashboard.NO_CACHE
@@ -76,12 +79,10 @@ def pool():
 async def state(connection) -> dict:
     store = webpush.Store(connection)
     await store.setup()
-    switches_store = notifications.Store(connection)
-    await switches_store.setup()
-    switches = await switches_store.switches()
+    rows = await store.all()
     key = webpush.public_key()
-    return {"ok": True, "configured": bool(key), "public_key": key, "devices": await store.count(),
-            "delivery": switches.delivery}
+    return {"ok": True, "configured": bool(key), "public_key": key, "devices": len(rows),
+            "device_list": [webpush.device_view(row) for row in rows]}
 
 
 @router.get("/valr/api/push")
@@ -140,6 +141,33 @@ async def unsubscribe(request: Request) -> JSONResponse:
         return JSONResponse(await state(connection), headers=NO_CACHE)
 
 
+class DeviceRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    id: int = Field(ge=1)
+
+
+class TestRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    id: int | None = Field(default=None, ge=1)
+
+
+@router.post("/valr/api/push/remove")
+async def remove(request: Request) -> JSONResponse:
+    """Forget one device (any of them: a lost phone can be removed from another)."""
+    await valr_dashboard.action_owner(request)
+    try:
+        body = DeviceRequest.model_validate_json(await request.body())
+    except ValidationError:
+        raise HTTPException(400, 'Expected {"id": <device id>}.') from None
+    async with pool().connection() as connection:
+        store = webpush.Store(connection)
+        await store.setup()
+        if not await store.delete(body.id):
+            raise HTTPException(404, "That device isn't subscribed any more.")
+        out = await state(connection)
+    return JSONResponse(out | {"message": "Device removed. It gets no more notifications."}, headers=NO_CACHE)
+
+
 TEST = webpush.payload("VALR test notification ✅", "Phone notifications work. Tap to open VALR.",
                        "/valr/settings#phone-push", "valr-test")
 
@@ -147,13 +175,18 @@ TEST = webpush.payload("VALR test notification ✅", "Phone notifications work. 
 @router.post("/valr/api/push/test")
 async def test(request: Request) -> JSONResponse:
     await valr_dashboard.action_owner(request)
+    raw = await request.body()
+    try:
+        body = TestRequest.model_validate_json(raw or b"{}")
+    except ValidationError:
+        raise HTTPException(400, 'Expected {} or {"id": <device id>}.') from None
     async with pool().connection() as connection:
         sender = await webpush.sender(connection)
         if sender is None:
             raise HTTPException(503, "Phone push isn't set up on the server yet (VALR_VAPID_* keys).")
         if not await sender.subscribers():
             raise HTTPException(409, "No device is subscribed yet: tap Enable notifications first.")
-        result = await sender.send(TEST)
+        result = await sender.send(TEST, only=body.id)
         out = await state(connection)
     message = (f"Sent to {result.delivered} device{'s' if result.delivered != 1 else ''}." if result.delivered
                else "Not delivered: the push service refused it. Try Turn off, then Enable again.")
