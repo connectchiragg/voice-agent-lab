@@ -45,7 +45,8 @@ RPC_TIMEOUT = timedelta(seconds=3)  # Within the tools' own 5 s limit.
 
 
 def default_zone() -> str:
-    return os.getenv("ASSISTANT_TIMEZONE", "Asia/Kolkata")
+    from app import owner
+    return owner.zone_name()
 
 
 def quiet_hours() -> str:
@@ -166,7 +167,10 @@ UNAVAILABLE = {"error": "Callbacks are unavailable right now."}
 
 
 def phone_of(caller_key: str | None) -> str | None:
-    return caller_key.removeprefix("tel:") if caller_key and caller_key.startswith("tel:") else None
+    """The number a callback for this caller rings: the owner's current phone for the owner
+    (app/owner.py; None when he has none), else the caller's own "tel:" number."""
+    from app import owner
+    return owner.dial_number(caller_key)
 
 
 def caller_zone(name: str | None) -> ZoneInfo:

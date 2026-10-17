@@ -487,7 +487,8 @@ def default_resolver(owner_emails: set[str]) -> Resolver:
         limits = research_jobs.Limits.from_env()
         return await research_jobs.month_spend(connection) < limits.month_usd
 
-    candidate = os.getenv("VALR_CANDIDATE_NAME", "") or os.getenv("VALR_OWNER_NAME", "")
+    from app import owner
+    candidate = owner.recording_name()
     return Resolver(client=lambda: llm_gateway.shared().client(timeout=60), month_ok=month_ok,
                     owner_emails=owner_emails, candidate=candidate)
 

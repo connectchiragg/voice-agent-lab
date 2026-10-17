@@ -144,7 +144,8 @@ def flag(name: str, default: str = "1") -> bool:
 
 
 def zone() -> ZoneInfo:
-    return ZoneInfo(os.getenv("ASSISTANT_TIMEZONE", "Asia/Kolkata"))
+    from app import owner
+    return owner.zone()
 
 
 def clock_of(text: str, default: time) -> time:
@@ -638,7 +639,7 @@ CALENDAR_CHANGES = ("added", "moved", "cancelled")
 
 
 def when_text(start_utc: str) -> str:
-    """"Mon 19 Oct, 6:00 PM" in ASSISTANT_TIMEZONE."""
+    """"Mon 19 Oct, 6:00 PM" in the owner's time zone."""
     at = local(datetime.fromisoformat(start_utc))
     return f"{at:%a} {at.day} {at:%b}, {at.strftime('%I:%M %p').lstrip('0')}"
 

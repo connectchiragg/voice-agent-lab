@@ -90,9 +90,18 @@ def caller_key_from_email(email: object) -> str | None:
 
 async def web_caller_key(headers: Mapping[str, str]) -> str | None:
     """The browser caller: the signed-in VALR owner (app/auth), else the Cloudflare Access
-    user from a verified token only."""
+    user from a verified token only. The owner's emails become the stable owner key, so the
+    browser and the phone share one memory (app/owner.py)."""
+    from app import owner
     from app.auth import signed_in_email
-    return caller_key_from_email(signed_in_email() or await access.verified_email(headers))
+    return owner.canonical(caller_key_from_email(signed_in_email() or await access.verified_email(headers)))
+
+
+def call_caller_key(number: object) -> str | None:
+    """A phone call's caller key: caller_key_from_phone, with the owner's current number as
+    the stable owner key (app/owner.canonical)."""
+    from app import owner
+    return owner.canonical(caller_key_from_phone(number))
 
 
 # Storage.
@@ -665,7 +674,8 @@ def render_block(memory: CallerMemory, max_tokens: int = MAX_BLOCK_TOKENS) -> st
     profile first.
     """
     budget = max_tokens * CHARS_PER_TOKEN
-    zone = ZoneInfo(os.getenv("ASSISTANT_TIMEZONE", "Asia/Kolkata"))
+    from app import owner
+    zone = owner.zone()
     name = plausible_name(memory.display_name)
     head = [f"Name: {name}."] if name else []
     head.append(f"Last call: {memory.last_seen.astimezone(zone):%d %B %Y}.")

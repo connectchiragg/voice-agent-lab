@@ -119,7 +119,8 @@ async def delete(connection: Any, provider: str, external_id: str) -> None:
 # Shown to the owner.
 
 def owner_names() -> set[str]:
-    names = {os.getenv(n, "").strip().lower() for n in ("VALR_CANDIDATE_NAME", "VALR_OWNER_NAME")} - {""}
+    from app import owner
+    names = owner.names()
     return names | {n.split()[0] for n in names}
 
 

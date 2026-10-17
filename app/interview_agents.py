@@ -348,8 +348,8 @@ def classify_people(people: list[Person], evidence: str, meter: Meter,
 
 def owner() -> str:
     """The owner's first name for the briefing prompt (as app/interviews.owner_name)."""
-    name = os.getenv("VALR_OWNER_NAME", "").strip() or os.getenv("VALR_CANDIDATE_NAME", "").strip()
-    return name.split()[0] if name else "the candidate"
+    from app import owner as profile
+    return profile.first_name("the candidate")
 
 
 SLOT_HOW = """You prepare a phone briefing for {owner}, a candidate, about one upcoming interview.

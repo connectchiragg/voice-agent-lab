@@ -61,10 +61,30 @@ SPOKEN_NAME = os.getenv("ASSISTANT_SPOKEN_NAME", "Valor")
 NAME_PATTERN = re.compile(rf"\b{re.escape(ASSISTANT_NAME)}\b")
 
 
+_owner_pattern: tuple[str, str, re.Pattern[str] | None] = ("", "", None)
+
+
+def owner_respelling() -> tuple[str, re.Pattern[str]] | None:
+    """The owner's first name and its respelling from the Profile page ("How to pronounce
+    your name", app/owner.py), as (respelling, pattern); None when none is set. Compiled once
+    per change: this runs on the realtime path."""
+    global _owner_pattern
+    from app import owner
+    say, name = owner.pronounce(), owner.first_name("")
+    if not say or not name:
+        return None
+    if _owner_pattern[:2] != (name, say):
+        _owner_pattern = (name, say, re.compile(rf"\b{re.escape(name)}\b"))
+    return say, _owner_pattern[2]  # type: ignore[return-value]
+
+
 def spoken(text: str) -> str:
-    """Text for the TTS: the displayed name replaced by its phonetic spelling, and the
-    respellings in PRONOUNCE."""
+    """Text for the TTS: the displayed name replaced by its phonetic spelling, the owner's
+    name by his respelling, and the respellings in PRONOUNCE."""
     text = NAME_PATTERN.sub(SPOKEN_NAME, text) if ASSISTANT_NAME != SPOKEN_NAME else text
+    mine = owner_respelling()
+    if mine is not None:
+        text = mine[1].sub(mine[0], text)
     if PRONOUNCE_PATTERN is None:
         return text
     return PRONOUNCE_PATTERN.sub(lambda match: PRONOUNCE[match.group(0)], text)

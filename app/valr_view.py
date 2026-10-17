@@ -829,7 +829,8 @@ async def collect(pool: Any, now: datetime | None = None) -> dict[str, Any]:
     view["performance"] = performance(perf)
     view["pay_target"] = target
     view["owner_name"] = owner_name()
-    view["setup"] = {"phone_on_file": bool(os.getenv("VALR_OWNER_PHONE", "").strip()),
+    from app import owner
+    view["setup"] = {"phone_on_file": bool(owner.phone()),
                      "test_call_done": view.pop("_briefed_ever", False),
                      "valr_number": valr_number()}
     return view
