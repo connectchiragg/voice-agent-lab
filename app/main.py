@@ -16,7 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from app import (access, agent, auth, callbacks, groq_api, interviews, leads_web, memory,
-                 notifications_web, phone_web, recordings, research, telegram_bot, telnyx, valr_dashboard, valr_hooks, webpush_web, webrtc)
+                 notifications_web, phone_web, recordings, research, telnyx, valr_dashboard, valr_hooks, webpush_web, webrtc)
 from app.notetakers import routes as notetaker_routes
 from app.valr_ui import routes as valr_routes
 from app.deepgram import AuraSpeaker, DeepgramSettings, FluxListener
@@ -134,7 +134,6 @@ app.include_router(telnyx.router)
 app.include_router(valr_dashboard.router)
 app.include_router(valr_routes.router)  # /valr/interviews, /valr/leads, ... (GET pages)
 app.include_router(valr_hooks.router)
-app.include_router(telegram_bot.router)
 app.include_router(notetaker_routes.router)
 app.include_router(leads_web.router)
 app.include_router(notifications_web.router)  # The bell: /valr/api/notifications

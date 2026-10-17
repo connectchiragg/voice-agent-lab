@@ -1,6 +1,6 @@
 """Call the owner now with a briefing for one interview ("Call me now", and the admin CLI
 `python -m app.research_worker call-now [next|<slot>]`), or for a block's interviews
-(Telegram's [Call me now] and [In 10 min] buttons, `call_block_now`).
+(the heads-up's "tap for your briefing call" and Call me, `call_block_now`).
 
 An on-demand BlockCallWorkflow for that one interview, signalled at once (there is no call
 to wait for). If the interview's brief is not current, its slot workflow is asked to
@@ -52,7 +52,7 @@ async def call_block_now(client: Any, events: list[SlotEvent], todo: list[SlotEv
                          owner_key: str, phone_e164: str, label: str, job_usd: float = 0.40,
                          dials_per_day: int = 12, dial_at: datetime | None = None,
                          **rpc: Any) -> str:
-    """Call about these interviews now, or at `dial_at` (Telegram's "In 10 min").
+    """Call about these interviews now, or at `dial_at`.
 
     `todo`: the ones whose brief is not current; they research first (within the
     five-minute promise when calling now). Returns the call workflow's id."""

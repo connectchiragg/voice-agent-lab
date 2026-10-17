@@ -668,23 +668,14 @@ VALR_INTERVIEW_MONTH_USD; $0.40 per job, VALR_INTERVIEW_JOB_USD); briefing calls
 own 12 dials a day (VALR_BRIEFING_DIALS_PER_DAY), so callbacks cannot starve them.
 VALR_BRIEFING_DIAL=0 keeps everything but never dials; VALR_BRIEFINGS=0 turns the sweep off.
 
-**The Telegram heads-up** (owner's design, 2026-10-16) replaces the automatic dial: 30
-minutes before each block, VALR messages the owner's Telegram chat with the interviews'
-calendar titles and times (IST) and a one- or two-line teaser from public research only
-(the company researcher's summary, else the round's; never the brief, the email/recording
-part or pay; nothing usable leaves just the title and time), with three
-buttons: **📞 Call me now** (an on-demand briefing call, at once; research first if a brief
-is not current, within five minutes), **⏰ In 10 min** (the same, dialled ten minutes later,
-offered only while that is still five minutes before the interview), **Skip**. No reply,
-no call. The message is edited to show the outcome ("Called at 3:31 PM", "Skipped").
-The bot also answers `/next` and `/today` (time, title, status) and `/pause` / `/resume`
-(the dashboard's pause switch). `app/telegram_api.py` (Bot API, owner link, message),
-`app/telegram_bot.py` (the webhook `POST /hooks/telegram`: the `X-Telegram-Bot-Api-Secret-Token`
-must match TELEGRAM_WEBHOOK_SECRET; only the owner's private chat is served, linked once
-with a dashboard `/start <code>` (6 digits, 15 minutes, 5 tries, stored as an HMAC); anyone
-else gets one polite line). Blocks already waiting when this shipped switch at their T-30
-(`workflow.patched("valr-telegram-heads-up")` is checked there). VALR_AUTO_DIAL=1 brings
-back the automatic call below. Set-up: `deploy/install-telegram.sh`.
+**The heads-up** (owner's design, 2026-10-16; a phone push since 2026-10-17, when Telegram
+was removed) replaces the automatic dial: 30 minutes before each block, VALR adds one item
+to the bell and pushes it to the owner's phone (Web Push, `app/webpush.py`): "Nextiva
+interview in 30 min · Tap for your briefing call", opening that interview's page with the
+call ready. No tap, no call. With no phone subscribed the heads-up waits in the bell and
+Settings says phone notifications are off. Blocks already waiting when this shipped switch
+at their T-30 (`workflow.patched("valr-push-heads-up")` is checked there). The automatic
+call (Settings › Calls & reminders, or VALR_AUTO_DIAL=1) is the alternative.
 
 **The briefing call** (VALR_AUTO_DIAL=1, or on request) goes out once, 30 minutes before
 the block's first interview, and rings for 60 seconds (Telnyx `timeout_secs`); unanswered is final (the dashboard shows it).
@@ -696,14 +687,28 @@ calls in and asks ("brief me", "my next interview"), it is given on that call
 "Call me now" on the dashboard, or `python -m app.research_worker call-now [next|<slot>]`,
 calls him at once about his next interview (researching it first if needed).
 
+**Settings and Profile** (`app/valr_ui/settings.py`, `app/valr_ui/profile.py`, actions in
+`app/settings_web.py`). Settings: Finish setting up (all in-app), a profile summary,
+Connections (Google with both syncs, Sync now, Reconnect and Disconnect, which revokes the
+grant; the three notetaker cards with the providers' logos, state, account, last sync, Sync
+now, Replace key, Disconnect and how to get a key), Calls & reminders (your phone, masked as
++91 ••••• •4321, with change and remove; heads-up or automatic call; Pause for a day, a week
+or until resumed; VALR's own number), Notifications (alerts with editable digest and quiet
+hours, a sample digest, this device and every subscribed device), Call recordings (upload
+token on, rotated or off) and Data & account (the month's spend, export as a zip, delete
+with a typed DELETE, sign out of all devices). Profile, from the avatar menu: photo (square
+crop in the browser), display name, name in recordings, how to say it, time zone, all in
+`owner_profile` and read through `app/owner.py`, which falls back to the env. The owner's
+caller key is the stable "owner", so a new number keeps caller memory and workflows.
+
 **The VALR page** (valr.haciensus.com, `/valr`, behind Cloudflare Access; `app/valr_view.py`
 gathers, `app/valr_page.py` renders, `static/valr.js` adds the live parts). Written for a
 user who did not build VALR: plain words, every time as "11:15 AM IST" (ASSISTANT_TIMEZONE)
 with a relative "in 2 h 25 min". Top to bottom: what VALR does, the next briefing call and
 the three actions (call VALR now, pause or resume calls, sync the calendar); set-up steps
-until Google, a notetaker, Telegram, the phone number and a test call are done, each step a
-link or button that does it (Google consent, the notetaker key forms, a t.me link that sends
-the `/start` code, the phone check explained, a `tel:` link to VALR); the week's interviews,
+until Google, a notetaker, your phone, phone notifications and a test call are done, each
+step a link or button that does it (Google consent, the notetaker key forms, the phone
+form, the notification set-up, Talk in browser or Call my phone); the week's interviews,
 each opening a detail view (the briefing, who you're meeting, what this round is like,
 likely questions, the pay band against your target, a prep checklist, what your emails
 and past rounds say, the company); performance (scorecards out of 10, a trend with

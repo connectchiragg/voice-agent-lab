@@ -258,14 +258,27 @@ def performance_file(now: datetime) -> dict:
                            "pushback handling slipped over the last three rounds.")}
 
 
-def notetakers_view(states: dict) -> dict:
-    """The dashboard's notetaker status (app/notetakers.status_view's shape), no key anywhere."""
+def notetakers_view(states: dict, now: datetime | None = None) -> dict:
+    """The dashboard's notetaker status (app/notetakers.status_view's shape), no key anywhere.
+    A connected one has a made-up account, a sync an hour ago and two new recordings."""
     from app import notetakers
-    return {name: {"label": info["label"], "state": states.get(name, "not_connected"),
-                   "account": "", "connected_at": None, "last_ok_at": None, "can_store": True,
-                   "optional": bool(info.get("optional")),
-                   **{k: info[k] for k in ("key_label", "key_help", "gets", "video", "import")}}
-            for name, info in notetakers.INFO.items()}
+    now = now or datetime.now(timezone.utc)
+    out = {}
+    for name, info in notetakers.INFO.items():
+        if info.get("hidden"):
+            continue
+        state = states.get(name, "not_connected")
+        on = state in ("connected", "server", "refused")
+        out[name] = {"label": info["label"], "state": state,
+                     "account": "owner@example.com" if state == "connected" else "",
+                     "connected_at": None, "last_ok_at": (now - timedelta(hours=1 if state != "refused" else 72)).isoformat() if on else None,
+                     "new_7d": 2 if state in ("connected", "server") else 0,
+                     "webhook": ({"configured": name == "fathom", "last_at": (now - timedelta(hours=2)).isoformat()
+                                  if name == "fathom" else None} if info.get("webhook_env") else None),
+                     "can_store": True, "optional": bool(info.get("optional")),
+                     **{k: info[k] for k in ("key_label", "key_help", "gets", "video", "import")},
+                     "key_url": info.get("key_url", "")}
+    return out
 
 
 def sample_recording(found: bool = True) -> dict:
@@ -289,7 +302,7 @@ def sample_view(now: datetime | None = None, paused: bool = False, scenario: str
                 extras: bool = False) -> dict:
     """scenario: full (a busy week), empty (first run: nothing connected, no data) or error
     (the calendar store and Temporal are down). extras: add the other branches' data
-    (notetaker status, a linked Telegram; tests/valr_sample_extras.py)."""
+    (notetaker status; tests/valr_sample_extras.py)."""
     now = (now or datetime.now(timezone.utc)).replace(second=0, microsecond=0)
     first = now + timedelta(hours=2, minutes=40)
     tomorrow = (now + timedelta(days=1)).replace(hour=9, minute=30)
@@ -394,7 +407,7 @@ def sample_view(now: datetime | None = None, paused: bool = False, scenario: str
                   "limits": valr_view.limits_view(research_jobs.Limits()),
                   "interview_limits": valr_view.limits_view(research_jobs.Limits(30, 30, 40.0, 0.40))},
         "jobs": [valr_view.job_view(job) for job in jobs_recent],
-        "dials_paused": {"enabled": paused, "updated_at": None}, "dial_env": True,
+        "dials_paused": {"enabled": paused, "updated_at": None, "until": None}, "dial_env": True,
         "blocks": blocks,
         "connections": {
             "google": {"state": "connected", "account": "owner@example.com", "age_days": 6.2,
@@ -405,15 +418,21 @@ def sample_view(now: datetime | None = None, paused: bool = False, scenario: str
             "calendar": valr_view.calendar_view({"channel_id": "c", "channel_expires": now + timedelta(days=5),
                                                  "source": "google", "last_sync_at": now - timedelta(minutes=7),
                                                  "last_error": None}, now),
+            "gmail": {"last_sync_at": valr_view.iso(now - timedelta(minutes=9)), "last_error": ""},
+            "push": {"configured": True, "devices": [
+                {"id": 1, "label": "iPhone", "key": "0123456789abcdef", "added_at": valr_view.iso(now - timedelta(days=12)),
+                 "last_ok_at": valr_view.iso(now - timedelta(hours=5)), "failures": 0}]},
         },
+        "notify": {"immediate": True, "digest": True, "quiet": True, "digest_at": "09:00",
+                   "quiet_start": "23:00", "quiet_end": "08:00"},
         "dials": {"briefing": {"used": 2, "limit": 12}, "callback": {"used": 1, "limit": 5}},
         "performance": valr_view.performance(_extras(performance_file(now)) if extras else performance_file(now)),
         "post_call": {"pending": 1, "queued": 0, "failed": 0, "recent": [
-            {"title": "Nimbus · system design", "status": "pending_telegram",
+            {"title": "Nimbus · system design", "status": "queued",
              "updated_at": (now - timedelta(hours=3)).isoformat()},
             {"title": "Tessel · technical", "status": "sent", "updated_at": (now - timedelta(days=4)).isoformat()}]},
         "pay_target": {"min": 50, "max": 65, "unit": "LPA", "currency": "INR"},
-        "mode": "telegram",  # The default: a Telegram heads-up 30 minutes before, no automatic call.
+        "mode": "heads_up",  # The default: a push heads-up 30 minutes before, no automatic call.
         "reach": {"auto_dial": False, "source": "default", "default_auto_dial": False},
         "setup": {"phone_on_file": True, "test_call_done": True, "valr_number": "+12288888007"},
     }
@@ -428,16 +447,14 @@ def sample_view(now: datetime | None = None, paused: bool = False, scenario: str
                        "last_ok_at": None, "configured": True},
             "fathom": {"configured": False},
             "notetakers": notetakers_view({}),
-            "calendar": valr_view.calendar_view({}, now)}
+            "calendar": valr_view.calendar_view({}, now), "gmail": {}, "push": {"configured": True, "devices": []}}
     elif scenario == "error":
         view.update(blocks=[], errors=["timeline"],
                     dials={"briefing": {"used": None, "limit": 12}, "callback": {"used": None, "limit": 5}})
         view["connections"]["google"]["state"] = "reconnect_needed"
         view["connections"]["calendar"]["last_error"] = "HTTP 401 from Google Calendar"
     if extras and scenario == "full":
-        view["connections"]["notetakers"] = notetakers_view({"fathom": "connected"})
-        view["connections"]["telegram"] = {"configured": True, "linked": True, "username": "sample_owner",
-                                           "linked_at": valr_view.iso(now - timedelta(days=2))}
+        view["connections"]["notetakers"] = notetakers_view({"fathom": "connected"}, now)
     view["next_call"] = valr_view.next_call(view["blocks"], now, paused)
     return view
 

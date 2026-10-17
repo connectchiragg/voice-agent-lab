@@ -19,8 +19,8 @@ Settings (in .env, read by the app and by the research worker, which sends most 
 Generate them once with `python -m app.webpush keys`. Changing the keys invalidates every
 subscription: each phone must tap "Enable notifications" again.
 
-Payloads follow the Telegram rules (app/notifications.scrub): no pay figures, phone numbers
-or email addresses, and short. Nothing here logs a title, a company or an endpoint.
+Payloads are scrubbed (app/notifications.scrub): no pay figures, phone numbers or email
+addresses, and short. Nothing here logs a title, a company or an endpoint.
 """
 from __future__ import annotations
 
@@ -112,6 +112,20 @@ def valid_endpoint(endpoint: str) -> bool:
             and any(host == h.lstrip(".") or host.endswith(h) for h in PUSH_HOSTS))
 
 
+def endpoint_key(endpoint: str) -> str:
+    """A short hash of a subscription's endpoint: the page compares it with its own to mark
+    "this device"; the endpoint itself never leaves the server."""
+    return hashlib.sha256((endpoint or "").encode()).hexdigest()[:16]
+
+
+def device_view(row: dict[str, Any]) -> dict[str, Any]:
+    """One subscribed device for Settings: no endpoint, no keys."""
+    iso = lambda moment: moment.astimezone(timezone.utc).isoformat() if moment else None  # noqa: E731
+    return {"id": int(row["id"]), "label": device_label(row.get("user_agent") or ""),
+            "key": endpoint_key(row.get("endpoint") or ""), "added_at": iso(row.get("created_at")),
+            "last_ok_at": iso(row.get("last_ok_at")), "failures": int(row.get("failures") or 0)}
+
+
 def device_label(user_agent: str) -> str:
     ua = user_agent or ""
     if "iPhone" in ua:
@@ -158,8 +172,9 @@ class Store:
     async def failed(self, sub_id: int) -> None:
         await self.c.execute("UPDATE push_subscriptions SET failures = failures + 1 WHERE id = %s", (sub_id,))
 
-    async def delete(self, sub_id: int) -> None:
-        await self.c.execute("DELETE FROM push_subscriptions WHERE id = %s", (sub_id,))
+    async def delete(self, sub_id: int) -> int:
+        cursor = await self.c.execute("DELETE FROM push_subscriptions WHERE id = %s", (sub_id,))
+        return int(getattr(cursor, "rowcount", 0) or 0)
 
 
 # Payloads (pure).
@@ -211,13 +226,16 @@ class Sender:
     async def subscribers(self) -> int:
         return await self.store.count()
 
-    async def send(self, message: dict[str, Any], now: datetime | None = None) -> Result:
+    async def send(self, message: dict[str, Any], now: datetime | None = None, only: int | None = None) -> Result:
+        """To every device, or `only` the one with that id."""
         from pywebpush import WebPushException
         now = now or datetime.now(timezone.utc)
         data = json.dumps(message, ensure_ascii=False, separators=(",", ":"))
         headers = {"Urgency": "high" if message.get("urgent") else "normal"}
         result = Result()
         for sub in await self.store.all():
+            if only is not None and sub["id"] != only:
+                continue
             info = {"endpoint": sub["endpoint"], "keys": {"p256dh": sub["p256dh"], "auth": sub["auth"]}}
             try:
                 await asyncio.to_thread(self._post(), subscription_info=info, data=data,

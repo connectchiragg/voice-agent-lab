@@ -421,12 +421,6 @@ anonymised caller hashes, never numbers.
 - Cloudflare Access: `valr.haciensus.com/hooks/gcal` is bypassed (Google posts there);
   everything else on the host, including `/oauth/google/*` and `/valr/context`, stays
   behind Access.
-- Telegram heads-up: `valr.haciensus.com/hooks/telegram` (exact path, POST) is bypassed
-  too (Telegram cannot log in); the app refuses any request without the matching
-  `X-Telegram-Bot-Api-Secret-Token` and serves only the owner's linked chat. Run
-  `deploy/install-telegram.sh` on the Mac (prompts for the @BotFather token, generates
-  TELEGRAM_WEBHOOK_SECRET, writes both to `.env`, restarts the app and the worker, calls
-  setWebhook), then link the chat with the dashboard's `/start <code>`.
 - Notetakers (app/notetakers): keys are pasted on the dashboard ("Get set up") and stored
   Fernet-encrypted in Postgres with VALR_TOKEN_KEY; nothing to deploy for that. Webhooks
   need two more exact-path POST bypasses on `valr.haciensus.com`, each verified in the

@@ -331,7 +331,7 @@ To check: `sudo docker exec voice-research python -m app.lead_worker stats` (cou
 
 **When the Gmail token expires.** If the refresh token is refused (`invalid_grant`: the
 OAuth app's Testing mode lasts 7 days, or access was revoked), the sync stops. VALR sends
-the owner's linked Telegram chat one message per expiry: "Gmail disconnected — reconnect:
+the owner's bell (and phone) one item per expiry: "Gmail disconnected — reconnect:
 https://valr.haciensus.com/oauth/google/start". A reconnect followed by another expiry
 sends one more message.
 
@@ -378,7 +378,7 @@ per email that reaches it:
 | `tests/test_lead_classify.py` | heuristics on the eval set, reply parsing, contacts | |
 | `tests/test_leads_web.py` | OIDC with generated RSA keys, the webhook's answers, owner-only page and JSON, CSRF, the correction endpoint | |
 | `tests/test_lead_workflow.py` | pokes and the refresh | Temporal test server |
-| `tests/test_lead_worker.py` | calendar rules, scorecard anchors; backfill, history, recovery, his own replies, budget deferral, watch, encrypted snippet, no content in the log, corrections storage, the Telegram alert (once per expiry) | fake Gmail, fake model, Postgres via `VALR_TEST_POSTGRES` |
+| `tests/test_lead_worker.py` | calendar rules, scorecard anchors; backfill, history, recovery, his own replies, budget deferral, watch, encrypted snippet, no content in the log, corrections storage, the reconnect alert in the bell (once per expiry) | fake Gmail, fake model, Postgres via `VALR_TEST_POSTGRES` |
 | `tests/test_leads_temperature.py` | the band archetypes, counts, ball in court | |
 | `tests/leads-globe.test.mjs` | bands, colours (colour-blind check on static/leads.css), layout, label collisions, tooltip | `node --test` |
 

@@ -31,7 +31,7 @@ logger = logging.getLogger("uvicorn.error")
 
 # Public: each verifies its own signature or secret, or is part of signing in.
 PUBLIC_PATHS = frozenset({
-    "/hooks/gcal", "/hooks/gmail", "/hooks/fathom", "/hooks/granola", "/hooks/telegram",
+    "/hooks/gcal", "/hooks/gmail", "/hooks/fathom", "/hooks/granola",
     "/hooks/recording-upload",  # The iPhone Shortcut: its own bearer token (app/phone_web.py).
     "/telnyx/webhook", "/ws/telnyx",
     "/healthz",

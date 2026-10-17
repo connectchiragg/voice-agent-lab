@@ -107,23 +107,23 @@ def globe_panel(leads: dict[str, Any]) -> str:
 
 
 def reminder_line(block: dict[str, Any], view: dict[str, Any], clock: Clock) -> str:
-    """"Reminder on Telegram at 2:15 AM · Pause" (or the briefing call, or paused)."""
-    telegram = view.get("mode") == "telegram"
+    """"Heads-up at 2:15 AM · Pause" (or the briefing call, or paused)."""
+    heads_up = view.get("mode") != "call"
     paused = (view.get("dials_paused") or {}).get("enabled")
-    tg = (view.get("connections") or {}).get("telegram") or {}
+    push = (view.get("connections") or {}).get("push") or {}
     if paused:
         return (f'<p class="now-reminder">{icon("pause", 15)}<span>Reminders are paused</span>'
                 '<button class="link-btn" type="button" data-action="dials" data-paused="false">Resume</button></p>')
-    if telegram and not tg.get("linked"):
-        return (f'<p class="now-reminder warn">{icon("send", 15)}<span>Connect Telegram to get a reminder</span>'
-                '<a class="link-btn" href="/valr/settings#telegram">Connect</a></p>')
-    if not telegram and not view.get("dial_env"):
+    if heads_up and push.get("configured") and not push.get("devices"):
+        return (f'<p class="now-reminder warn">{icon("bell", 15)}<span>Turn on phone notifications to get the heads-up</span>'
+                '<a class="link-btn" href="/valr/settings#phone-push">Enable</a></p>')
+    if not heads_up and not view.get("dial_env"):
         return ""
     at = block.get("call_at") or (view.get("next_call") or {}).get("at")
     if not at:
         return ""
-    what = "Reminder on Telegram" if telegram else "Briefing call"
-    return (f'<p class="now-reminder">{icon("send" if telegram else "phone", 15)}<span>{what} at {clock.time(at, zone=False)}</span>'
+    what = "Heads-up on your phone" if heads_up else "Briefing call"
+    return (f'<p class="now-reminder">{icon("bell" if heads_up else "phone", 15)}<span>{what} at {clock.time(at, zone=False)}</span>'
             '<button class="link-btn" type="button" data-action="dials" data-paused="true">Pause</button></p>')
 
 

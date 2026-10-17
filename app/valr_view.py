@@ -22,8 +22,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from app import (calendar_sync, google_oauth, interview_store, interviews, research_jobs,
-                 telegram_api)
+from app import calendar_sync, google_oauth, interview_store, interviews, research_jobs
 from app.valr_ui import contracts
 from app.interview_types import (TOOL_DOMAINS, SlotEvent, attendee_role, group_blocks, people,
                                  slot_workflow_id)
@@ -702,31 +701,41 @@ async def timeline(connection: Any, now: datetime, paused: bool) -> list[dict[st
         companies[ckey] = await interview_store.company(connection, ckey)
     blocks = build_blocks(events, recorded, slots, jobs, companies, owner_emails(), now, paused)
     try:
-        await telegram_api.setup(connection)
-        sent = await telegram_api.heads_ups(connection, [block["id"] for block in blocks])
+        sent = await interview_store.heads_ups(connection, [block["id"] for block in blocks])
     except Exception as error:  # noqa: BLE001
-        logger.warning("VALR Telegram heads-ups unavailable: %s", type(error).__name__)
+        logger.warning("VALR heads-ups unavailable: %s", type(error).__name__)
         sent = {}
     for block in blocks:
         row = sent.get(block["id"])
         block["heads_up"] = None if row is None else {
-            "outcome": row["outcome"], "sent_at": iso(row["sent_at"]),
-            "outcome_at": iso(row["outcome_at"]), "call_at": iso(row["call_at"])}
+            "outcome": row["outcome"], "sent_at": iso(row["sent_at"]), "outcome_at": None, "call_at": None}
     return blocks
 
 
-async def telegram_view(connection: Any) -> dict[str, Any]:
-    view = {"configured": telegram_api.configured(), "linked": False, "linked_at": None,
-            "username": None}
+async def push_view(connection: Any) -> dict[str, Any]:
+    """Phone push: configured (VAPID keys), the devices (no endpoints), for Settings and Home."""
+    from app import webpush
+    view: dict[str, Any] = {"configured": bool(webpush.public_key()), "devices": []}
     try:
-        await telegram_api.setup(connection)
-        status = await telegram_api.link_status(connection)
-        view.update(linked=status["linked"], linked_at=iso(status["linked_at"]),
-                    username=status.get("username"))
+        store = webpush.Store(connection)
+        await store.setup()
+        view["devices"] = [webpush.device_view(row) for row in await store.all()]
     except Exception as error:  # noqa: BLE001
-        logger.warning("VALR Telegram link unavailable: %s", type(error).__name__)
+        logger.warning("VALR push devices unavailable: %s", type(error).__name__)
         view["error"] = True
     return view
+
+
+async def gmail_view(connection: Any) -> dict[str, Any]:
+    """Gmail's last sync, for the Google card."""
+    from app import leads_store
+    try:
+        await leads_store.setup(connection)
+        state = await leads_store.load_state(connection)
+    except Exception as error:  # noqa: BLE001
+        logger.warning("VALR Gmail state unavailable: %s", type(error).__name__)
+        return {}
+    return {"last_sync_at": iso(state.get("last_sync_at")), "last_error": scrub(state.get("last_error") or "")[:200]}
 
 
 async def collect(pool: Any, now: datetime | None = None) -> dict[str, Any]:
@@ -748,16 +757,17 @@ async def collect(pool: Any, now: datetime | None = None) -> dict[str, Any]:
         except Exception as error:  # noqa: BLE001
             logger.warning("VALR pause flag unavailable: %s", type(error).__name__)
             paused, view["errors"] = {"enabled": False, "updated_at": None}, view["errors"] + ["pause"]
-        view["dials_paused"] = {"enabled": paused["enabled"], "updated_at": iso(paused["updated_at"])}
+        view["dials_paused"] = {"enabled": paused["enabled"], "updated_at": iso(paused["updated_at"]),
+                                "until": iso(paused.get("until"))}
         view["dial_env"] = os.getenv("VALR_BRIEFING_DIAL", "1") == "1"
         try:
             chosen = await interview_store.flag_choice(connection, interview_store.AUTO_DIAL)
         except Exception as error:  # noqa: BLE001
             logger.warning("VALR reach choice unavailable: %s", type(error).__name__)
             chosen = None
-        auto = telegram_api.auto_dial() if chosen is None else chosen
+        auto = interview_store.default_auto_dial() if chosen is None else chosen
         view["reach"] = {"auto_dial": auto, "source": "default" if chosen is None else "settings",
-                         "default_auto_dial": telegram_api.auto_dial()}
+                         "default_auto_dial": interview_store.default_auto_dial()}
         try:
             cursor = await connection.execute(
                 "SELECT count(*) FROM briefing_blocks WHERE state = 'briefed'")
@@ -789,7 +799,16 @@ async def collect(pool: Any, now: datetime | None = None) -> dict[str, Any]:
         except Exception as error:  # noqa: BLE001
             logger.warning("Calendar state unavailable: %s", type(error).__name__)
             calendar = {"channel": "unknown"}
-        telegram = await telegram_view(connection)
+        push = await push_view(connection)
+        gmail = await gmail_view(connection)
+        try:
+            from app import notifications
+            switches = notifications.Store(connection)
+            await switches.setup()
+            view["notify"] = (await switches.switches()).view()
+        except Exception as error:  # noqa: BLE001
+            logger.warning("VALR alert settings unavailable: %s", type(error).__name__)
+            view["notify"] = {}
         try:
             from app import notetakers
             notetaker_status = await notetakers.status_view(connection)
@@ -806,23 +825,24 @@ async def collect(pool: Any, now: datetime | None = None) -> dict[str, Any]:
         except Exception as error:  # noqa: BLE001
             logger.warning("VALR post-call reports unavailable: %s", type(error).__name__)
             view["post_call"] = None
-    # telegram: a heads-up at T-30 and calls only on request; call: the automatic T-30 dial.
-    view.setdefault("reach", {"auto_dial": telegram_api.auto_dial(), "source": "default",
-                              "default_auto_dial": telegram_api.auto_dial()})
-    view["mode"] = "call" if view["reach"]["auto_dial"] else "telegram"
+    # heads_up: a push at T-30 and calls only on request; call: the automatic T-30 dial.
+    view.setdefault("reach", {"auto_dial": interview_store.default_auto_dial(), "source": "default",
+                              "default_auto_dial": interview_store.default_auto_dial()})
+    view["mode"] = "call" if view["reach"]["auto_dial"] else "heads_up"
     # The next T-30 step (a heads-up, or the dial; VALR_BRIEFING_DIAL=0 stops only the dial).
     view["next_call"] = next_call(view["blocks"], now, paused["enabled"] or (
         view["mode"] == "call" and not view["dial_env"]))
     view["connections"] = {
         "google": {"state": google.get("state", "unknown"), "account": google.get("account") or "",
                    "age_days": google.get("age_days"), "expires_soon": bool(google.get("expires_soon")),
-                   "last_ok_at": iso(google.get("last_ok_at")),
+                   "last_ok_at": iso(google.get("last_ok_at")), "last_error": scrub(google.get("last_error") or "")[:120],
                    "configured": google_oauth.OAuthSettings.from_env() is not None},
         "fathom": {"configured": bool(os.getenv("FATHOM_API_KEY", "").strip()) or
                    (notetaker_status.get("fathom") or {}).get("state") == "connected"},
         "notetakers": notetaker_status,
         "calendar": calendar,
-        "telegram": telegram,
+        "gmail": gmail,
+        "push": push,
     }
     view["dials"] = await dial_counts(now)
     perf, target = profile_files()

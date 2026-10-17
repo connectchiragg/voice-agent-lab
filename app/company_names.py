@@ -1,5 +1,5 @@
 """The one place that decides which company an email, a calendar event, a recording or an
-interview is about. Leads, touchpoints, past and upcoming interviews, briefings and Telegram
+interview is about. Leads, touchpoints, past and upcoming interviews, briefings and notifications
 text all use it, so a name is either a real company or "Company not identified".
 
 Evidence, strongest first (`resolve`):
