@@ -94,6 +94,7 @@ html { -webkit-text-size-adjust: 100%; scroll-behavior: smooth; }
 body {
   margin: 0;
   min-height: 100vh;
+  min-height: 100dvh;
   background:
     radial-gradient(900px 520px at 85% -8%, var(--glow), transparent 62%),
     radial-gradient(700px 420px at -10% 30%, var(--glow-2), transparent 60%),
