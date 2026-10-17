@@ -1,5 +1,5 @@
-"""The frame around every VALR page: the top bar (navigation, the notification bell, one
-"Call me" button with "Talk in browser" under its arrow, light/dark, the account menu),
+"""The frame around every VALR page: the top bar (navigation, the notification bell, the call
+split button: "Call my phone" or "Talk here", light/dark, the account menu),
 the page header, the mobile tab bar, and the small shared pieces (icons, menus, empty
 states).
 
@@ -196,12 +196,26 @@ def head(title: str, theme: str | None, csrf: str = "") -> str:
 <link rel="stylesheet" href="{asset('valr-ds.css')}">{pwa_head()}"""
 
 
-def call_button() -> str:
-    """The one call action: "Call me" (VALR rings your phone now), with "Talk in browser" under ▾."""
-    return f"""<div class="split">
-  <button class="btn primary split-main" type="button" data-action="callnow">{icon('phone', 16)}<span class="split-label">Call me</span></button>
-  <details class="menu split-more" data-menu><summary class="btn primary split-caret" aria-label="More ways to talk">{icon('chevron-down', 16)}</summary>
-    <div class="menu-pop align-end" role="menu">{menu_item('Talk in browser', 'mic', '/call')}</div></details>
+def has_phone() -> bool:
+    """A phone on file for "Call my phone" (app/interview_worker.owner_phone)."""
+    from app.interview_worker import owner_phone  # Loaded late: it imports the workflows.
+    return bool(owner_phone())
+
+
+def call_button(phone: bool | None = None) -> str:
+    """The one call action, a split button with two equal choices: "Call my phone" (VALR rings
+    once) and "Talk here" (the inline browser call). The main button runs this device's
+    remembered choice; static/valr-call.js sets it and the panel, static/valr.js posts the call."""
+    phone = has_phone() if phone is None else phone
+    phone_note = "" if phone else '<span class="menu-note">Add your phone in Settings</span>'
+    disabled = "" if phone else " disabled aria-disabled=\"true\""
+    return f"""<div class="split" data-call-split data-has-phone="{'1' if phone else '0'}">
+  <button class="btn primary split-main" type="button" data-call-main data-choice="{'phone' if phone else 'talk'}">{icon('phone', 16)}{icon('mic', 16)}<span class="split-label">{'Call my phone' if phone else 'Talk here'}</span></button>
+  <details class="menu split-more" data-menu><summary class="btn primary split-caret" aria-label="Ways to talk to VALR">{icon('chevron-down', 16)}</summary>
+    <div class="menu-pop align-end call-choices" role="menu">
+      <button class="menu-item" type="button" role="menuitemradio" aria-checked="{'true' if phone else 'false'}" data-call-choice="phone" data-action="callnow"{disabled}>{icon('phone', 16)}<span class="menu-text">Call my phone{phone_note}</span>{icon('check', 16)}</button>
+      <button class="menu-item" type="button" role="menuitemradio" aria-checked="{'false' if phone else 'true'}" data-call-choice="talk">{icon('mic', 16)}<span class="menu-text">Talk here<span class="menu-note">In this browser, no phone needed</span></span>{icon('check', 16)}</button>
+    </div></details>
 </div>"""
 
 
@@ -274,7 +288,9 @@ def layout(view: dict[str, Any], email: str, csrf: str, active: str, title: str,
                    f'<span>{e(label)}</span></a>' for key, label, href in NAV)
     return f"""{head(title, theme, csrf)}
 <link rel="stylesheet" href="{asset('leads.css')}">
+<link rel="stylesheet" href="{asset('valr-call.css')}">
 <script type="module" src="{asset('valr.js')}"></script>
+<script type="module" src="{asset('valr-call.js')}"></script>
 <script type="module" src="{asset('valr-app.js')}"></script>
 <script type="module" src="{asset('valr-notify.js')}"></script>
 <script type="module" src="{asset('valr-player.js')}"></script>

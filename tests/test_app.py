@@ -119,8 +119,10 @@ def test_call_ui_assets_are_served():
     assert client.get("/static/audio-player.js").status_code == 200
     # WebRTC is the default client; ?transport=ws keeps the WebSocket one.
     assert 'transport === "ws"' in client.get("/").text
-    webrtc_source = client.get("/static/voice-webrtc.js").text
+    assert "./webrtc-call.js" in client.get("/static/voice-webrtc.js").text  # The shared call.
+    webrtc_source = client.get("/static/webrtc-call.js").text
     assert "RTCPeerConnection" in webrtc_source and '"/webrtc/offer"' in webrtc_source
+    assert '"X-CSRF-Token"' in webrtc_source and '"/webrtc/hangup"' in webrtc_source
     assert client.get("/static/playout-delay.js").status_code == 200
 
 
@@ -153,10 +155,13 @@ def test_only_a_verified_access_token_identifies_a_browser_caller(engines, monke
     assert callers == ["email:asha@example.com"]
 
 
-def test_the_call_page_is_served_at_slash_call_on_any_host():
+def test_slash_call_opens_the_inline_talk_panel_and_the_old_page_carries_a_csrf_token():
     client = TestClient(main.app)  # No lifespan: no Groq or Deepgram needed for pages.
     for host in ("valr.haciensus.com", "voice.haciensus.com"):
-        response = client.get("/call", headers={"host": host})
-        assert response.status_code == 200 and "<html" in response.text.lower()
+        response = client.get("/call", headers={"host": host}, follow_redirects=False)
+        assert response.status_code == 307 and response.headers["location"] == "/valr?talk=1"
+    old = client.get("/", headers={"host": "voice.haciensus.com"})
+    assert "<html" in old.text.lower() and '<meta name="csrf-token" content="' in old.text
+    assert old.headers["cache-control"] == "no-store"
     assert client.get("/", headers={"host": "valr.haciensus.com"}, follow_redirects=False) \
         .headers["location"] == "/valr"

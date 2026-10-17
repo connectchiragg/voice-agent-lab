@@ -11,6 +11,12 @@ Per call:
   mono float32 and handed to the pipeline in `INPUT_BATCH_S` packets;
 - outbound: `SpeechTrack` paces queued TTS audio out in 20 ms frames (silence
   when idle) and drops its queue at once on an interrupt;
+- context: the VALR page's inline "Talk here" panel (static/valr-call.js) sends an
+  `intent`. The call then gets the phone call's context: "brief_next" loads the brief "Call
+  me" would give (app/interviews.prepare_web_call), else general owner mode, and VALR
+  speaks first. The owner's browser key is his phone key (memory.owner_alias): one memory.
+  Every offer needs the owner and the page's CSRF token (valr_dashboard.action_owner);
+  `POST /webrtc/hangup {call_id}` ends a call at once.
 - control: a data channel named "control" carries the same events as the
   WebSocket transport. The browser sends only `playout` reports (its
   getStats-derived delay from a frame leaving here to it being heard), from
@@ -49,6 +55,7 @@ logger = logging.getLogger("uvicorn.error")
 MAX_CALL_S = int(os.getenv("WEBRTC_MAX_CALL_S", "900"))
 MAX_CALLS = int(os.getenv("WEBRTC_MAX_CALLS", "4"))  # Concurrent peers on this server.
 CONNECT_TIMEOUT_S = 20  # From the answer to the data channel opening.
+DISCONNECTED_GRACE_S = 30  # ICE "disconnected" (the app went to the background): wait this long.
 FRAME_S = 0.020
 INPUT_RATE = 16000
 INPUT_BATCH_S = 0.04  # Microphone audio per pipeline packet.
@@ -219,7 +226,9 @@ class Peer:
     """
 
     def __init__(self, pc: RTCPeerConnection, output_sample_rate: int,
-                 on_closed: Callable[["Peer"], None] | None = None) -> None:
+                 on_closed: Callable[["Peer"], None] | None = None, greet: bool = False) -> None:
+        self.id = uuid4().hex
+        self.greet = greet  # VALR speaks first (the inline panel), like a phone call.
         self.pc = pc
         self.speech = SpeechTrack(output_sample_rate, self.playing_changed)
         self.on_closed = on_closed
@@ -306,6 +315,8 @@ class Peer:
         channel.on("close", lambda: self.spawn(self.close("data channel closed")))
         self.connected.set()
         self.send_event({"type": "ready"})
+        if self.greet and self.call is not None:
+            self.call.greet()
 
     def control_received(self, message: str | bytes) -> None:
         try:
@@ -349,6 +360,13 @@ class Peer:
     async def connection_changed(self) -> None:
         if self.pc.connectionState in ("failed", "closed"):
             await self.close(f"connection {self.pc.connectionState}")
+        elif self.pc.connectionState == "disconnected":
+            self.spawn(self.close_if_still_disconnected())
+
+    async def close_if_still_disconnected(self) -> None:
+        await asyncio.sleep(DISCONNECTED_GRACE_S)
+        if self.pc.connectionState == "disconnected":
+            await self.close("disconnected for 30 s")
 
     async def supervise(self) -> None:
         """Close a peer that never connects, or that reaches the call time limit."""
@@ -386,6 +404,14 @@ class Offer(BaseModel):
     type: Literal["offer"]
     sdp: str = Field(min_length=1, max_length=20000)
     echo_cancelled: bool
+    # The inline panel: "brief_next" (the brief "Call me" gives) or "talk"; none: the old page.
+    intent: Literal["brief_next", "talk"] | None = None
+    ref: str = Field(default="", max_length=80)  # An interview's slot id or key, for "brief_next".
+
+
+class Hangup(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    call_id: str = Field(min_length=1, max_length=64)
 
 
 router = APIRouter(prefix="/webrtc")
@@ -450,8 +476,15 @@ async def ice_servers(request: Request) -> dict[str, object]:
     return {"ice_servers": await call_ice_servers()}
 
 
+async def owner_action(request: Request) -> str:
+    """The owner, same-origin JSON and the page's CSRF token (app/valr_dashboard.py)."""
+    from app import valr_dashboard  # Loaded late: it imports much of the app.
+    return await valr_dashboard.action_owner(request)
+
+
 @router.post("/offer")
 async def offer(offer: Offer, request: Request) -> dict[str, str]:
+    await owner_action(request)
     engines: Engines | None = getattr(request.app.state, "engines", None)
     if engines is None:
         raise HTTPException(503, "Voice models are not loaded.")
@@ -460,7 +493,7 @@ async def offer(offer: Offer, request: Request) -> dict[str, str]:
         raise HTTPException(503, "Too many calls right now. Try again shortly.")
     servers = await call_ice_servers()
     pc = RTCPeerConnection(RTCConfiguration(iceServers=[RTCIceServer(**server) for server in servers]))
-    peer = Peer(pc, engines.output_sample_rate, peers.discard)
+    peer = Peer(pc, engines.output_sample_rate, peers.discard, greet=offer.intent is not None)
     peers.add(peer)
     try:
         await pc.setRemoteDescription(RTCSessionDescription(sdp=offer.sdp, type="offer"))
@@ -473,11 +506,29 @@ async def offer(offer: Offer, request: Request) -> dict[str, str]:
         raise HTTPException(400, "Invalid offer.") from error
     if not offer.echo_cancelled:
         logger.warning("No browser echo cancellation; barge-in disabled for this call.")
+    conversation_id = str(uuid4())
+    mode = "talk"
+    if offer.intent is not None:  # Before the call opens: its prompt and greeting need it.
+        from app import interviews  # Loaded late: it imports the workflows.
+        mode = await interviews.prepare_web_call(conversation_id, offer.intent, offer.ref)
     try:
-        peer.call = await open_call(engines, peer.send, str(uuid4()), barge_in=offer.echo_cancelled,
+        peer.call = await open_call(engines, peer.send, conversation_id, barge_in=offer.echo_cancelled,
                                     caller_id=await memory.web_caller_key(request.headers))
     except SpeechUnavailable as error:
+        if offer.intent is not None:
+            interviews.briefings.pop(conversation_id, None)
+            interviews.talk_calls.discard(conversation_id)
         await peer.close("the speech service is unavailable")
         raise HTTPException(503, str(error)) from error
     peer.start()
-    return {"type": "answer", "sdp": pc.localDescription.sdp}
+    return {"type": "answer", "sdp": pc.localDescription.sdp, "call_id": peer.id, "mode": mode}
+
+
+@router.post("/hangup")
+async def hangup(body: Hangup, request: Request) -> dict[str, bool]:
+    """End the call now ("End call" in the panel) instead of waiting for the peer to time out."""
+    await owner_action(request)
+    peer = next((p for p in peers_of(request.app) if p.id == body.call_id), None)
+    if peer is not None:
+        await peer.close("hung up by the caller")
+    return {"ok": peer is not None}

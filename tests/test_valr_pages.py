@@ -104,7 +104,8 @@ def lead_id(company: str) -> str:
 
 def pages(client) -> list[str]:
     return ["/valr", "/valr/interviews", f"/valr/interviews/{ref_of(client)}", "/valr/interviews/past",
-            "/valr/interviews/past/fathom-1006", "/valr/interviews/past/fathom-1000", "/valr/leads",
+            "/valr/interviews/past/fathom-1006", "/valr/interviews/past/fathom-1000",
+            "/valr/interviews/processes", "/valr/leads",
             f"/valr/leads?stage=offer&q=x&lead={lead_id('Orbit Labs')}", "/valr/leads?status=expired",
             "/valr/progress", "/valr/settings", "/login"]
 
@@ -132,8 +133,11 @@ def test_every_page_needs_a_verified_access_login(client):
 
 def test_navigation_and_deep_links(client):
     home = client.get("/valr", headers=GOOD).text
-    for href in ("/valr/interviews", "/valr/leads", "/valr/progress", "/valr/settings", "/call"):
+    for href in ("/valr/interviews", "/valr/leads", "/valr/progress", "/valr/settings"):
         assert f'href="{href}"' in home, href
+    # Call me: two equal choices, the phone (valr.js posts it) and Talk here (the inline panel).
+    assert 'data-call-choice="phone"' in home and 'data-call-choice="talk"' in home
+    assert "/static/valr-call.js" in home and 'href="/call"' not in home
     assert f'href="/valr/interviews/{ref_of(client)}"' in home  # The next interview, one tap.
     assert 'data-theme="light"' in client.get("/valr?theme=light", headers=GOOD).text
     assert "data-theme=" not in client.get("/valr?theme=<x>", headers=GOOD).text.split("<head>")[0]
