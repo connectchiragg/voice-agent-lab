@@ -38,6 +38,7 @@ import hashlib
 import logging
 import os
 import re
+import sys
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -406,8 +407,9 @@ async def refresh(connection: Any = None, force: bool = False) -> None:
             await setup(connection)
             await load(connection)
             return
-        from app import research
-        if research.pool is not None:
+        # Only where the app already loaded it: app.research imports groq, which the worker image lacks.
+        research = sys.modules.get("app.research")
+        if research is not None and research.pool is not None:
             async with research.pool.connection() as pooled:
                 await setup(pooled)
                 await load(pooled)
