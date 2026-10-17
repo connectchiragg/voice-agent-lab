@@ -412,7 +412,7 @@ export async function mount(el, data, options = {}) {
     if (pointers.size) return;
     dragging = false;
     if (reduced) velocity = { x: 0, y: 0 };
-    if (moved < 6) pick(event);
+    if (moved < 6 && event.type !== "pointercancel") pick(event);  // Cancelled: the page took it as a scroll.
   }
   function zoom(delta) {
     zoomed = true;
@@ -471,12 +471,16 @@ export async function mount(el, data, options = {}) {
   el.addEventListener("pointerenter", (event) => { if (event.pointerType === "mouse") inside = true; });
   el.addEventListener("pointerleave", () => { inside = false; lastInput = performance.now(); });
   canvas.addEventListener("wheel", onWheel, { passive: false });
-  canvas.style.touchAction = "none";
+  // On a touch screen a vertical swipe scrolls the page (the globe is most of a phone's
+  // width and height, so "none" trapped the scroll); sideways drags and pinches still turn and zoom it.
+  canvas.style.touchAction = matchMedia("(pointer: coarse)").matches ? "pan-y" : "none";
   // Labels are buttons: hover or focus shows the tooltip (focus also turns the lead to the
   // front), a click selects the lead.
   const labelId = (event) => event.target.closest?.(".globe-label")?.dataset.id || null;
-  labels.addEventListener("pointerover", (event) => { const id = labelId(event); if (id) setHover(id); });
-  labels.addEventListener("pointerout", (event) => { if (labelId(event)) setHover(null); });
+  // Mouse only: a tap's pointerover left the tooltip stuck open, and on iOS a hover that changes
+  // the page can swallow the tap.
+  labels.addEventListener("pointerover", (event) => { const id = event.pointerType === "mouse" && labelId(event); if (id) setHover(id); });
+  labels.addEventListener("pointerout", (event) => { if (event.pointerType === "mouse" && labelId(event)) setHover(null); });
   labels.addEventListener("focusin", (event) => {
     const id = labelId(event);
     if (!id) return;
