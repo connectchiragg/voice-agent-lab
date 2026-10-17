@@ -4,7 +4,7 @@ The path: Truecaller records the call -> its Share button -> the iOS Shortcut "S
 -> `POST /hooks/recording-upload` (app/phone_web.py) -> stored encrypted here -> the research
 worker transcribes it with Deepgram (pre-recorded, nova-3, diarized) -> the notetaker pipeline
 as provider "phone" (app/notetakers/pipeline.py: Past interviews, the coach's evaluation and
-the post-call Telegram report, exactly like a Fathom recording).
+the post-call review in the bell, exactly like a Fathom recording).
 
 Storage (Postgres, so the app container needs no writable disk):
 - `phone_uploads`: one row per upload: when, size, the audio kind, the optional title and other
@@ -191,6 +191,8 @@ async def reveal(connection: Any) -> str:
         token = seed or new_token()
         await save_token(connection, token, "env" if seed else "generated", True)
         return token
+    if row["source"] == "off":
+        raise AlreadyShown
     if row["revealed_at"] is None and row["source"] == "env" and seed and hmac.compare_digest(digest(seed), row["token_hash"]):
         await mark_revealed(connection)
         return seed
@@ -201,6 +203,18 @@ async def rotate(connection: Any) -> str:
     token = new_token()
     await save_token(connection, token, "rotated", True)
     return token
+
+
+OFF = "off"  # Stored in place of a hash while uploads are turned off: no token's digest equals it.
+
+
+async def revoke(connection: Any) -> None:
+    """'Turn off uploads': the token stops working at once and none replaces it (the env seed
+    doesn't come back either). 'Turn on' is a rotation: a new token, shown once."""
+    await connection.execute(
+        "INSERT INTO phone_upload_token (id, token_hash, source, created_at, revealed_at) "
+        "VALUES (1, %s, 'off', now(), now()) ON CONFLICT (id) DO UPDATE SET token_hash = excluded.token_hash, "
+        "source = 'off', created_at = now(), revealed_at = now()", (OFF,))
 
 
 # Audio type (pure).
@@ -502,7 +516,8 @@ async def status(connection: Any) -> dict[str, Any]:
     cursor = await connection.execute("SELECT count(*) FROM phone_uploads WHERE status IN ('uploaded', 'processing')")
     waiting = int((await cursor.fetchone())[0])
     row = await token_row(connection)
-    return {"token": bool(row) or bool(os.getenv("VALR_UPLOAD_TOKEN", "").strip()),
+    off = bool(row and row["source"] == "off")
+    return {"token": not off and (bool(row) or bool(os.getenv("VALR_UPLOAD_TOKEN", "").strip())), "off": off,
             "token_shown": bool(row and row["revealed_at"]),
             "last_upload_at": last[0].astimezone(timezone.utc).isoformat() if last else None,
             "last_status": last[1] if last else None, "waiting": waiting, "audio_days": audio_days()}

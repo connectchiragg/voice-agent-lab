@@ -6,12 +6,12 @@ When Truecaller records a phone interview, you can send the recording to VALR in
 2. turns it into a transcript with speakers (Deepgram),
 3. works out the company,
 4. adds the call to **Past interviews** with a player,
-5. has the coach review it and sends the post-call report on Telegram, the same as a Fathom recording.
+5. has the coach review it and tells you the review is ready (the bell and a push), the same as a Fathom recording.
 
 The audio is deleted 7 days after processing. The transcript and the review stay.
 
 ```
-Truecaller (recording)  →  Share  →  "Send to VALR" Shortcut  →  VALR  →  Past interviews + Telegram report
+Truecaller (recording)  →  Share  →  "Send to VALR" Shortcut  →  VALR  →  Past interviews + a review in the bell
 ```
 
 ## iPhone call recording (iOS 18.1+) on a Mac: VALR Recorder Sync
@@ -56,7 +56,7 @@ The first time it runs, iOS asks *Allow "Send to VALR" to send 1 file to valr.ha
 3. Choose **Send to VALR**.
    - If it isn't in the row of apps, scroll the share sheet down and tap **Edit Actions…** to add it.
    - If Truecaller only offers **Save to Files**, save it, then share it from the **Files** app the same way.
-4. Wait for "Got it". A few minutes later the call appears under **Interviews › Past**, and the Telegram report follows once the coach has reviewed it.
+4. Wait for "Got it". A few minutes later the call appears under **Interviews › Past**, and a notification follows once the coach has reviewed it.
 
 Tip: send the recording soon after the call. VALR places the call in time from the upload moment and the recording's length, and uses that time to match it to a calendar interview.
 

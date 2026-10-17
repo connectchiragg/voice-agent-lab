@@ -68,17 +68,21 @@ def block_items(view: dict[str, Any], now: datetime) -> list[dict[str, Any]]:
         state = block.get("state")
         sent = block.get("heads_up") or {}
         name = who(block)
-        if state == "heads_up_failed" or sent.get("outcome") == "failed":
-            out.append(item(f"heads-up-{block['id']}", "bad", f"The heads-up for {name} wasn't sent",
-                            "Telegram didn't take the message.",
-                            CALL_NOW if upcoming else {"label": "Check Telegram", "href": "/valr/settings#telegram"}))
+        if state == "heads_up_failed" or sent.get("outcome") in ("failed", "no_device"):
+            off = sent.get("outcome") == "no_device"
+            out.append(item(f"heads-up-{block['id']}", "bad" if not off else "warn",
+                            f"The heads-up for {name} didn't reach your phone",
+                            "Phone notifications are off, so it's only in the bell." if off else
+                            "The push service didn't take it.",
+                            CALL_NOW if upcoming else {"label": "Check phone notifications",
+                                                       "href": "/valr/settings#phone-push"}))
         elif state in ("unanswered", "missed"):
             out.append(item(f"missed-{block['id']}", "warn", f"You missed the briefing call for {name}",
                             "VALR doesn't call twice." + (" You can still get it now." if upcoming else ""),
                             CALL_NOW if upcoming else None))
         elif state == "refused":
             out.append(item(f"refused-{block['id']}", "bad", f"No briefing call for {name}: daily call limit",
-                            "VALR stopped calling for today.", {"label": "See limits", "href": "/valr/settings#limits"}))
+                            "VALR stopped calling for today.", {"label": "See limits", "href": "/valr/settings#data"}))
     return out
 
 
@@ -89,21 +93,21 @@ def limit_items(view: dict[str, Any]) -> list[dict[str, Any]]:
         if d.get("used") is not None and d.get("limit") and d["used"] >= d["limit"]:
             out.append(item(f"dials-{key}", "warn", f"{what}: today's limit reached",
                             f"{d['used']} of {d['limit']} used. It resets at midnight UTC.",
-                            {"label": "See limits", "href": "/valr/settings#limits"}))
+                            {"label": "See limits", "href": "/valr/settings#data"}))
     spend = view.get("spend") or {}
     lim = spend.get("interview_limits") or {}
     if lim.get("month_usd") and (spend.get("month_usd") or 0) >= 0.9 * lim["month_usd"]:
         out.append(item("budget", "warn", "Research budget almost used",
-                        "New research stops at the monthly limit.", {"label": "See spend", "href": "/valr/system#spend"}))
+                        "New research stops at the monthly limit.", {"label": "See spend", "href": "/valr/settings#data"}))
     if lim.get("jobs_per_day") and (spend.get("today_jobs") or 0) >= lim["jobs_per_day"]:
         out.append(item("runs", "warn", "Research limit reached for today",
                         "Briefings that need fresh research wait until tomorrow.",
-                        {"label": "See spend", "href": "/valr/system#spend"}))
+                        {"label": "See spend", "href": "/valr/settings#data"}))
     failed = [j for j in view.get("jobs") or [] if j.get("status") in ("failed", "error", "timeout")]
     if failed:
         out.append(item("research-failed", "warn", "Some research didn't finish",
-                        f"{len(failed)} recent run{'s' if len(failed) != 1 else ''} failed.",
-                        {"label": "See runs", "href": "/valr/system#runs"}))
+                        f"{len(failed)} recent run{'s' if len(failed) != 1 else ''} failed. Each interview's page "
+                        "shows what it has.", {"label": "Interviews", "href": "/valr/interviews"}))
     return out
 
 
@@ -119,21 +123,23 @@ def items(view: dict[str, Any]) -> list[dict[str, Any]]:
     if cal.get("last_error"):
         out.append(item("calendar", "warn", "The last calendar sync failed",
                         "New or moved interviews may be missing.", {"label": "Sync now", "action": "sync"}))
-    tg = (view.get("connections") or {}).get("telegram") or {}
-    if view.get("mode") == "telegram" and not tg.get("linked"):
-        out.append(item("telegram", "bad", "Telegram isn't connected",
-                        "No heads-ups can reach you before interviews.",
-                        {"label": "Connect Telegram", "href": "/valr/settings#telegram"}))
+    push = (view.get("connections") or {}).get("push") or {}
+    if push.get("configured") and not push.get("devices") and not push.get("error"):
+        out.append(item("push", "warn", "Phone notifications are off",
+                        "Heads-ups and alerts only reach the bell until you enable them on your phone.",
+                        {"label": "Enable", "href": "/valr/settings#phone-push"}))
     if not (view.get("setup") or {}).get("phone_on_file", True):
-        out.append(item("phone", "bad", "No phone number on file",
-                        "VALR has nowhere to call you.", {"label": "Fix", "href": "/valr/settings#phone"}))
+        calls = view.get("mode") == "call"
+        out.append(item("phone", "bad" if calls else "info", "No phone number on file",
+                        "VALR has nowhere to call you." if calls else "Add it so VALR can call you when you ask.",
+                        {"label": "Add phone", "href": "/valr/settings#phone"}))
     out += block_items(view, now)
     out += limit_items(view)
     if (view.get("dials_paused") or {}).get("enabled"):
-        noun = "Heads-ups" if view.get("mode") == "telegram" else "Briefing calls"
+        noun = "Heads-ups" if view.get("mode") != "call" else "Briefing calls"
         out.append(item("paused", "info", f"{noun} are paused", "VALR still researches every interview.",
                         {"label": "Resume", "action": "dials", "data": {"paused": "false"}}))
-    if view.get("mode") != "telegram" and view.get("dial_env") is False:
+    if view.get("mode") == "call" and view.get("dial_env") is False:
         out.append(item("calls-off", "info", "Automatic briefing calls are off",
                         "You can still ask for a call any time.", CALL_NOW))
     takers = contracts.notetakers(view.get("connections") or {}, imported(view))

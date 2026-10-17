@@ -477,7 +477,7 @@ async def run(connection: Any, http: httpx.AsyncClient, days: int, dry_run: bool
     if not dry_run:
         done = await import_recordings(connection, http, days, match=match)
         out(f"Imported {done.new} recording(s); queued {done.queued} for the evaluation and "
-            f"{done.reanalyse} to read again (the worker does one every 30 s; no Telegram, push or "
+            f"{done.reanalyse} to read again (the worker does one every 30 s; no push or "
             "notifications).")
     if calendar:
         result = await calendar_history(connection, http, days, dry_run)

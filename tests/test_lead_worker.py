@@ -174,7 +174,7 @@ def world(monkeypatch, tmp_path):
         async with await connect() as connection:
             await connection.execute("DROP TABLE IF EXISTS gmail_state, lead_emails, lead_touchpoints, leads, "
                                      "lead_overrides, research_spend, research_jobs, calendar_events, "
-                                     "calendar_state, oauth_tokens, telegram_link, notifications, notify_settings")
+                                     "calendar_state, oauth_tokens, notifications, notify_settings")
     asyncio.run(reset())
     return gmail, activities, connect, key
 
@@ -251,22 +251,11 @@ def test_overrides_are_stored_and_replayed(world):
     assert o.stages == {"lead-b": "offer"} and o.merges == {"lead-d": "lead-b"}
 
 
-class FakeBot:
-    def __init__(self):
-        self.sent = []
-
-    async def send(self, chat_id, text, keyboard=None):
-        self.sent.append((chat_id, text))
-        return 1
-
 
 @needs_postgres
-def test_an_expired_gmail_token_alerts_once_on_telegram(world, monkeypatch):
+def test_an_expired_gmail_token_alerts_once_in_the_bell(world, monkeypatch):
     from app import interview_worker
     _, activities, connect, _ = world
-    bot = FakeBot()
-    activities._bot = bot
-    monkeypatch.setenv("TELEGRAM_OWNER_CHAT_ID", "4242")
 
     async def refused(connection, http):
         return None, "reconnect needed"
@@ -282,10 +271,11 @@ def test_an_expired_gmail_token_alerts_once_on_telegram(world, monkeypatch):
     asyncio.run(token_row(NOW - timedelta(days=7)))
     for _ in range(2):
         assert asyncio.run(activities.gmail_sync(GmailSyncInput("poll"))).error == "Gmail reconnect needed"
-    assert bot.sent == [(4242, "Gmail disconnected — reconnect: https://valr.haciensus.com/oauth/google/start")]
+    alerts = asyncio.run(rows(connect, "SELECT kind, title, link FROM notifications WHERE kind = 'account'"))
+    assert alerts == [("account", "Google disconnected", "/valr/settings#google")]
     asyncio.run(token_row(NOW))  # Reconnected, then expired again: one more alert.
     asyncio.run(activities.gmail_sync(GmailSyncInput("poll")))
-    assert len(bot.sent) == 2
+    assert len(asyncio.run(rows(connect, "SELECT 1 FROM notifications WHERE kind = 'account'"))) == 2
 
 
 @needs_postgres
@@ -371,9 +361,9 @@ def test_the_bell_follows_gmail_unread_mail_silently_and_new_mail_still_notifies
 
     first = asyncio.run(activities.gmail_sync(GmailSyncInput("poll")))
     assert first.mode == "backfill"
-    bell = asyncio.run(rows(connect, "SELECT source_id, read_at, push_state, tg_state, created_at FROM notifications"))
-    assert [(r[0], r[1], r[2], r[3]) for r in bell] == [("gmail:nw1", None, "skipped", "skipped")]  # Silent.
-    assert abs(bell[0][4] - (now - timedelta(days=5))) < timedelta(seconds=1)  # Dated when it arrived.
+    bell = asyncio.run(rows(connect, "SELECT source_id, read_at, push_state, created_at FROM notifications"))
+    assert [(r[0], r[1], r[2]) for r in bell] == [("gmail:nw1", None, "skipped")]  # Silent.
+    assert abs(bell[0][3] - (now - timedelta(days=5))) < timedelta(seconds=1)  # Dated when it arrived.
 
     # Next pass: he read nw1 in Gmail (labelRemoved UNREAD); a new email arrives, unread.
     gmail.messages["nw3"] = raw_message(dataclasses.replace(inbound, id="nw3", thread_id="t-nw3",

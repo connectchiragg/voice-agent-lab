@@ -111,39 +111,32 @@ def test_the_timer_fires_and_places_the_call():
     assert len(run_with_worker(test).dials) == 1
 
 
-def test_no_answer_retries_every_15_minutes_then_fails():
+def test_no_answer_is_final_one_ring_only():
+    """Owner's choice (2026-10-17, patch valr-callback-single-attempt): a callback rings once."""
     async def test(env, telnyx):
         with env.auto_time_skipping_disabled():
             now = await env.get_current_time()
             due = next_local(now, 10)
             handle = await start(env, due)
-            skip = due - now + timedelta(seconds=1)
-            for result in ("no_answer", "busy", "no_answer"):
-                await answer(handle, await dial_after(env, telnyx, skip), result)
-                skip = timedelta(minutes=15, seconds=1)
+            await answer(handle, await dial_after(env, telnyx, due - now + timedelta(seconds=1)), "busy")
             status = await handle.result()
-        assert status.state == "failed" and "3 attempts" in status.detail
-        assert [attempt.result for attempt in status.attempts] == ["no_answer", "busy", "no_answer"]
-        placed = [datetime.fromisoformat(attempt.placed_at_utc) for attempt in status.attempts]
-        assert all(timedelta(minutes=15) <= later - earlier < timedelta(minutes=16)
-                   for earlier, later in zip(placed, placed[1:]))
-    assert len(run_with_worker(test).dials) == 3
+        assert status.state == "failed" and status.detail == "no answer"
+        assert [attempt.result for attempt in status.attempts] == ["busy"]
+    assert len(run_with_worker(test).dials) == 1
 
 
-def test_an_unreported_call_counts_as_no_answer_and_a_retry_can_succeed():
+def test_an_unreported_call_counts_as_no_answer_and_is_not_retried():
     async def test(env, telnyx):
         with env.auto_time_skipping_disabled():
             now = await env.get_current_time()
             due = next_local(now, 10)
             handle = await start(env, due)
             await dial_after(env, telnyx, due - now + timedelta(seconds=1))  # No webhook comes.
-            retry = await dial_after(env, telnyx, timedelta(minutes=3 + 15, seconds=2))
-            await answer(handle, "v3:call-1", "answered")  # Too late, for the old call: ignored.
-            await answer(handle, retry, "answered")
+            await env.sleep(timedelta(minutes=3, seconds=2))
             status = await handle.result()
-        assert [attempt.result for attempt in status.attempts] == ["no_answer", "answered"]
-        assert status.state == "completed"
-    run_with_worker(test)
+        assert [attempt.result for attempt in status.attempts] == ["no_answer"]
+        assert status.state == "failed"
+    assert len(run_with_worker(test).dials) == 1
 
 
 def test_reschedule_moves_the_timer():
@@ -232,14 +225,14 @@ def test_one_pending_callback_per_caller():
 def test_a_refused_dial_is_not_retried():
     async def test(env, telnyx):
         status = await (await start(env, next_local(await env.get_current_time(), 10))).result()
-        # 422 (e.g. an unverified number on a trial account) on each of the 3 attempts.
-        assert [attempt.result for attempt in status.attempts] == ["failed"] * 3
-    assert len(run_with_worker(test, FakeTelnyx(status=422)).dials) == 3
+        # 422 (e.g. an unverified number on a trial account): failed, never retried.
+        assert [attempt.result for attempt in status.attempts] == ["failed"]
+    assert len(run_with_worker(test, FakeTelnyx(status=422)).dials) == 1
 
 
 def test_at_most_five_dials_a_day_for_everyone():
     async def test(env, telnyx):
-        callers = [f"tel:+1555000000{index}" for index in range(4)]
+        callers = [f"tel:+1555000000{index}" for index in range(6)]
         by_id = {}
         with env.auto_time_skipping_disabled():
             now = await env.get_current_time()
@@ -247,16 +240,11 @@ def test_at_most_five_dials_a_day_for_everyone():
             for caller in callers:
                 by_id[workflow_id(caller)] = await start(env, due, caller=caller)
             await env.sleep(due - now + timedelta(seconds=1))
-            # Nobody answers: 4 first calls and 1 retry fit in the day, the 6th does not.
-            for _ in range(4):
+            for _ in range(MAX_DIALS_PER_DAY):  # Nobody answers; the sixth is refused.
                 await reply_no_answer(telnyx, by_id)
-            await env.sleep(timedelta(minutes=15, seconds=1))
-            await reply_no_answer(telnyx, by_id)
-            await env.sleep(timedelta(minutes=15, seconds=1))
             statuses = [await handle.result() for handle in by_id.values()]
         results = [attempt.result for status in statuses for attempt in status.attempts]
-        # Refused: three second attempts, then the one caller's third attempt.
-        assert results.count("daily_limit") == 4
+        assert results.count("daily_limit") == 1 and results.count("no_answer") == MAX_DIALS_PER_DAY
         assert len(telnyx.dials) == MAX_DIALS_PER_DAY
     run_with_worker(test)
 

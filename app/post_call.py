@@ -1,4 +1,4 @@
-"""Post-call reports on Telegram: queue, process (in the research worker) and deliver.
+"""Post-call reports: queue, process (in the research worker) and deliver (the bell and a push).
 
 How a recording gets here:
 - the notetaker webhook (valr-notetakers: /hooks/fathom -> app.notetakers.pipeline) calls
@@ -9,12 +9,14 @@ How a recording gets here:
 
 The worker's `loop` then takes queued recordings one at a time (`run_queue` ->
 `on_new_interview`): app/profile/post_call.process in a thread (Claude through the
-gateway), then `deliver`: sent to the owner's linked Telegram chat, or kept as
-"pending_telegram" (the dashboard says so) and sent once Telegram is linked
-(`send_pending`).
+gateway), then `deliver`: one bell item, "Your coach review is ready", pushed to the
+owner's phone (app/notifications.notify_now), linking to the interview's page in Past
+interviews. Rows left as "pending_telegram" from the Telegram days are delivered the same
+way (`send_pending`).
 
-Table `post_call_reports`, one row per recording: status queued | processing | sent |
-pending_telegram | not_interview | no_transcript | failed. `sealed` holds the normalised
+Table `post_call_reports`, one row per recording: status queued | processing | sent (the
+review is in the bell) | pending_telegram (old rows only) | not_interview | no_transcript |
+failed. `sealed` holds the normalised
 meeting (transcript) as Fernet ciphertext (VALR_TOKEN_KEY) only until it is processed;
 without that key nothing is sealed and the worker re-fetches the transcript from Fathom.
 `text` is the rendered report (no pay figures, emails or phone numbers). Nothing here
@@ -26,7 +28,7 @@ HISTORY_GAP_S (30 s), after the new recordings, while the research month cap
 (VALR_MONTH_USD, research_spend) leaves room for one more; their spend is recorded in
 research_spend (job "history-<date>"). A history item ends as status `history` (scored, in
 performance.json) or not_interview / no_transcript / failed: no report is written, nothing
-goes to Telegram or the phone, and no notification is created. The coach read is refreshed
+goes to the bell or the phone. The coach read is refreshed
 once, with the last item.
 
 Re-analysis (mode `reanalyse`): an interview already in performance.json whose interviewer
@@ -44,8 +46,6 @@ import logging
 import os
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
-
-from app import telegram_api
 
 logger = logging.getLogger("valr")
 
@@ -147,7 +147,7 @@ async def history_backlog(connection: Any) -> int:
 
 
 async def overview(connection: Any, limit: int = 5) -> dict[str, Any]:
-    """For the dashboard: reports waiting for Telegram, and the latest ones."""
+    """For the dashboard: reports still waiting to be delivered, and the latest ones."""
     await setup(connection)
     cursor = await connection.execute(
         "SELECT status, count(*) FROM post_call_reports GROUP BY status")
@@ -164,38 +164,39 @@ async def overview(connection: Any, limit: int = 5) -> dict[str, Any]:
 
 # Delivery.
 
-async def deliver(connection: Any, provider: str, external_id: str, text: str,
-                  bot: telegram_api.Bot | None = None) -> str:
-    """Send to the owner's chat, or keep it as pending_telegram. -> the status."""
-    bot = bot or telegram_api.bot()
-    chat = await telegram_api.owner_chat(connection) if bot else None
-    if bot is None or chat is None:
-        await set_status(connection, provider, external_id, "pending_telegram", text=text,
-                         detail="Telegram is not linked: the report waits on the dashboard.")
-        return "pending_telegram"
+def review_link(provider: str, external_id: str) -> str:
+    return f"/valr/interviews/past/{provider}-{external_id}"
+
+
+async def deliver(connection: Any, provider: str, external_id: str, text: str, title: str = "") -> str:
+    """The review is ready: one bell item and a push to the phone. -> "sent" (it is in the bell,
+    pushed or not: with no phone subscribed it simply waits there)."""
+    from app import notifications
+    what = notifications.scrub(title or "")[:80]
+    note = {"source_id": f"review:{provider}:{external_id}", "kind": "review",
+            "title": "Your coach review is ready", "body": f"{what}: tap to read it." if what else "Tap to read it.",
+            "company": "", "link": review_link(provider, external_id), "gmail_url": "", "thread_id": None,
+            "action": ""}
     try:
-        message_id = await bot.send(chat, text)
-    except telegram_api.TelegramError as error:
-        logger.warning("VALR post-call report not sent: %s", type(error).__name__)
+        how = await notifications.notify_now(connection, note)
+    except Exception as error:  # noqa: BLE001 - the report is kept; send_pending tries again.
+        logger.warning("VALR post-call report not delivered: %s", type(error).__name__)
         await set_status(connection, provider, external_id, "pending_telegram", text=text,
-                         detail="Telegram refused the message; retrying later.")
+                         detail="Not delivered yet; retrying.")
         return "pending_telegram"
-    await set_status(connection, provider, external_id, "sent", text=text, message_id=message_id,
-                     sent_at=datetime.now(timezone.utc), detail="")
+    await set_status(connection, provider, external_id, "sent", text=text, sent_at=datetime.now(timezone.utc),
+                     detail="" if how in ("sent", "duplicate") else "In the bell; phone notifications are off.")
     return "sent"
 
 
-async def send_pending(connection: Any, bot: telegram_api.Bot | None = None) -> int:
-    """Reports kept while Telegram was unlinked: send them now if it is linked."""
-    bot = bot or telegram_api.bot()
-    if bot is None or await telegram_api.owner_chat(connection) is None:
-        return 0
+async def send_pending(connection: Any) -> int:
+    """Reports kept back (Telegram was unlinked, or a delivery failed): deliver them now."""
     cursor = await connection.execute(
-        "SELECT provider, external_id, text FROM post_call_reports WHERE status = 'pending_telegram' "
+        "SELECT provider, external_id, text, title FROM post_call_reports WHERE status = 'pending_telegram' "
         "AND text IS NOT NULL ORDER BY updated_at LIMIT 5")
     sent = 0
-    for provider, external_id, text in await cursor.fetchall():
-        sent += await deliver(connection, provider, external_id, text, bot) == "sent"
+    for provider, external_id, text, title in await cursor.fetchall():
+        sent += await deliver(connection, provider, external_id, text, title or "") == "sent"
     return sent
 
 
@@ -238,8 +239,7 @@ def spend_rows(ledger: Any) -> list[dict[str, Any]]:
 
 
 async def on_new_interview(meeting: dict, *, connection: Any, recording_url: str = "",
-                           process: Process | None = None, bot: telegram_api.Bot | None = None,
-                           history: bool = False) -> str:
+                           process: Process | None = None, history: bool = False) -> str:
     """The entry point for one new recording (normalised meeting, transcript included):
     evaluate it, then deliver the report. -> the final status.
 
@@ -258,7 +258,7 @@ async def on_new_interview(meeting: dict, *, connection: Any, recording_url: str
     if out["status"] != "ready":
         await set_status(connection, provider, external_id, out["status"], cost_usd=out.get("cost_usd"))
         return out["status"]
-    if history:  # Scored into performance.json: no report, no Telegram, no notification.
+    if history:  # Scored into performance.json: no report, no notification.
         await set_status(connection, provider, external_id, "history", interview_id=out["interview_id"],
                          cost_usd=out.get("cost_usd"), detail=out.get("performance_note", ""))
         return "history"
@@ -266,7 +266,7 @@ async def on_new_interview(meeting: dict, *, connection: Any, recording_url: str
     text = post_call.render(out["report"], host(), recording_url)
     await set_status(connection, provider, external_id, "processing", interview_id=out["interview_id"],
                      cost_usd=out.get("cost_usd"), detail=out.get("performance_note", ""))
-    return await deliver(connection, provider, external_id, text, bot)
+    return await deliver(connection, provider, external_id, text, meeting.get("title", ""))
 
 
 Fetch = Callable[[str, str], dict | None]
@@ -284,8 +284,7 @@ def fathom_fetch(provider: str, external_id: str) -> dict | None:
     return recordings.normalize_fathom(item) if item else None
 
 
-async def run_queue(connection: Any, fetch: Fetch = fathom_fetch, process: Process | None = None,
-                    bot: telegram_api.Bot | None = None) -> int:
+async def run_queue(connection: Any, fetch: Fetch = fathom_fetch, process: Process | None = None) -> int:
     from app import google_oauth
     done = 0
     for row in await queued(connection):
@@ -305,7 +304,7 @@ async def run_queue(connection: Any, fetch: Fetch = fathom_fetch, process: Proce
                              detail="Transcript not available from the provider.")
             continue
         await on_new_interview(meeting, connection=connection, recording_url=row["recording_url"],
-                               process=process, bot=bot)
+                               process=process)
         done += 1
     return done
 

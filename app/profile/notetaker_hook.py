@@ -5,7 +5,7 @@ It only queues, wherever it runs: the meeting (fetched with
 `app.notetakers.fetch_meeting` when the pipeline did not pass it) is stored encrypted in
 `post_call_reports` (app/post_call.py) together with the recording's share link, and the
 research worker's post-call loop scores it (rubric, interviewer cues, coach read) and
-sends the Telegram report when that evaluation completes. Returns a short status.
+delivers the review (bell and push) when that evaluation completes. Returns a short status.
 
 Two callers: the web process (Fathom/Granola webhooks, "Check for new recordings") and the
 research worker (phone recordings, app/phone_recordings.py). The worker image has no groq or

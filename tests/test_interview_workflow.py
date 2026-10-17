@@ -28,9 +28,9 @@ class Fakes:
                  ready=True, paused=False, auto_dial=True, heads_up="sent"):
         self.env = env
         # VALR_AUTO_DIAL as briefing_auto_dial reads it. True here keeps the dial tests below
-        # on the dial path; the owner's default (False: a Telegram heads-up) is tested further down.
+        # on the dial path; the owner's default (False: a push heads-up) is tested further down.
         self.auto_dial = auto_dial
-        self.heads_up = heads_up  # What telegram_heads_up returns.
+        self.heads_up = heads_up  # What push_heads_up returns.
         self.heads_ups: list[tuple[datetime, HeadsUpInput]] = []
         self.paused = paused  # The dashboard's pause switch, as dials_paused reads it.
         self.answer_on = answer_on
@@ -83,13 +83,13 @@ class Fakes:
         async def briefing_auto_dial() -> bool:
             return self.auto_dial
 
-        @activity.defn(name="telegram_heads_up")
-        async def telegram_heads_up(request: HeadsUpInput) -> str:
+        @activity.defn(name="push_heads_up")
+        async def push_heads_up(request: HeadsUpInput) -> str:
             self.heads_ups.append((await self.env.get_current_time(), request))
             return self.heads_up
 
         return [slot_plan, interview_part, slot_synthesize, slot_finish, slots_ready, block_record,
-                dials_paused, briefing_auto_dial, telegram_heads_up]
+                dials_paused, briefing_auto_dial, push_heads_up]
 
     def calls(self, client):
         @activity.defn(name="reserve_dial_slot")
@@ -406,7 +406,7 @@ def test_call_now_signals_at_once_and_picks_the_next_interview():
     assert request.on_demand and request.ready_keys == ["soon"] and workflow_id in client.signals
 
 
-# The owner's design (2026-10-16): a Telegram heads-up at T-30, calls only on request.
+# The owner's design (2026-10-16, a push since 2026-10-17): a heads-up at T-30, calls only on request.
 
 def test_by_default_t30_sends_a_heads_up_and_never_dials():
     async def test(env, fakes):
@@ -425,9 +425,9 @@ def test_a_failed_heads_up_still_never_dials():
     async def test(env, fakes):
         start = await env.get_current_time() + timedelta(hours=1)
         status = await (await start_block(env, start)).result()
-        assert status.state == "heads_up_failed" and "not linked" in status.detail
+        assert status.state == "heads_up_failed" and status.detail == "no_device"
         assert fakes.dials == []
-    run(test, auto_dial=False, heads_up="Telegram is not linked yet")
+    run(test, auto_dial=False, heads_up="no_device")
 
 
 def test_paused_sends_no_heads_up():

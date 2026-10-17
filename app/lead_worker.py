@@ -20,8 +20,8 @@
   bell item (`notify_email`); after every sync, the bell is matched to Gmail's unread job mail
   (`notify_unread`: one messages.list "is:unread newer_than:30d" plus the history's UNREAD
   label changes; older unread mail is added silently, mail read in Gmail is read in VALR);
-  after each rebuild, email notifications are linked to their lead and anything due goes out
-  on Telegram (`notify_rebuild`). `python -m app.lead_worker unread` runs the unread pass now.
+  after each rebuild, email notifications are linked to their lead and anything due is pushed
+  (`notify_rebuild`). `python -m app.lead_worker unread` runs the unread pass now.
 - LinkedIn messages and InMails (their email notifications, app/lead_classify.linkedin_message)
   become touchpoints from the named person: title "LinkedIn message", a contact with a name and
   no email address, the company from their stated employer, grouped by LinkedIn conversation,
@@ -205,16 +205,16 @@ async def notify_unread(connection: Any, http: httpx.AsyncClient, token: str, ch
     return result
 
 
-async def notify_rebuild(connection: Any, built: list[Any], bot: Any = None) -> None:
-    """After a lead rebuild: link email notifications to their lead, then Telegram for anything
-    due. Never fails the refresh."""
+async def notify_rebuild(connection: Any, built: list[Any]) -> None:
+    """After a lead rebuild: link email notifications to their lead, then push anything due.
+    Never fails the refresh."""
     from app import notifications
     try:
         store = notifications.Store(connection)
         await store.setup()
         now = datetime.now(timezone.utc)
         await notifications.after_rebuild(store, built, now)
-        await notifications.run_dispatch(connection, now, bot)
+        await notifications.run_dispatch(connection, now)
     except Exception as error:  # noqa: BLE001
         logger.warning("VALR notifications after the rebuild: %s", type(error).__name__)
 
@@ -241,10 +241,9 @@ class Budget:
 
 class LeadActivities:
     def __init__(self, http: httpx.AsyncClient | None = None,
-                 classify: Callable[[Email, set[str]], Decision] | None = None, bot: Any = None) -> None:
+                 classify: Callable[[Email, set[str]], Decision] | None = None) -> None:
         self.http = http or httpx.AsyncClient(timeout=30, follow_redirects=True)
         self._classify = classify
-        self._bot = bot
 
     def all(self) -> list[Any]:
         return [self.gmail_sync, self.leads_refresh, self.gmail_watch]
@@ -459,31 +458,24 @@ class LeadActivities:
             raise limited
 
     async def alert_reconnect(self, connection: Any, state: dict[str, Any]) -> bool:
-        """Telegram, once per expiry (keyed by the token's connected_at), when the refresh
-        token was refused (invalid_grant: Testing mode's 7 days, or revoked)."""
-        from app import telegram_api
+        """A bell item pushed to the phone, once per expiry (keyed by the token's connected_at),
+        when the refresh token was refused (invalid_grant: Testing mode's 7 days, or revoked)."""
+        from app import notifications
         info = await google_oauth.status(connection)
         expired = info.get("connected_at")
         if info.get("state") != "reconnect_needed" or expired is None \
                 or state.get("reconnect_alerted_for") == expired:
             return False
-        bot = self._bot or telegram_api.bot()
-        if bot is None:
-            logger.warning("VALR leads: Gmail needs reconnecting; Telegram is not set up to say so")
-            return False
-        await telegram_api.setup(connection)
-        chat = await telegram_api.owner_chat(connection)
-        if chat is None:
-            logger.warning("VALR leads: Gmail needs reconnecting; no linked Telegram chat")
-            return False
-        host = os.getenv("VALR_HOST", "valr.haciensus.com").strip()
+        note = {"source_id": f"account:google:{expired.isoformat()}", "kind": "account",
+                "title": "Google disconnected", "body": "Reconnect it so new invites and job emails keep coming.",
+                "company": "", "link": "/valr/settings#google", "gmail_url": "", "thread_id": None, "action": ""}
         try:
-            await bot.send(chat, f"Gmail disconnected — reconnect: https://{host}/oauth/google/start")
-        except telegram_api.TelegramError as error:
-            logger.warning("VALR leads: reconnect alert not sent: %s", error)
+            how = await notifications.notify_now(connection, note)
+        except Exception as error:  # noqa: BLE001 - tried again on the next sync
+            logger.warning("VALR leads: reconnect alert not created: %s", type(error).__name__)
             return False
         await leads_store.save_state(connection, reconnect_alerted_for=expired)
-        logger.info("VALR leads: Gmail reconnect alert sent on Telegram")
+        logger.info("VALR leads: Google reconnect alert in the bell (%s)", how)
         return True
 
     @activity.defn(name="gmail_watch")
@@ -538,7 +530,7 @@ class LeadActivities:
             built = leads.build(everything, now, corrections)
             await leads_store.move_overrides(connection, corrections.aliases)  # Renamed leads keep his corrections.
             await leads_store.save_leads(connection, built, everything, now)
-            await notify_rebuild(connection, built, self._bot)
+            await notify_rebuild(connection, built)
         summary.leads, summary.touches = len(built), len(everything)
         summary.active = sum(1 for lead in built if lead.status == "active")
         summary.expired = sum(1 for lead in built if lead.status == "expired")  # Closed leads are neither.

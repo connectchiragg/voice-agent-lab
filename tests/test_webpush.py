@@ -1,6 +1,6 @@
 """The Home Screen app and phone push: the manifest and icons, the service worker's headers, the
 owner-only push API with CSRF, the sender (pywebpush mocked: payload, no PII, 410 deletes),
-and the delivery switch between Telegram and phone push. All names and addresses are fictional."""
+the device list (remove one, test one) and the push pass. All names and addresses are fictional."""
 import asyncio
 import json
 import struct
@@ -11,7 +11,7 @@ import pytest
 
 from app import notifications as n
 from app import webpush
-from tests.test_notifications import Bot, MemoryStore, ist
+from tests.test_notifications import MemoryStore, ist
 
 ROOT = Path(__file__).resolve().parent.parent
 NOW = datetime(2026, 10, 17, 6, 0, tzinfo=timezone.utc)  # 11:30 IST
@@ -67,7 +67,9 @@ class Subs:
         next(r for r in self.rows if r["id"] == sub_id)["failures"] += 1
 
     async def delete(self, sub_id):
+        before = len(self.rows)
         self.rows = [r for r in self.rows if r["id"] != sub_id]
+        return before - len(self.rows)
 
 
 class Post:
@@ -188,43 +190,31 @@ def note(store, source, kind="offer", at=NOW, **extra):
     return run(n.add(store, {"source_id": source, "kind": kind, "title": "x", "company": "Arcworks", **extra}, at))
 
 
-def test_every_new_item_is_pushed_once_and_telegram_still_goes_by_default():
-    store, bot, post = MemoryStore(), Bot(), Post()
-    note(store, "gmail:a", "offer")
-    note(store, "gmail:b", "reply", thread_id="t2")
-    result = run(n.dispatch(store, NOW, bot, 42, sender(post=post)))
-    assert result["pushed"] == 2 and len(post.calls) == 2 and result["sent"] == 1  # Telegram: the offer now.
-    titles = [json.loads(c["data"])["title"] for c in post.calls]
-    assert titles == ["Action needed · Arcworks", "Reply · Arcworks"]
-    assert [json.loads(c["data"])["badge"] for c in post.calls] == [2, 2]
-    assert {r["push_state"] for r in store.rows} == {"sent"}
-    assert run(n.dispatch(store, NOW + timedelta(minutes=1), bot, 42, sender(post=post)))["pushed"] == 0
+def test_each_immediate_item_is_pushed_once_digest_kinds_wait_for_the_digest():
+    store, post = MemoryStore(), Post()
+    morning = ist(8, 30)  # Before the 09:00 digest.
+    note(store, "gmail:a", "offer", morning)
+    note(store, "gmail:b", "reply", morning, thread_id="t2")
+    result = run(n.dispatch(store, morning, sender(post=post)))
+    assert result["pushed"] == 1 and len(post.calls) == 1  # The reply waits for the 09:00 digest.
+    assert json.loads(post.calls[0]["data"])["title"] == "Action needed · Arcworks"
+    assert json.loads(post.calls[0]["data"])["badge"] == 2
+    assert run(n.dispatch(store, morning + timedelta(minutes=1), sender(post=post)))["pushed"] == 0
+    assert run(n.dispatch(store, ist(9, 5), sender(post=post)))["digest"] == 1  # The reply, in the 09:00 push.
+    assert json.loads(post.calls[-1]["data"])["title"] == "VALR · 1 update"
 
 
-def test_phone_push_only_suppresses_telegram():
-    store, bot, post = MemoryStore(), Bot(), Post()
-    run(store.save_switches(delivery="push"))
-    note(store, "gmail:a", "offer")
-    note(store, "gmail:r", "rejection")
-    result = run(n.dispatch(store, ist(9, 5), bot, 42, sender(post=post)))
-    assert result["pushed"] == 2 and bot.sent == [] and result["sent"] == 0 and result["digest"] == 0
-    assert {r["tg_state"] for r in store.rows} == {"skipped"}
+def test_one_device_can_be_tested_alone():
+    subs, post = Subs([APPLE, "https://fcm.googleapis.com/fcm/send/fictional"]), Post()
+    result = run(sender(subs, post).send(webpush.payload("t", "b"), NOW, only=2))
+    assert result.delivered == 1 and [c["subscription_info"]["endpoint"] for c in post.calls] == [
+        "https://fcm.googleapis.com/fcm/send/fictional"]
 
 
-def test_phone_push_only_falls_back_to_telegram_while_no_device_is_subscribed():
-    store, bot = MemoryStore(), Bot()
-    run(store.save_switches(delivery="push"))
-    note(store, "gmail:a", "offer")
-    result = run(n.dispatch(store, NOW, bot, 42, sender(Subs([]))))
-    assert result["sent"] == 1 and len(bot.sent) == 1 and store.rows[0]["push_state"] == "skipped"
-
-
-def test_telegram_only_pushes_nothing():
-    store, bot, post = MemoryStore(), Bot(), Post()
-    run(store.save_switches(delivery="telegram"))
-    note(store, "gmail:a", "offer")
-    result = run(n.dispatch(store, NOW, bot, 42, sender(post=post)))
-    assert result["sent"] == 1 and post.calls == [] and store.rows[0]["push_state"] == "skipped"
+def test_device_view_never_carries_the_endpoint_or_keys():
+    view = webpush.device_view(Subs().rows[0])
+    assert view["label"] == "iPhone" and view["key"] == webpush.endpoint_key(APPLE) and len(view["key"]) == 16
+    assert APPLE not in json.dumps(view) and "auth" not in view and "p256dh" not in view
 
 
 def test_push_respects_quiet_hours_reads_and_old_rows():
@@ -235,30 +225,32 @@ def test_push_respects_quiet_hours_reads_and_old_rows():
     note(store, "gmail:c", "reply", night, thread_id="t3")
     store.by_source("gmail:c")["read_at"] = night  # Already seen in the app.
     store.rows.append({**store.by_source("gmail:a"), "id": 99, "source_id": "old", "push_state": None})  # Pre-push row.
-    result = run(n.dispatch(store, night, None, None, sender(post=post)))
-    assert result == {"sent": 0, "held": 0, "digest": 0, "pushed": 1, "push_held": 1}
+    result = run(n.dispatch(store, night, sender(post=post)))
+    assert result == {"pushed": 1, "held": 1, "digest": 0}
     assert store.by_source("gmail:c")["push_state"] == "skipped" and store.by_source("old")["push_state"] is None
-    assert run(n.dispatch(store, ist(8, 1), None, None, sender(post=post)))["pushed"] == 1
+    assert run(n.dispatch(store, ist(8, 1), sender(post=post)))["pushed"] == 1
     assert len(post.calls) == 2
 
 
-def test_without_vapid_keys_nothing_is_pushed_and_telegram_is_unchanged(monkeypatch):
+def test_without_vapid_keys_nothing_is_pushed_and_items_stay_in_the_bell(monkeypatch):
     monkeypatch.delenv("VALR_VAPID_PRIVATE")
     assert webpush.Vapid.from_env() is None and webpush.public_key() == ""
-    store, bot = MemoryStore(), Bot()
+    store = MemoryStore()
     note(store, "gmail:a", "offer")
-    result = run(n.dispatch(store, NOW, bot, 42, None))
-    assert result["sent"] == 1 and store.rows[0]["push_state"] == "skipped"
+    result = run(n.dispatch(store, NOW, None))
+    assert result["pushed"] == 0 and store.rows[0]["push_state"] == "skipped" and not store.rows[0]["read_at"]
 
 
 def test_an_upgrade_in_the_same_thread_is_pushed_again():
     store, post = MemoryStore(), Post()
-    note(store, "gmail:a", "reply", thread_id="t1")
-    run(n.dispatch(store, NOW, None, None, sender(post=post)))
-    note(store, "gmail:b", "offer", NOW + timedelta(minutes=2), thread_id="t1")
-    run(n.dispatch(store, NOW + timedelta(minutes=2), None, None, sender(post=post)))
-    tags = [json.loads(c["data"])["tag"] for c in post.calls]
-    assert len(tags) == 2 and tags[0] == tags[1]  # Same tag: the phone replaces the first one.
+    morning = ist(8, 30)
+    note(store, "gmail:a", "reply", morning, thread_id="t1")
+    run(n.dispatch(store, morning, sender(post=post)))
+    assert post.calls == []  # A reply waits for the digest...
+    note(store, "gmail:b", "offer", morning + timedelta(minutes=2), thread_id="t1")
+    run(n.dispatch(store, morning + timedelta(minutes=2), sender(post=post)))
+    tags = [json.loads(c["data"])["tag"] for c in post.calls]  # ...an offer in the same thread is pushed now,
+    assert tags == [webpush.tag_for("t1")] and len(store.rows) == 1  # once, tagged by the thread.
 
 
 # The HTTP side.
@@ -331,7 +323,7 @@ def test_manifest_and_service_worker_are_public_with_the_right_headers(client):
 
 def test_subscribe_unsubscribe_and_test_are_owner_only_with_csrf(client):
     body = json.dumps(SUB)
-    for path in ("/valr/api/push/subscribe", "/valr/api/push/unsubscribe", "/valr/api/push/test"):
+    for path in ("/valr/api/push/subscribe", "/valr/api/push/unsubscribe", "/valr/api/push/test", "/valr/api/push/remove"):
         assert client.post(path, content=body).status_code == 403  # No login.
         assert client.post(path, content=body, headers={"Cf-Access-Jwt-Assertion": "guest",
                                                         "Content-Type": "application/json"}).status_code == 403
@@ -349,17 +341,39 @@ def test_subscribe_unsubscribe_and_test_are_owner_only_with_csrf(client):
     sent = client.post("/valr/api/push/test", content=b"{}", headers=csrf_headers(client)).json()
     assert sent["delivered"] == 1 and json.loads(client.pushes.calls[0]["data"])["title"] == "VALR test notification ✅"
     status = client.get("/valr/api/push", headers=client.good).json()
-    assert status["devices"] == 1 and status["public_key"] == webpush.public_key() and status["delivery"] == "both"
+    assert status["devices"] == 1 and status["public_key"] == webpush.public_key() and "delivery" not in status
+    assert len(status["device_list"]) == 1 and APPLE not in json.dumps(status)
     off = client.post("/valr/api/push/unsubscribe", content=json.dumps({"endpoint": APPLE}), headers=csrf_headers(client))
     assert off.json()["devices"] == 0
 
 
-def test_delivery_mode_is_saved_next_to_the_switches(client):
-    saved = client.post("/valr/api/notifications/settings", content=b'{"delivery": "push"}', headers=csrf_headers(client))
-    assert saved.json()["switches"]["delivery"] == "push" and client.memory.settings["delivery"] == "push"
-    assert client.post("/valr/api/notifications/settings", content=b'{"delivery": "fax"}',
-                       headers=csrf_headers(client)).status_code == 400
-    assert client.get("/valr/api/notifications", headers=client.good).json()["switches"]["delivery"] == "push"
+def test_a_lost_device_is_removed_by_id(client):
+    client.subs.rows = Subs([APPLE, "https://fcm.googleapis.com/fcm/send/fictional"]).rows
+    gone = client.post("/valr/api/push/remove", content=b'{"id": 1}', headers=csrf_headers(client))
+    assert gone.status_code == 200 and gone.json()["devices"] == 1
+    assert [r["id"] for r in client.subs.rows] == [2]
+    again = client.post("/valr/api/push/remove", content=b'{"id": 1}', headers=csrf_headers(client))
+    assert again.status_code == 404
+    assert client.post("/valr/api/push/remove", content=b'{"id": "x"}', headers=csrf_headers(client)).status_code == 400
+    one = client.post("/valr/api/push/test", content=b'{"id": 2}', headers=csrf_headers(client)).json()
+    assert one["delivered"] == 1
+
+
+def test_alert_times_are_saved_next_to_the_switches(client):
+    saved = client.post("/valr/api/notifications/settings", content=b'{"quiet_start": "22:00", "digest_at": "18:00"}',
+                        headers=csrf_headers(client))
+    assert saved.json()["switches"]["quiet_start"] == "22:00" and client.memory.settings["digest_at"] == "18:00"
+    for bad in (b'{"digest_at": "25:00"}', b'{"delivery": "push"}', b'{"quiet_start": "07:00", "quiet_end": "07:00"}'):
+        assert client.post("/valr/api/notifications/settings", content=bad, headers=csrf_headers(client)).status_code == 400
+    assert client.get("/valr/api/notifications", headers=client.good).json()["switches"]["digest_at"] == "18:00"
+
+
+def test_a_sample_digest_needs_a_device(client):
+    assert client.post("/valr/api/notifications/test", content=b'{"kind": "digest"}',
+                       headers=csrf_headers(client)).status_code == 409
+    client.subs.rows = Subs().rows
+    sent = client.post("/valr/api/notifications/test", content=b'{"kind": "digest"}', headers=csrf_headers(client))
+    assert sent.status_code == 200 and json.loads(client.pushes.calls[-1]["data"])["tag"] == "valr-digest-sample"
 
 
 def test_pages_carry_the_install_tags_and_settings_has_the_card(client):
@@ -370,4 +384,5 @@ def test_pages_carry_the_install_tags_and_settings_has_the_card(client):
         assert tag in page, tag
     settings = client.get("/valr/settings", headers=client.good).text
     assert 'id="phone-push"' in settings and "Phone notifications" in settings and "Add to Home Screen" in settings
-    assert settings.count("data-pwa-delivery") == 3 and "Enable notifications" in settings
+    assert "data-pwa-delivery" not in settings and "Enable notifications" in settings
+    assert "data-pwa-device-list" in settings and "Where alerts go" not in settings
