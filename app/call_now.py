@@ -20,6 +20,9 @@ from app.interview_workflow import (TASK_QUEUE, BlockCallWorkflow, BlockInput,
 
 PROMISE = timedelta(minutes=5)
 RESEARCH_S = 165
+# "Call me" with nothing coming up: a block with no interviews. The app side
+# (interviews.load_for_call) then starts the call in general owner mode.
+TALK_LABEL = "a quick chat"
 
 
 async def start_slot_research(client: Any, event: SlotEvent, owner_key: str, block_id: str,
@@ -46,6 +49,13 @@ async def call_now(client: Any, event: SlotEvent, owner_key: str, phone_e164: st
     """Start the call; returns its workflow id."""
     return await call_block_now(client, [event], [] if brief_ready else [event], owner_key,
                                 phone_e164, label_for(event), job_usd, dials_per_day, **rpc)
+
+
+async def call_talk_now(client: Any, owner_key: str, phone_e164: str, dials_per_day: int = 12,
+                        **rpc: Any) -> str:
+    """No upcoming interview: ring the owner anyway (once), for a general chat."""
+    return await call_block_now(client, [], [], owner_key, phone_e164, TALK_LABEL,
+                                dials_per_day=dials_per_day, **rpc)
 
 
 async def call_block_now(client: Any, events: list[SlotEvent], todo: list[SlotEvent],

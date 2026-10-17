@@ -90,9 +90,38 @@ def caller_key_from_email(email: object) -> str | None:
 
 async def web_caller_key(headers: Mapping[str, str]) -> str | None:
     """The browser caller: the signed-in VALR owner (app/auth), else the Cloudflare Access
-    user from a verified token only."""
+    user from a verified token only. The owner's browser key resolves to his phone key
+    (`owner_alias`), so "Talk here" and phone calls share one memory."""
     from app.auth import signed_in_email
-    return caller_key_from_email(signed_in_email() or await access.verified_email(headers))
+    return owner_alias(caller_key_from_email(signed_in_email() or await access.verified_email(headers)))
+
+
+merged: set[tuple[str, str]] = set()  # Aliases already folded into their target, this process.
+
+
+def owner_alias(key: str | None) -> str | None:
+    """The owner's `email:` key -> his `tel:` key (both owner keys, app/interviews.owner_keys);
+    any other key unchanged. What was stored under the email key is folded into the phone key
+    once (in the background), so nothing said in the browser earlier is lost."""
+    if key is None or not key.startswith("email:"):
+        return key
+    from app import interviews  # Imports this module; loaded late to avoid a cycle.
+    from app.interview_worker import owner_key
+    phone = owner_key()
+    if not phone or not interviews.is_owner(key) or not interviews.is_owner(phone):
+        return key
+    if store is not None and (key, phone) not in merged:
+        merged.add((key, phone))
+        spawn(merge_alias(key, phone))
+    return phone
+
+
+async def merge_alias(source: str, target: str) -> None:
+    try:
+        await store.merge(source, target)  # type: ignore[union-attr]
+    except Exception as error:  # noqa: BLE001 - retried by the next call in a new process.
+        merged.discard((source, target))
+        logger.warning("Caller memory alias not merged: %s", type(error).__name__)
 
 
 # Storage.
@@ -138,6 +167,19 @@ class MemoryStore(Protocol):
     async def forget(self, caller_key: str) -> bool: ...
     async def delete_threads(self, thread_ids: Sequence[str]) -> None: ...
     async def set_open_items(self, caller_key: str, open_items: list[str]) -> None: ...
+    # Fold everything stored under `source` into `target` (an alias of the same person).
+    async def merge(self, source: str, target: str) -> None: ...
+
+
+def merged_memory(target: CallerMemory | None, source: CallerMemory, key: str) -> CallerMemory:
+    """Two memories of one person: counts add up, the newer profile and open items win."""
+    if target is None:
+        return replace(source, caller_key=key)
+    newer, older = (source, target) if source.last_seen > target.last_seen else (target, source)
+    return CallerMemory(key, newer.display_name or older.display_name,
+                        min(target.first_seen, source.first_seen), newer.last_seen,
+                        target.call_count + source.call_count, newer.profile or older.profile,
+                        newer.open_items or older.open_items, newer.last_summary or older.last_summary)
 
 
 class InMemoryStore:
@@ -179,6 +221,14 @@ class InMemoryStore:
     async def set_open_items(self, caller_key: str, open_items: list[str]) -> None:
         if caller_key in self.callers:
             self.callers[caller_key] = replace(self.callers[caller_key], open_items=open_items)
+
+    async def merge(self, source: str, target: str) -> None:
+        old = self.callers.pop(source, None)
+        if old is not None:
+            self.callers[target] = merged_memory(self.callers.get(target), old, target)
+        for call_id, (key, record) in list(self.summaries.items()):
+            if key == source:
+                self.summaries[call_id] = (target, record)
 
 
 SCHEMA = """
@@ -275,6 +325,28 @@ class PostgresStore:
             for thread_id in threads:
                 await self.delete_thread(thread_id)
         return had_memory
+
+    async def merge(self, source: str, target: str) -> None:
+        """One transaction: the summaries move; the caller rows combine (merged_memory's rules)."""
+        async with self.pool.connection() as connection, connection.transaction():
+            await connection.execute("UPDATE call_summaries SET caller_key = %s WHERE caller_key = %s",
+                                     (target, source))
+            await connection.execute(
+                "INSERT INTO callers (caller_key, display_name, first_seen, last_seen, call_count, profile, "
+                "open_items) SELECT %s, display_name, first_seen, last_seen, call_count, profile, open_items "
+                "FROM callers WHERE caller_key = %s ON CONFLICT (caller_key) DO UPDATE SET "
+                "display_name = CASE WHEN excluded.last_seen > callers.last_seen "
+                "  THEN coalesce(excluded.display_name, callers.display_name) "
+                "  ELSE coalesce(callers.display_name, excluded.display_name) END, "
+                "first_seen = least(callers.first_seen, excluded.first_seen), "
+                "last_seen = greatest(callers.last_seen, excluded.last_seen), "
+                "call_count = callers.call_count + excluded.call_count, "
+                "profile = CASE WHEN excluded.last_seen > callers.last_seen AND excluded.profile <> '' "
+                "  THEN excluded.profile WHEN callers.profile = '' THEN excluded.profile ELSE callers.profile END, "
+                "open_items = CASE WHEN excluded.last_seen > callers.last_seen AND excluded.open_items <> '[]'::jsonb "
+                "  THEN excluded.open_items WHEN callers.open_items = '[]'::jsonb THEN excluded.open_items "
+                "  ELSE callers.open_items END", (target, source))
+            await connection.execute("DELETE FROM callers WHERE caller_key = %s", (source,))
 
     async def set_open_items(self, caller_key: str, open_items: list[str]) -> None:
         async with self.pool.connection() as connection:

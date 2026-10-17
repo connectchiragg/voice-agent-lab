@@ -1,4 +1,5 @@
-"""Interviews: upcoming (by day) and past, and one page per interview.
+"""Interviews: upcoming (by day), past, and processes (app/valr_ui/processes.py), and one page
+per interview.
 
 Upcoming detail (the briefing, one screen): header with the countdown and a ⋯ menu (Refresh
 research, Fix company, Hear the briefing); then the summary, likely questions and prep
@@ -21,7 +22,8 @@ PEOPLE_ROLE = {"skipped_hr": "Recruiter", "declined": "Declined the invite"}
 
 
 def tabs(active: str, past_count: int) -> str:
-    items = [("upcoming", "Upcoming", "/valr/interviews"), ("past", "Past", "/valr/interviews/past")]
+    items = [("upcoming", "Upcoming", "/valr/interviews"), ("past", "Past", "/valr/interviews/past"),
+             ("processes", "Processes", "/valr/interviews/processes")]
     return ('<nav class="tabs" aria-label="Interviews">' + "".join(
         f'<a href="{h}"{" aria-current=\"page\"" if k == active else ""}>{e(t)}'
         + (f' <span class="count">{past_count}</span>' if k == "past" and past_count else "") + "</a>"
