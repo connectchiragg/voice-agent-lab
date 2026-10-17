@@ -38,7 +38,7 @@ sed -e "s/__VERSION__/$VERSION/" -e "s/__BUILD__/$BUILD/" "$PKG/Resources/Info.p
 printf 'APPL????' > "$APP/Contents/PkgInfo"
 
 echo "==> Icons"
-# AppIcon.icns from the 1024 px master (scripts/make_icons.py --mac draws it from VALR's orb mark).
+# AppIcon.icns from the 1024 px master (mac/dmg/make_app_icon.swift draws it: the Signal V on porcelain).
 ICONSET="$(mktemp -d)/AppIcon.iconset"
 mkdir -p "$ICONSET"
 for size in 16 32 128 256 512; do
@@ -48,7 +48,8 @@ done
 iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/AppIcon.icns"
 rm -rf "$(dirname "$ICONSET")"
 # The menu-bar mark: a template image, so macOS tints it for light and dark menu bars.
-cp "$PKG/Resources/MenuBarIconTemplate.png" "$PKG/Resources/MenuBarIconTemplate@2x.png" "$APP/Contents/Resources/"
+cp "$PKG/Resources/MenuBarIconTemplate.png" "$PKG/Resources/MenuBarIconTemplate@2x.png" \
+   "$PKG/Resources/Lockup-light.png" "$PKG/Resources/Lockup-dark.png" "$APP/Contents/Resources/"
 
 echo "==> Signing ($([ "$SIGN_ID" = "-" ] && echo ad-hoc || echo "$SIGN_ID"))"
 TS_FLAG="--timestamp=none"

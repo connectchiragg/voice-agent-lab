@@ -55,8 +55,8 @@ def bar_path(cx: float, y0: float, y1: float) -> str:
     return "".join(d) + "Z"
 
 
-def bar_polygon(cx: float, y0: float, y1: float, steps: int = 24) -> list[tuple[float, float]]:
-    start, segs = bar_segments(cx, y0, y1)
+def bar_polygon(cx: float, y0: float, y1: float, steps: int = 24, w: float = WIDTH) -> list[tuple[float, float]]:
+    start, segs = bar_segments(cx, y0, y1, w)
     poly, p = [start], start
     for kind, *pts in segs:
         if kind == "L":
@@ -91,11 +91,11 @@ def coverage(size: int, poly: list[tuple[float, float]]) -> list[list[float]]:
     return grid
 
 
-def mark_layers(size: int, scale: float = 1.0):
+def mark_layers(size: int, scale: float = 1.0, w: float = WIDTH, bars=BARS):
     """Coverage of [outer strokes, centre stroke] with the 100-unit box scaled to `size` px."""
     k = size / 100 * scale
     off = (size - size * scale) / 2
-    polys = [[(off + x * k, off + y * k) for x, y in bar_polygon(*b)] for b in BARS]
+    polys = [[(off + x * k, off + y * k) for x, y in bar_polygon(*b, w=w)] for b in bars]
     left, right = coverage(size, polys[0]), coverage(size, polys[2])
     return ([[min(1.0, left[y][x] + right[y][x]) for x in range(size)] for y in range(size)],
             coverage(size, polys[1]))
@@ -134,10 +134,20 @@ def tile_icon(size: int, corner: float | None, scale: float = 0.54):
     return rows
 
 
-def solid(size: int, rgb: tuple[int, int, int], scale: float = 1.0):
+def solid(size: int, rgb: tuple[int, int, int], scale: float = 1.0, w: float = WIDTH, bars=BARS):
     """The mark alone in one colour on transparent (badge, menu-bar template)."""
-    outer, centre = mark_layers(size, scale)
+    outer, centre = mark_layers(size, scale, w, bars)
     return [[(*rgb, round(255 * min(1.0, outer[y][x] + centre[y][x]))) for x in range(size)] for y in range(size)]
+
+
+def menu_template(size: int):
+    """The menu-bar cut, hinted to the 18 pt pixel grid: each stroke exactly 2 pt wide on
+    whole points (crisp at @1x), 2 pt apart, the mark 15 pt tall like system glyphs; the
+    centre stroke drops 5 pt, as in the mark. Black on transparent (a template image)."""
+    f = size / 18
+    bars = [(5, 1.5, 11), (9, 6.5, 16.5), (13, 1.5, 11)]  # (centre x, top, bottom) in points.
+    cover = [coverage(size, [(x * 1, y * 1) for x, y in bar_polygon(cx * f, y0 * f, y1 * f, w=2 * f)]) for cx, y0, y1 in bars]
+    return [[(0, 0, 0, round(255 * min(1.0, sum(c[y][x] for c in cover)))) for x in range(size)] for y in range(size)]
 
 
 def png_bytes(pixels) -> bytes:
@@ -203,8 +213,8 @@ def main() -> None:
 def mac() -> None:
     MAC_OUT.mkdir(parents=True, exist_ok=True)
     # The menu bar: 18 pt, black on transparent, so macOS tints it for light and dark bars.
-    png(MAC_OUT / "MenuBarIconTemplate.png", solid(18, (0, 0, 0), 1.1))
-    png(MAC_OUT / "MenuBarIconTemplate@2x.png", solid(36, (0, 0, 0), 1.1))
+    png(MAC_OUT / "MenuBarIconTemplate.png", menu_template(18))
+    png(MAC_OUT / "MenuBarIconTemplate@2x.png", menu_template(36))
     print("wrote MenuBarIconTemplate.png, MenuBarIconTemplate@2x.png (AppIcon-1024.png: mac/dmg/make_app_icon.swift)")
 
 
