@@ -22,6 +22,11 @@
   label changes; older unread mail is added silently, mail read in Gmail is read in VALR);
   after each rebuild, email notifications are linked to their lead and anything due goes out
   on Telegram (`notify_rebuild`). `python -m app.lead_worker unread` runs the unread pass now.
+- LinkedIn messages and InMails (their email notifications, app/lead_classify.linkedin_message)
+  become touchpoints from the named person: title "LinkedIn message", a contact with a name and
+  no email address, the company from their stated employer, grouped by LinkedIn conversation,
+  linking to LinkedIn (`linkedin_touch`). `python -m app.lead_worker relinkedin [--dry-run]`
+  queues the ones the older rules dropped (last 30 days) for the next sync.
 
 Settings: VALR_LEADS=1 turns the schedules on; VALR_GMAIL_TOPIC; VALR_LEADS_BACKFILL_DAYS (30),
 VALR_LEADS_BACKFILL_MAX (500), VALR_LEADS_LLM_PER_DAY (300), VALR_LEADS_POLL_MINUTES (30),
@@ -101,11 +106,36 @@ async def connect() -> psycopg.AsyncConnection:
 
 def snippet_cipher(email: Email) -> str | None:
     key = os.getenv("VALR_TOKEN_KEY", "").strip()
-    text = " ".join(email.snippet.split())[:200]
+    message = lead_classify.linkedin_message(email)
+    text = " ".join((message.text if message is not None and message.text else email.snippet).split())[:200]
     return google_oauth.encrypt(key, text) if key and text else None
 
 
+LINKEDIN_TITLE = "LinkedIn message"
+
+
+def linkedin_touch(email: Email, decision: Decision, message: lead_classify.LinkedInMessage,
+                   owners: set[str]) -> Touch:
+    """A LinkedIn message or InMail: from the named person (a contact with a name and no email
+    address), its company from their stated employer (never LinkedIn), grouped by the LinkedIn
+    conversation (else the sender's name), linking to LinkedIn."""
+    people = [Contact("", message.name, decision.sender_role)] if message.name else []
+    stated = lead_classify.linkedin_company(decision.company, message)
+    found = company_names.resolve(sender_name=message.name, stated=stated, owner_emails=owners)
+    return Touch(id=f"gmail:{email.id}", kind="email", at=email.at,
+                 company=company_names.firm(found, [message.name]), stated=stated[:80],
+                 company_how=company_resolver.HOW.get(found.source, "").format(domain=found.domain),
+                 domain="", people=people, title=LINKEDIN_TITLE, summary=decision.summary, direction="in",
+                 sentiment=decision.sentiment, cue=decision.cue, stage_hint=decision.stage_hint,
+                 next_step=decision.next_step, url=message.url, role=decision.role,
+                 thread=message.group or email.thread_id, category=decision.category,
+                 action_requested=decision.action_requested, action=decision.action)
+
+
 def email_touch(email: Email, decision: Decision, owners: set[str]) -> Touch:
+    message = lead_classify.linkedin_message(email)
+    if message is not None:
+        return linkedin_touch(email, decision, message, owners)
     outbound = email.from_email.lower() in owners
     people = [Contact(a, n, r) for a, n, r in lead_classify.touch_people(email, decision, owners)]
     domain = "" if outbound else lead_classify.sender_domain(email)
@@ -914,6 +944,52 @@ async def repair_companies(dry_run: bool = False, verbose: bool = False, max_mod
             "recordings": [f"{a or '-'} -> {b or company_names.NOT_IDENTIFIED}" for _, a, b in recordings]}
 
 
+RELINKEDIN_DAYS = 30
+
+
+async def relinkedin(dry_run: bool = False, days: int = RELINKEDIN_DAYS) -> dict[str, Any]:
+    """`python -m app.lead_worker relinkedin [--dry-run]`: LinkedIn message and InMail
+    notifications of the last `days` days that the older rules dropped (as job-board mail) go
+    back to "deferred", so the next Gmail sync re-classifies them with the LinkedIn handling
+    (DEFERRED_PER_PASS a sync, within the day's model budget). Each dropped linkedin.com email is
+    fetched once to tell a person's message from a job alert or digest (those stay dropped).
+    Prints counts only. A dry run changes nothing."""
+    from app.interview_worker import gmail_access
+    out: dict[str, Any] = {"dry_run": dry_run, "days": days, "dropped_linkedin_emails": 0, "checked": 0,
+                           "linkedin_messages": 0, "queued_for_next_sync": 0, "rate_limited": False}
+    async with await connect() as connection, httpx.AsyncClient(timeout=30, follow_redirects=True) as http:
+        await leads_store.setup(connection)
+        token, status = await gmail_access(connection, http)
+        if not token:
+            return {"error": f"Gmail {status}"}
+        cursor = await connection.execute(
+            "SELECT message_id FROM lead_emails WHERE decision = 'drop' AND received_at >= now() - make_interval(days => %s) "
+            "AND (sender_domain = 'linkedin.com' OR sender_domain LIKE '%%.linkedin.com') ORDER BY received_at DESC",
+            (days,))
+        ids = [row[0] for row in await cursor.fetchall()]
+        out["dropped_linkedin_emails"] = len(ids)
+        found = []
+        for message_id in ids:
+            try:
+                raw = await gmail_api.message(http, token, message_id)
+            except gmail_api.GmailRateLimited:
+                out["rate_limited"] = True  # Run it again later: queued ones are no longer "drop".
+                break
+            if raw is None:
+                continue
+            out["checked"] += 1
+            if lead_classify.linkedin_message(gmail_api.parse(raw)) is not None:
+                found.append(message_id)
+        out["linkedin_messages"] = len(found)
+        if found and not dry_run:
+            cursor = await connection.execute(
+                "UPDATE lead_emails SET decision = 'deferred', method = 'deferred', reason = 'relinkedin', "
+                "processed_at = now() WHERE message_id = ANY(%s) AND decision = 'drop'", (found,))
+            out["queued_for_next_sync"] = cursor.rowcount
+    logger.info("VALR leads: relinkedin %s", json.dumps(out, sort_keys=True))
+    return out
+
+
 # Schedules (the research worker calls this at start) and a small CLI.
 
 async def ensure_lead_schedules(client: Any) -> None:
@@ -947,7 +1023,7 @@ async def ensure_lead_schedules(client: Any) -> None:
 
 
 async def cli(command: str) -> None:
-    """`python -m app.lead_worker sync|watch|stats|unread|repair-companies [--dry-run]`: counts
+    """`python -m app.lead_worker sync|watch|stats|unread|repair-companies|relinkedin [--dry-run]`: counts
     and company names only, no content. `unread`: the bell matched to Gmail's unread job mail
     now (otherwise it runs after every sync)."""
     from dataclasses import asdict
@@ -962,6 +1038,9 @@ async def cli(command: str) -> None:
         cap = re.search(r"--max-model-calls[= ](\d+)", command)
         print(json.dumps(await repair_companies(dry_run="--dry-run" in command, verbose="--verbose" in command,
                                                 max_model_calls=int(cap.group(1)) if cap else 500), indent=2))
+        return
+    if command.startswith("relinkedin"):
+        print(json.dumps(await relinkedin(dry_run="--dry-run" in command), indent=2))
         return
     if command == "unread":
         from app.interview_worker import gmail_access
@@ -1004,7 +1083,8 @@ if __name__ == "__main__":
     import sys
     from dotenv import load_dotenv
     load_dotenv(Path(__file__).resolve().parent.parent / ".env")
-    if sys.argv[1:2] not in (["sync"], ["watch"], ["stats"], ["unread"], ["repair-companies"], ["transcript-companies"]):
+    if sys.argv[1:2] not in (["sync"], ["watch"], ["stats"], ["unread"], ["repair-companies"], ["transcript-companies"],
+                             ["relinkedin"]):
         sys.exit("usage: python -m app.lead_worker sync|watch|stats|unread|"
-                 "repair-companies|transcript-companies [--dry-run] [--verbose] [--max-model-calls N]")
+                 "repair-companies|transcript-companies|relinkedin [--dry-run] [--verbose] [--max-model-calls N]")
     asyncio.run(cli(" ".join(sys.argv[1:6])))

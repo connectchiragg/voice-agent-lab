@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import html as html_lib
 import logging
 import os
 import random
@@ -259,6 +260,10 @@ def decode(data: str) -> str:
     return base64.urlsafe_b64decode(data + "=" * (-len(data) % 4)).decode("utf-8", "replace")
 
 
+# An HTML-only LinkedIn message notification: its "View message" link is kept as text.
+LINKEDIN_HREF = re.compile(r"""(?i)<a\b[^>]*\bhref=["'](https://(?:www\.)?linkedin\.com/(?:comm/)?messaging/thread/[^"']+)["'][^>]*>""")
+
+
 def body_text(payload: dict[str, Any]) -> str:
     """The first text/plain part, else the first text/html part with tags removed."""
     stack, html = [payload], ""
@@ -270,6 +275,7 @@ def body_text(payload: dict[str, Any]) -> str:
             return decode(data)
         if data and mime == "text/html" and not html:
             raw = re.sub(r"(?is)<(script|style)\b.*?</\1>", " ", decode(data))
+            raw = LINKEDIN_HREF.sub(lambda m: f"\n{html_lib.unescape(m.group(1))}\n", raw)  # Keep the conversation link.
             html = re.sub(r"[ \t]+", " ", re.sub(r"<br\s*/?>|</p>|</div>", "\n", re.sub(r"<(?!br|/p|/div)[^>]+>", " ", raw)))
         stack.extend(part.get("parts") or [])
     return html
