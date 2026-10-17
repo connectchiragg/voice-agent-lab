@@ -25,8 +25,8 @@ from app import notifications, research, valr_dashboard, webpush
 router = APIRouter()
 NO_CACHE = valr_dashboard.NO_CACHE
 STATIC = Path(__file__).resolve().parent.parent / "static"
-THEME = "#0b0c0f"       # --bg (dark) in static/valr-ds.css: the app background and the status bar.
-BACKGROUND = "#0b0c0f"
+THEME = "#F4F0E8"       # --bg (light porcelain) in static/valr-ds.css: the status bar and the splash.
+BACKGROUND = "#F4F0E8"  # The porcelain tile icon sits on porcelain while the app opens.
 
 MANIFEST = {
     "name": "VALR",
@@ -58,6 +58,13 @@ async def manifest() -> JSONResponse:
 async def service_worker() -> FileResponse:
     return FileResponse(STATIC / "sw.js", media_type="text/javascript",
                         headers={"Service-Worker-Allowed": "/", "Cache-Control": "no-cache"})
+
+
+@router.get("/favicon.ico")
+async def favicon() -> FileResponse:
+    """Browsers and bookmark tools ask for /favicon.ico by habit: the Signal V (16, 32, 48 px)."""
+    return FileResponse(STATIC / "icons" / "favicon.ico", media_type="image/x-icon",
+                        headers={"Cache-Control": "public, max-age=86400"})
 
 
 def pool():
