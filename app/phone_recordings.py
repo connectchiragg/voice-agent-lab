@@ -450,7 +450,7 @@ WAKE_CHANNEL = "valr_phone_upload"
 
 
 async def announce(connection: Any, upload_id: str, other_name: str, now: datetime | None = None) -> None:
-    """An upload just finished (the app, app/phone_web.py): its bell item now, pushed now, and the
+    """An upload just finished (the app, app/phone_web.py): its (silent) bell item now, and the
     worker woken to transcribe it now. Never raises: the upload is stored either way."""
     now = now or datetime.now(timezone.utc)
     try:
@@ -462,7 +462,6 @@ async def announce(connection: Any, upload_id: str, other_name: str, now: dateti
         store = notifications.Store(connection)
         await store.setup()
         if await notifications.from_call_upload(store, upload_id, other_name, now) is not None:
-            await notifications.dispatch_now(connection)
             logger.info("VALR notification latency: call in the bell %.1f s after its upload",
                         (datetime.now(timezone.utc) - now).total_seconds())
     except Exception as error:  # noqa: BLE001

@@ -28,27 +28,24 @@ def env(monkeypatch):
     monkeypatch.setenv("ASSISTANT_TIMEZONE", "Asia/Kolkata")
 
 
-def test_a_call_is_in_the_bell_and_pushed_at_upload_then_ready_silently():
+def test_a_call_is_in_the_bell_silently_and_its_only_push_is_the_coach_review():
     store, sender = MemoryStore(), PushSender()
     assert run(n.from_call_upload(store, "ab12cd34", "Priya Raman", NOW)) is not None
     row = store.by_source("phone:ab12cd34")
-    assert row["title"] == "Call with Priya Raman recorded" and row["importance"] == "immediate"
+    assert row["title"] == "Call with Priya Raman recorded" and row["read_at"] == NOW  # No red dot.
     assert row["link"] == "/valr/interviews/past/phone-ab12cd34" and row["arrived_at"] == NOW
-    assert run(n.dispatch(store, NOW, sender=sender))["pushed"] == 1
-    first = sender.sent[0]
-    assert first["title"] == "Call with Priya Raman recorded" and first["body"] == "Transcribing; the coach review follows."
-    # Processed: the same item says so, without another push.
+    assert run(n.dispatch(store, NOW, sender=sender))["pushed"] == 0 and sender.sent == []
+    # Processed: the same item says so, still without a push.
     later = NOW + timedelta(seconds=40)
     assert run(n.from_recording(store, "phone", "ab12cd34", "Northwind Labs", "Priya Raman", later)) is None
     row = store.by_source("phone:ab12cd34")
     assert row["title"] == "Call with Northwind Labs is ready" and row["ready_at"] == later and len(store.rows) == 1
-    assert run(n.dispatch(store, later, sender=sender))["pushed"] == 0 and len(sender.sent) == 1
+    assert run(n.dispatch(store, later, sender=sender))["pushed"] == 0 and sender.sent == []
     assert run(n.from_recording(store, "phone", "ab12cd34", "Northwind Labs", "Priya Raman", later)) is None  # A re-run.
-    # The coach review's push carries the call's tag: the phone replaces the first notification.
-    review = {"source_id": "review:phone:ab12cd34", "kind": "review", "title": "Your coach review is ready",
-              "thread_id": None, "lead_id": None}
-    assert n.push_message(review)["tag"] == first["tag"]
-    assert n.push_message({**review, "source_id": "review:phone:zz99"})["tag"] != first["tag"]
+    # A recording with no upload item (a notetaker) is silent too.
+    run(n.from_recording(store, "fathom", "f1", "Northwind Labs", "", later))
+    assert store.by_source("fathom:f1")["push_state"] == "skipped"
+    assert run(n.dispatch(store, later, sender=sender))["pushed"] == 0
 
 
 def test_a_number_never_reaches_a_title_or_a_push():
@@ -98,7 +95,7 @@ class Conn:
         self.sql.append(sql)
 
 
-def test_announce_wakes_the_worker_and_pushes_now(monkeypatch):
+def test_announce_wakes_the_worker_without_a_push(monkeypatch):
     store, pushed = MemoryStore(), []
 
     async def dispatch_now(connection, tries=5, wait=0.5):
@@ -107,7 +104,7 @@ def test_announce_wakes_the_worker_and_pushes_now(monkeypatch):
     monkeypatch.setattr(n, "dispatch_now", dispatch_now)
     conn = Conn()
     run(phone.announce(conn, "ab12", "Priya Raman", NOW))
-    assert conn.sql == [f"NOTIFY {phone.WAKE_CHANNEL}"] and pushed == [conn]
+    assert conn.sql == [f"NOTIFY {phone.WAKE_CHANNEL}"] and pushed == []
     assert store.by_source("phone:ab12")["title"] == "Call with Priya Raman recorded"
 
     class Broken(Conn):

@@ -573,27 +573,34 @@ def past_link(provider: str, external_id: str) -> str:
     return f"/valr/interviews/past/{provider}-{external_id}"
 
 
+def SILENT(now: datetime) -> dict[str, Any]:  # noqa: N802 - a constant-like helper
+    """A call's own items: in the bell as history, read and never pushed; the call's one
+    notification is its coach review (app/post_call.deliver)."""
+    return {"push_state": "skipped", "read_at": now}
+
+
 async def from_call_upload(store: Any, upload_id: str, other: str, now: datetime) -> int | None:
     """A phone call recording just uploaded -> its bell item at once ("Call with Riya recorded"),
-    immediate, so it is pushed now; the same item becomes "... is ready" when it is processed
-    (`from_recording`). The upload finishing is its arrival (the latency figures)."""
+    silent: read, never pushed (the owner, 2026-10-17: one notification per call, the coach
+    review once the pipeline is done, and only for an interview). The same item becomes "... is
+    ready" when it is processed (`from_recording`). The upload finishing is its arrival (the
+    latency figures)."""
     from app.phone_recordings import PROVIDER
     who = call_party(other)
     note = {"source_id": f"{PROVIDER}:{upload_id}", "kind": "recording", "importance": "immediate",
             "title": f"Call with {who} recorded" if who else "New call recording",
             "body": "Transcribing; the coach review follows.", "company": "",
             "link": past_link(PROVIDER, upload_id), "gmail_url": "", "thread_id": None, "action": "uploaded",
-            "arrived_at": now}
+            "arrived_at": now, **SILENT(now)}
     return await add(store, note, now)
 
 
 async def from_recording(store: Any, provider: str, external_id: str, company: str, other: str,
                          now: datetime) -> int | None:
-    """A processed call recording -> its notification linking to its past-interview page. A phone
-    call's item from the upload (`from_call_upload`) is updated in place, silently: the one more
-    push a call gets is "Your coach review is ready" (app/post_call.deliver), which carries the
-    same push tag (`push_tag`), so the phone replaces the first notification instead of
-    stacking. -> the id of a NEW item (push it), else None."""
+    """A processed call recording -> its bell item linking to its past-interview page, silent (read,
+    not pushed): a phone call's item from the upload (`from_call_upload`) is updated in place.
+    The one notification a call gets is "Your coach review is ready" (app/post_call.deliver),
+    only for an interview. -> the id of a NEW item, else None."""
     who = name_of(company) or call_party(other)
     note = {"source_id": f"{provider}:{external_id}", "kind": "recording",
             "title": f"Call with {who} is ready" if who else "Your call recording is ready",
@@ -602,7 +609,7 @@ async def from_recording(store: Any, provider: str, external_id: str, company: s
             "action": "ready"}
     found = await store.get_source(note["source_id"])
     if found is None:
-        return await add(store, {**note, "ready_at": now}, now)
+        return await add(store, {**note, "ready_at": now, **SILENT(now)}, now)
     if found.get("action") == "ready":
         return None  # A re-run.
     note["body"] = "Transcript is in Past interviews; the coach review follows."
