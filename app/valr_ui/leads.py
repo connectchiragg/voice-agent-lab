@@ -11,7 +11,7 @@ Data: app/valr_ui/contracts.leads()."""
 from typing import Any
 
 from app.company_names import NOT_IDENTIFIED
-from app.valr_page import Clock, chip, e, link
+from app.valr_page import Clock, chip, e, link, mail_source
 from app.valr_ui import wording
 from app.valr_ui.home import band_sw
 from app.valr_ui.shell import empty_state, icon, menu, menu_item, page_head, sheet
@@ -107,7 +107,7 @@ def timeline_item(t: dict[str, Any], lead: dict[str, Any], clock: Clock) -> str:
     title = wording.without_company(t["title"], lead["company"]) or t["summary"]
     summary = t["summary"] if t["summary"] and t["summary"] != title else ""
     links = " ".join(x for x in (
-        link(t["url"], "Gmail" if t["kind"] == "email" else "Recording") if t["url"] else "",
+        link(t["url"], mail_source(t["url"]) if t["kind"] == "email" else "Recording") if t["url"] else "",
         f'<a href="{e(t["detail_url"])}">Interview</a>' if t["detail_url"] else "") if x)
     meta = " · ".join(x for x in (KIND.get(t["kind"], ""), "You" if t["you"] else "",
                                   f'{e(clock.day(t["at"]))}, {clock.time(t["at"], zone=False)}' if t["at"] else "") if x)

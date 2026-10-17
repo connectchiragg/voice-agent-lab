@@ -14,7 +14,7 @@ from functools import cache
 from pathlib import Path
 from typing import Any
 
-from app.valr_page import FONTS, ICON, Clock, e
+from app.valr_page import FONTS, ICON, Clock, e, mail_source
 
 NAV = [("home", "Home", "/valr"), ("interviews", "Interviews", "/valr/interviews"),
        ("leads", "Leads", "/valr/leads"), ("progress", "Progress", "/valr/progress"),
@@ -230,7 +230,7 @@ def note_item(n: dict[str, Any], now: datetime, tag: str = "li") -> str:
     """One notification; the same markup static/valr-notify.js builds. A click marks it read."""
     meta = " · ".join(x for x in (n.get("company") or "", n.get("label") or "", ago(n.get("created_at") or "", now)) if x)
     gmail = (f'<a class="notif-gmail" href="{e(n["gmail_url"])}" target="_blank" rel="noopener noreferrer" '
-             f'data-notif-item="{e(n["id"])}" data-notif-stay>Open in Gmail</a>' if n.get("gmail_url") else "")
+             f'data-notif-item="{e(n["id"])}" data-notif-stay>Open in {mail_source(n["gmail_url"])}</a>' if n.get("gmail_url") else "")
     unread = not n.get("read")
     return (f'<{tag} class="notif-item{" unread" if unread else ""} notif-{e(n.get("importance") or "digest")} kind-{e(n.get("kind") or "")}" data-notif-id="{e(n["id"])}">'
             f'<a class="notif-main" href="{e(n.get("link") or "/valr/leads")}" data-notif-item="{e(n["id"])}">'
