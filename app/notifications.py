@@ -248,6 +248,22 @@ def email_title(kind: str, company: str, action: str = "", new_thread: bool = Fa
             "reply": f"{who} replied", "update": f"{who} sent an update"}[kind]
 
 
+LINKEDIN_URL = "https://www.linkedin.com/"
+
+
+def linkedin_title(touch: Any) -> str:
+    """"Priya (Acme) messaged you on LinkedIn" for a LinkedIn message touchpoint (the sender's
+    first name and company only), else "". Same kinds and routing as any email."""
+    if not str(getattr(touch, "url", "") or "").startswith(LINKEDIN_URL) \
+            or not str(getattr(touch, "title", "") or "").startswith("LinkedIn message"):
+        return ""
+    people = getattr(touch, "people", None) or []
+    first = next((p.name.split()[0] for p in people if getattr(p, "name", "").split()), "")
+    company = name_of(getattr(touch, "company", "") or "")
+    who = f"{first} ({company})" if first and company else first or (f"Someone at {company}" if company else "Someone")
+    return f"{who} messaged you on LinkedIn"[:140]
+
+
 def plain_action(action: str) -> str:
     text = " ".join((action or "").split()).rstrip(".")
     text = re.sub(r"^(please|kindly)\s+", "", text, flags=re.I)
@@ -524,9 +540,9 @@ async def from_email(store: Any, email: Any, decision: Any, touch: Any, new_thre
     if kind is None:
         return None
     note = {"source_id": f"gmail:{email.id}", "kind": kind,
-            "title": email_title(kind, touch.company, decision.action, new_thread),
+            "title": linkedin_title(touch) or email_title(kind, touch.company, decision.action, new_thread),
             "body": (decision.summary or "")[:240], "company": (touch.company or "")[:120],
-            "link": lead_link(""), "gmail_url": touch.url or "", "thread_id": email.thread_id,
+            "link": lead_link(""), "gmail_url": touch.url or "", "thread_id": getattr(touch, "thread", "") or email.thread_id,
             "action": (decision.action or "")[:120]}
     return await add(store, note, now)
 
@@ -555,7 +571,7 @@ def silent_note(touch: Any, new_thread: bool) -> dict[str, Any] | None:
         return None
     lead_id = getattr(touch, "lead_id", "") or ""
     return {"source_id": touch.id, "kind": kind, "importance": importance(kind),
-            "title": email_title(kind, touch.company, touch.action or "", new_thread),
+            "title": linkedin_title(touch) or email_title(kind, touch.company, touch.action or "", new_thread),
             "body": (touch.summary or "")[:240], "company": (touch.company or "")[:120],
             "link": lead_link(lead_id), "gmail_url": touch.url or "", "thread_id": touch.thread or None,
             "lead_id": lead_id or None, "action": (touch.action or "")[:120], "created_at": touch.at,
