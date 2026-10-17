@@ -226,6 +226,7 @@ def test_proposal_says_the_labels_verbatim_with_the_capped_promise(monkeypatch):
 
     async def temporal():
         return object()
+    monkeypatch.setattr(interviews, "datetime", FrozenDatetime)  # Before 06:00 UTC: all six still ahead.
     monkeypatch.setattr(interviews, "day_events", day_events)
     monkeypatch.setattr(interviews, "researched", researched)
     monkeypatch.setattr(callbacks, "temporal", temporal)

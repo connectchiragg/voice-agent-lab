@@ -260,6 +260,18 @@ def importance(kind: str) -> str:
     return "immediate" if kind in IMMEDIATE else "digest"
 
 
+PEOPLE = ("recruiter", "hiring_manager", "interviewer", "coordinator")
+WARM = 0.3  # The classifier's sentiment (-1..1) from which a reply counts as positive.
+
+
+def warm_reply(kind: str, sender_role: str, sentiment: float | None, cue: str, bulk: bool) -> bool:
+    """A reply or update that is pushed at once, not in the digest (the owner, 2026-10-17:
+    "non promotional positive replies from actual third party/recruiters"): from a person at
+    the company (not an alert or a mailing list) and positive."""
+    return (kind in ("reply", "update") and not bulk and sender_role in PEOPLE
+            and (cue == "positive" or (sentiment is not None and sentiment >= WARM)))
+
+
 def name_of(company: str) -> str:
     from app import company_names
     shown = company_names.display(company or "")
@@ -571,6 +583,10 @@ async def from_email(store: Any, email: Any, decision: Any, touch: Any, new_thre
             "body": (decision.summary or "")[:240], "company": (touch.company or "")[:120],
             "link": lead_link(""), "gmail_url": touch.url or "", "thread_id": getattr(touch, "thread", "") or email.thread_id,
             "action": (decision.action or "")[:120], "arrived_at": email.at}
+    from app import lead_classify  # A LinkedIn message is a person's, though LinkedIn relays it as bulk mail.
+    bulk = lead_classify.is_bulk(email) and lead_classify.linkedin_message(email) is None
+    if warm_reply(kind, decision.sender_role, decision.sentiment, decision.cue, bulk):
+        note["importance"] = "immediate"
     if incoming is not None:
         note["created_at"] = incoming["created_at"]  # In the bell since then: the SLA counts from it.
         note["read_at"] = incoming.get("read_at")  # Read in Gmail (or the bell) already: no push.
@@ -766,6 +782,20 @@ def calendar_title(change: str, company: str, start_utc: str, before_utc: str = 
     return f"{who} cancelled: {when_text(before_utc or start_utc)}"
 
 
+RECRUITER_CALL = re.compile(r"recruit|talent|screen|\bhr\b|\bta\b|intro(ductory)? (call|chat)|phone call|"
+                            r"chat with|call with", re.I)
+RECRUITING_ADDRESS = re.compile(r"recruit|talent|hiring|careers?|people|^hr$|^ta$", re.I)
+
+
+def recruiter_call(event: Any) -> bool:
+    """A recruiter's call (a screen, an intro chat), by its title or a recruiting organizer: pushed
+    at once however far off it is (the owner, 2026-10-17: "recruiter calls notifications should
+    be quick")."""
+    organizer = (getattr(event, "organizer_email", "") or "").lower().partition("@")[0]
+    return bool(RECRUITER_CALL.search(getattr(event, "title", "") or "")
+                or (organizer and RECRUITING_ADDRESS.search(organizer)))
+
+
 async def from_calendar(store: Any, event: Any, change: str, now: datetime, before_utc: str = "") -> int | None:
     """One calendar change (`change`: added, moved or cancelled) of an interview-like event ->
     one notification. Deduped per event, change and (for a move) the new time. The caller
@@ -779,7 +809,7 @@ async def from_calendar(store: Any, event: Any, change: str, now: datetime, befo
         return None  # Already over (or in progress): not news.
     source = f"calendar:{event.key}:{change}" + (f":{event.start_utc}" if change == "moved" else "")
     note = {"source_id": source, "kind": "calendar",
-            "importance": "immediate" if start - now <= CALENDAR_SOON else "digest",
+            "importance": "immediate" if start - now <= CALENDAR_SOON or recruiter_call(event) else "digest",
             "title": calendar_title(change, event.company, event.start_utc, before_utc),
             "body": f"Was {when_text(before_utc)}." if change == "moved" and before_utc else "",
             "company": (event.company or "")[:120],
@@ -814,7 +844,8 @@ def push_message(note: dict[str, Any], unread: int | None = None) -> dict[str, A
     elif kind == "calendar":
         title = "Calendar" + (f" · {scrub(name_of(note.get('company') or ''))}" if name_of(note.get("company") or "") else "")
     else:
-        title = f"Action needed · {who}" if urgent else f"{LABELS.get(kind, 'Update')} · {who}"
+        # A warm reply is pushed at once too, but it asks nothing of him: its own label.
+        title = f"Action needed · {who}" if urgent and kind in IMMEDIATE else f"{LABELS.get(kind, 'Update')} · {who}"
     link = note.get("link") or "/valr"
     return webpush.payload(title, body, link if link.startswith("/") else "/valr",
                            webpush.tag_for(note.get("thread_id"), note.get("lead_id"), note.get("source_id")),

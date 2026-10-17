@@ -172,6 +172,40 @@ def test_a_recruiter_asking_for_availability_is_one_immediate_item_with_lead_and
     assert store.rows[0]["lead_id"] == "lead-acme" and store.rows[0]["link"] == "/valr/leads?lead=lead-acme"
 
 
+def warm(**kw):
+    d = decision(category="recruiter_outreach", action_requested=False, summary="Loved your profile.")
+    d.sender_role, d.sentiment, d.cue = kw.get("role", "recruiter"), kw.get("sentiment", 0.7), kw.get("cue", "none")
+    return d
+
+
+def test_a_positive_reply_from_a_recruiter_is_pushed_at_once_with_its_own_label():
+    store = MemoryStore()
+    run(n.from_email(store, email(), warm(), touch(), False, NOW))
+    row = store.rows[0]
+    assert row["kind"] == "reply" and row["importance"] == "immediate"
+    message = n.push_message(row)
+    assert message["title"].startswith("Reply ·") and "Action needed" not in message["title"]
+
+
+@pytest.mark.parametrize("why, kw, bulk", [
+    ("neutral tone", {"sentiment": 0.0}, False),
+    ("not a person at the company", {"role": "other"}, False),
+    ("a mailing list", {}, True),
+])
+def test_other_replies_stay_in_the_digest(why, kw, bulk):
+    store = MemoryStore()
+    mail = email()
+    if bulk:
+        mail.headers = {"list-unsubscribe": "<mailto:unsubscribe@acme.example>"}
+    run(n.from_email(store, mail, warm(**kw), touch(), False, NOW))
+    assert store.rows[0]["importance"] == "digest", why
+
+
+def test_an_explicit_positive_cue_counts_even_with_a_flat_tone():
+    assert n.warm_reply("update", "hiring_manager", 0.0, "positive", False)
+    assert not n.warm_reply("rejection", "recruiter", 0.9, "positive", False)
+
+
 def test_dedupe_per_thread_within_ten_minutes_and_upgrade():
     store = MemoryStore()
     run(n.from_email(store, email("m1"), decision(), touch(), False, NOW))
@@ -357,6 +391,19 @@ def test_calendar_added_moved_and_cancelled_each_notify_once():
     assert len(store.rows) == 3
     assert n.push_message(store.rows[-1])["body"].startswith("Interview with Acme cancelled: Sun 18 Oct, 5:00 PM")
     assert n.push_message(store.rows[-1])["title"] == "Calendar · Acme"
+
+
+@pytest.mark.parametrize("title, organizer", [
+    ("Acme: recruiter screen", "pat@acme.example"),
+    ("Intro call with Acme", "pat@acme.example"),
+    ("Acme: technical interview", "talent@acme.example"),
+])
+def test_a_recruiter_call_is_pushed_at_once_however_far_off(title, organizer):
+    store = MemoryStore()
+    event = cal_event(title=title, start="2026-10-24T12:30:00+00:00")
+    event.organizer_email = organizer
+    run(n.from_calendar(store, event, "added", NOW))
+    assert store.rows[0]["importance"] == "immediate"
 
 
 def test_calendar_changes_from_the_sync_first_sync_silent_and_non_interviews_ignored():
