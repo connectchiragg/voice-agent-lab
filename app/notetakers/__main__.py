@@ -1,7 +1,10 @@
 """`python -m app.notetakers pending`: recordings waiting for the evaluation hook (no PII:
 provider, id, date, status). `python -m app.notetakers handoff`: retry the hand-off.
 `python -m app.notetakers details`: fill company and interviewers of stored Fathom recordings
-from Fathom's calendar invitees (last 180 days; prints counts only)."""
+from Fathom's calendar invitees (last 180 days; prints counts only).
+`python -m app.notetakers history --days 90 [--dry-run] [--yes] [--no-calendar]`: import and
+quietly score every interview of the last N days (app/notetakers/history.py; run it in the
+research worker container)."""
 import asyncio
 import sys
 
@@ -33,6 +36,9 @@ async def main(command: str) -> int:
 
 if __name__ == "__main__":
     command = sys.argv[1] if len(sys.argv) > 1 else "pending"
+    if command == "history":
+        from app.notetakers import history
+        sys.exit(history.cli(sys.argv[2:]))
     if command not in ("pending", "handoff", "details"):
         sys.exit(__doc__)
     sys.exit(asyncio.run(main(command)))

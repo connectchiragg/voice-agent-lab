@@ -285,7 +285,8 @@ def test_past_interview_recording_and_impression(client):
     assert "Question by question" in page and "Next time" in page
     unknown = client.get("/valr/interviews/past/fathom-1000", headers=GOOD).text
     assert "data-full" in unknown and "<iframe" not in unknown  # Not stored: ask the notetaker.
-    assert "only the talk balance is known" in unknown
+    assert "Couldn't read this recording's transcript from Fathom." in unknown  # Never "the transcript is gone".
+    assert "transcript is gone" not in unknown and "data-reanalyse=\"fathom:1000\"" in unknown
 
 
 def test_old_anchor_links_resolve_to_the_new_pages(client):
@@ -546,7 +547,7 @@ def test_view_labels_stages_and_recorders():
 
 def test_contracts_tolerate_partial_data():
     assert "embed_url" not in contracts.recording({"url": "https://fathom.video/x", "embed_url": "https://evil.example/x"})
-    assert contracts.recording({"url": "https://app.fireflies.ai/view/x", "provider": "fireflies"})["player"] is False
+    assert contracts.recording({"url": "https://app.fireflies.ai/view/x", "provider": "fireflies"})["player"] is True  # Signed media.
     assert contracts.recording({"url": "http://insecure.example"}) is None
     assert contracts.recording({"share_url": "https://fathom.video/share/x", "provider": "fathom"})["provider"] == "Fathom"
     leads = contracts.leads({"leads": [{"id": "a b", "company": "Acme", "stage": "closed-lost",

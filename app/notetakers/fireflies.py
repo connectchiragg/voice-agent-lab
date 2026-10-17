@@ -7,18 +7,21 @@
 - One recording: `transcript(id)` with sentences; normalisation reuses the profile
   importer's `normalize_fireflies` (names only; emails are used here only to match a
   calendar event and are never stored).
-- Recording: `transcript_url` (app.fireflies.ai/view/...) opens the meeting. `video_url`
-  and `audio_url` (Pro and up) are download links that expire after 24 hours, and
-  Fireflies documents no embed player or timestamp parameter, so the dashboard links out.
-- No webhook: the owner no longer records with Fireflies, so it is a one-time history
-  source ("Check for new recordings" imports the past meetings once connected).
+- Recording: `transcript_url` (app.fireflies.ai/view/...) opens the meeting. Fireflies has no
+  embeddable player, but the transcript object carries signed media: `audio_url` (Pro plan
+  and up) and `video_url` (Business and up, with video recording on), links that expire after
+  24 hours. VALR asks for them when the page opens and plays them in its own player
+  (app/notetakers/media.py, `MEDIA`), else links out to Fireflies. No timestamp parameter
+  is documented for transcript_url, so moments seek VALR's player only.
+- No webhook: the owner no longer records with Fireflies, so it is a history source
+  ("Check for new recordings" and `python -m app.notetakers history`).
 """
 from datetime import datetime
 from typing import Any
 
 import httpx
 
-from app.notetakers.base import KeyRefused, ProviderError, Recording, check, safe_link, utc
+from app.notetakers.base import KeyRefused, ProviderError, Recording, check, invitee_details, safe_link, utc
 from app.profile.recordings import normalize_fireflies
 
 NAME = "fireflies"
@@ -43,6 +46,11 @@ query Transcript($id: String!) {
     summary { overview short_summary keywords }
     sentences { speaker_name text start_time }
   }
+}"""
+
+MEDIA = """
+query Media($id: String!) {
+  transcript(id: $id) { id audio_url video_url }
 }"""
 
 
@@ -70,12 +78,15 @@ def recording(item: dict[str, Any], with_meeting: bool = False) -> Recording:
         from datetime import timedelta
         end = utc((datetime.fromisoformat(start.replace("Z", "+00:00"))
                    + timedelta(minutes=float(item["duration"]))).isoformat())
-    emails = [str(a.get("email") or "").lower() for a in item.get("meeting_attendees") or []
-              if isinstance(a, dict) and a.get("email")]
+    attendees = [a for a in item.get("meeting_attendees") or [] if isinstance(a, dict)]
+    emails = [str(a.get("email") or "").lower() for a in attendees if a.get("email")]
+    from app.notetakers.fathom import owner_emails
+    details = invitee_details([{"name": a.get("displayName") or a.get("name") or "", "email": a.get("email") or ""}
+                               for a in attendees], owner_emails(), str(item.get("title") or ""))
     return Recording(provider=NAME, external_id=str(item.get("id") or ""), title=str(item.get("title") or ""),
                      start=start, end=end, share_url=safe_link(str(item.get("transcript_url") or "")),
                      embed_url="", attendee_emails=emails,
-                     meeting=normalize_fireflies(item) if with_meeting else None)
+                     meeting=normalize_fireflies(item) if with_meeting else None, **details)
 
 
 async def verify(key: str, http: httpx.AsyncClient) -> str:
@@ -84,9 +95,14 @@ async def verify(key: str, http: httpx.AsyncClient) -> str:
 
 
 async def list_recordings(key: str, start: datetime, end: datetime, http: httpx.AsyncClient,
-                          with_meeting: bool = False) -> list[Recording]:
+                          with_meeting: bool = False, max_pages: int = MAX_PAGES,
+                          pace_s: float = 0.0) -> list[Recording]:
+    """Every transcript in the range, 50 per page (`skip`); `pace_s` waits between pages."""
+    import asyncio
     out: list[Recording] = []
-    for page in range(MAX_PAGES):
+    for page in range(max_pages):
+        if page and pace_s:
+            await asyncio.sleep(pace_s)
         batch = (await graphql(http, key, LIST, {"fromDate": utc(start.isoformat()), "toDate": utc(end.isoformat()),
                                                  "limit": PAGE, "skip": page * PAGE})).get("transcripts") or []
         out += [recording(item) for item in batch if isinstance(item, dict)]
@@ -101,3 +117,11 @@ async def get_recording(key: str, external_id: str, http: httpx.AsyncClient,
     if not item:
         raise ProviderError("Fireflies has no such transcript")
     return recording(item, with_meeting=True)
+
+
+async def media_urls(key: str, external_id: str, http: httpx.AsyncClient) -> dict[str, str]:
+    """{video_url, audio_url} (each "" when the plan or the meeting has none)."""
+    item = (await graphql(http, key, MEDIA, {"id": external_id})).get("transcript")
+    if not item:
+        raise ProviderError("Fireflies has no such transcript")
+    return {k: str(item.get(k) or "") for k in ("video_url", "audio_url")}

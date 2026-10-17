@@ -150,7 +150,8 @@ RECORDINGS_DAYS = 365
 
 def review_state(eval_status: str, report: str | None) -> str:
     """pending (queued, being scored, or its hand-off is retried on the worker's next start) |
-    unavailable (no interview or transcript to score) | sent."""
+    unavailable (no interview or transcript to score) | sent. A history item scored quietly
+    ("history") shows its scorecard instead, so it never reaches here once scored."""
     if report == "sent":
         return "sent"
     if report in ("not_interview", "no_transcript", "failed"):
@@ -185,6 +186,13 @@ async def with_recordings(view: dict[str, Any]) -> dict[str, Any]:
             await store.setup(connection)
             rows = await store.between(connection, now - timedelta(days=RECORDINGS_DAYS), now + timedelta(days=1))
             gone = await store.hidden(connection)
+            try:  # Past interviews with no recording (python -m app.notetakers history).
+                from app.notetakers import history
+                no_recording = await history.calendar_entries(
+                    connection, now - timedelta(days=RECORDINGS_DAYS), now + timedelta(days=1))
+            except Exception as error:  # noqa: BLE001 - the recordings still show.
+                logger.warning("VALR calendar history unavailable: %s", type(error).__name__)
+                no_recording = []
             try:
                 reports = await post_call.statuses(connection)
             except Exception as error:  # noqa: BLE001 - every review shows as pending.
@@ -204,6 +212,7 @@ async def with_recordings(view: dict[str, Any]) -> dict[str, Any]:
                              manual.get(f"interview:{r['provider']}:{r['external_id']}")
                              or notetaker_routes.company_of(r.get("company") or "", r.get("event_company") or ""))
              for r in fresh]
+    extra += [iv for iv in no_recording if tuple(iv["id"].partition(":")[::2]) not in gone]
     merged = sorted(scored + extra, key=lambda iv: str(iv.get("date") or "")[:10])
     return {**view, "performance": {**perf, "interviews": merged}}
 

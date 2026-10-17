@@ -202,9 +202,14 @@ def render(report: dict, host: str, recording_url: str = "") -> str:
 
 
 def process(meeting: dict, cfg: Settings, llm: JsonLLM, comp: dict | None = None,
-            update_performance: bool = True) -> dict:
+            update_performance: bool = True, refresh_coach: bool = True,
+            compose_report: bool = True) -> dict:
     """-> {status: not_interview|no_transcript|ready, interview_id, report, performance_updated,
-    performance_note}. Raises LLMError when scoring fails."""
+    performance_note}. Raises LLMError when scoring fails.
+
+    The history backfill (app/post_call.py, `history`) passes compose_report=False (no message
+    is sent, so no report is written) and refresh_coach=False except for its last item (the
+    coach read is refreshed once, not once per old interview)."""
     label = classify.classify(meeting, llm, cfg.classifier_model, cfg.candidate_name)
     if not classify.is_owner_interview(label):
         return {"status": "not_interview"}
@@ -218,15 +223,53 @@ def process(meeting: dict, cfg: Settings, llm: JsonLLM, comp: dict | None = None
     scored["impression"] = impressions.analyze(meeting, llm, cfg.evaluator_model, cfg.candidate_name)
     updated, note = False, ""
     if update_performance:
-        updated, note = add_to_performance(cfg, scored, llm, comp)
-    report = compose(scored, llm, cfg.evaluator_model, cfg.candidate_name, comp)
+        updated, note = add_to_performance(cfg, scored, llm, comp, refresh_coach)
+    report = compose(scored, llm, cfg.evaluator_model, cfg.candidate_name, comp) if compose_report else None
     return {"status": "ready", "interview_id": scored["interview_id"], "report": report,
             "performance_updated": updated, "performance_note": note}
 
 
+def _load_performance(cfg: Settings) -> dict:
+    for source in (cfg.performance_path, cfg.performance_fallback):
+        if source is not None and source.exists():
+            try:
+                return json.loads(source.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                return {}
+    return {}
+
+
+def reanalyse(meeting: dict, cfg: Settings, llm: JsonLLM, comp: dict | None = None,
+              refresh_coach: bool = True) -> dict:
+    """An interview already in performance.json, read again from its transcript (it had only a
+    "derived" impression): the rubric and the interviewer's cues are re-run and the entry is
+    replaced, keeping what the transcript cannot tell (company, round, outcome). Falls back to
+    `process` for an interview performance.json does not hold. -> as `process` (no report)."""
+    iid = f"{meeting.get('source')}:{meeting.get('id')}"
+    old = next((iv for iv in _load_performance(cfg).get("interviews") or []
+                if isinstance(iv, dict) and iv.get("interview_id") == iid), None)
+    if old is None:
+        return process(meeting, cfg, llm, comp, refresh_coach=refresh_coach, compose_report=False)
+    if not meeting.get("turns"):
+        return {"status": "no_transcript"}
+    analysis = {"source": meeting["source"], "id": meeting["id"], "title": old.get("title") or meeting.get("title"),
+                "date": old.get("date") or meeting.get("date"), "company": old.get("company"),
+                "round_type": old.get("round_type"),
+                "speaking_metrics": speaking_metrics(meeting["turns"], cfg.candidate_name)}
+    scored = rubric.score_interview(meeting, analysis, llm, cfg.evaluator_model, cfg.candidate_name)
+    scored["impression"] = impressions.analyze(meeting, llm, cfg.evaluator_model, cfg.candidate_name)
+    keep = {k: old[k] for k in ("company", "round_type", "company_stage", "outcome", "date", "title")
+            if old.get(k) not in (None, "")}
+    merged = old | scored | keep
+    updated, note = add_to_performance(cfg, merged, llm, comp, refresh_coach)
+    return {"status": "ready", "interview_id": merged["interview_id"], "report": None,
+            "performance_updated": updated, "performance_note": note}
+
+
 def add_to_performance(cfg: Settings, scored: dict, llm: JsonLLM | None,
-                       comp: dict | None) -> tuple[bool, str]:
-    """Insert or replace this interview in performance.json and refresh the coach read."""
+                       comp: dict | None, refresh_coach: bool = True) -> tuple[bool, str]:
+    """Insert or replace this interview in performance.json and refresh the coach read
+    (without `refresh_coach` the previous read is kept, marked stale)."""
     source = cfg.performance_path
     if not source.exists() and cfg.performance_fallback is not None:
         source = cfg.performance_fallback  # first write: start from the read-only copy
@@ -241,7 +284,7 @@ def add_to_performance(cfg: Settings, scored: dict, llm: JsonLLM | None,
             pass
     interviews_ = [iv for iv in perf.get("interviews") or [] if iv.get("interview_id") != scored["interview_id"]]
     new = performance.build(interviews_ + [scored], perf.get("recurring_weak_topics") or [])
-    new = performance.with_coach(new, llm, cfg.evaluator_model, cfg.candidate_name, comp,
+    new = performance.with_coach(new, llm if refresh_coach else None, cfg.evaluator_model, cfg.candidate_name, comp,
                                  previous=perf.get("coach"))
     new["errors"] = perf.get("errors") or []
     try:
