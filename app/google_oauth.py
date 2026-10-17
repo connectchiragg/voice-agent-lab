@@ -213,3 +213,48 @@ async def access_token(connection: Any, settings: OAuthSettings, http: httpx.Asy
     await connection.execute("UPDATE oauth_tokens SET last_ok_at = now() WHERE provider = %s",
                              (PROVIDER,))
     return str(response.json()["access_token"])
+
+
+REVOKE_URL = "https://oauth2.googleapis.com/revoke"
+
+
+async def disconnect(connection: Any, settings: "OAuthSettings | None", http: httpx.AsyncClient) -> dict[str, bool]:
+    """Settings › Google › Disconnect: stop the calendar and Gmail push channels, revoke the
+    grant at Google (so the account page no longer lists VALR), then delete the stored token.
+    Each remote step is best effort: the local token is deleted whatever Google says.
+    -> {revoked, stopped}."""
+    out = {"revoked": False, "stopped": False}
+    cursor = await connection.execute(
+        "SELECT refresh_token FROM oauth_tokens WHERE provider = %s", (PROVIDER,))
+    row = await cursor.fetchone()
+    refresh = None
+    if row and settings is not None:
+        try:
+            refresh = decrypt(settings.token_key, row[0])
+        except ReconnectNeeded:
+            refresh = None
+    if refresh and settings is not None:
+        try:
+            token = await access_token(connection, settings, http)
+            from app import calendar_sync, gmail_api
+            state = await calendar_sync.load_state(connection)
+            if state.get("channel_id") and state.get("resource_id"):
+                await calendar_sync.stop(http, token, state["channel_id"], state["resource_id"])
+            await gmail_api.stop(http, token)
+            out["stopped"] = True
+        except Exception:  # noqa: BLE001 - an expired grant can't stop anything; revoke anyway
+            pass
+        try:
+            response = await http.post(REVOKE_URL, data={"token": refresh},
+                                       headers={"Content-Type": "application/x-www-form-urlencoded"})
+            out["revoked"] = response.status_code in (200, 400)  # 400: already revoked or expired.
+        except httpx.HTTPError:
+            out["revoked"] = False
+    await connection.execute("DELETE FROM oauth_tokens WHERE provider = %s", (PROVIDER,))
+    try:
+        from app import calendar_sync
+        await calendar_sync.save_state(connection, sync_token=None, channel_id=None, resource_id=None,
+                                       channel_token=None, channel_expires=None)
+    except Exception:  # noqa: BLE001 - no calendar state yet
+        pass
+    return out

@@ -1,8 +1,9 @@
 """VALR interview mode, the app's side: owner gating, the owner's prompts and tools,
 and the briefing call.
 
-Interview mode applies only to the owner's own caller keys (VALR_OWNER_KEYS, else
-`tel:` VALR_OWNER_PHONE and `email:` each of VALR_OWNER_EMAILS). Everyone else gets the
+Interview mode applies only to the owner's own caller keys (VALR_OWNER_KEYS, else the
+stable key "owner", which app/owner.canonical gives his current phone and his sign-in
+emails). Everyone else gets the
 generic assistant: no profile, no calendar, no briefings, and the owner-only tools are
 neither offered to the model nor runnable (checked again in code). Caller ID can be
 spoofed (see Caller memory in the README); accepted for this lab.
@@ -33,7 +34,7 @@ from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
 from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.service import RPCError
 
-from app import calendar_sync, callbacks, interview_store, memory, research
+from app import calendar_sync, callbacks, interview_store, memory, owner, research
 from app.interview_types import (SlotEvent, brief_is_current, event_noun, group_blocks, people,
                                  slot_workflow_id)
 from app.interview_workflow import (TASK_QUEUE, BlockCallWorkflow, BlockInput,
@@ -49,6 +50,12 @@ EVALUATION_CHARS_ON_BRIEFING = 900
 EVALUATION_CHARS_ON_CALLS = 450  # Normal owner calls: a compact profile (Groq: 8,000 TPM).
 
 briefings: dict[str, dict[str, Any]] = {}  # Conversation id -> the loaded block.
+# Owner calls with nothing to brief ("Call me" or "Talk here" with no upcoming interview):
+# general owner mode, opened with TALK_GREETING.
+talk_calls: set[str] = set()
+TALK_GREETING = "Hi {name}, it's {assistant}. Nothing's coming up on your calendar. Want your day or a lead?"
+TALK_NOTE = ("Nothing is on his calendar in the next few days, so this call has no briefing. Help with "
+             "whatever he asks: his day (get_calendar), a lead, or a practice question if he wants one.")
 pending: dict[str, str] = {}  # Conversation id -> on-demand block workflow id, until the call ends.
 tasks: set[asyncio.Task[None]] = set()
 
@@ -59,8 +66,8 @@ def owner_keys() -> set[str]:
     explicit = {key.strip().lower() for key in os.getenv("VALR_OWNER_KEYS", "").split(",") if key.strip()}
     if explicit:
         return explicit
-    keys = {f"email:{e.strip().lower()}" for e in os.getenv("VALR_OWNER_EMAILS", "").split(",") if e.strip()}
-    phone = os.getenv("VALR_OWNER_PHONE", "").strip()
+    keys = {f"email:{e}" for e in owner.emails()} | {owner.KEY}
+    phone = owner.phone()
     return keys | ({f"tel:{phone}"} if phone else set())
 
 
@@ -73,14 +80,13 @@ def is_owner_call(conversation_id: str) -> bool:
 
 
 def owner_zone() -> ZoneInfo:
-    return ZoneInfo(os.getenv("ASSISTANT_TIMEZONE", "Asia/Kolkata"))
+    return owner.zone()
 
 
 def owner_name() -> str:
-    """The owner's first name (VALR_OWNER_NAME, else VALR_CANDIDATE_NAME's first word); "there"
-    when neither is set, so a greeting still reads "Hi there"."""
-    name = os.getenv("VALR_OWNER_NAME", "").strip() or os.getenv("VALR_CANDIDATE_NAME", "").strip()
-    return name.split()[0] if name else "there"
+    """The owner's first name (Profile, else VALR_OWNER_NAME, else VALR_CANDIDATE_NAME); "there"
+    when none is set, so a greeting still reads "Hi there"."""
+    return owner.first_name("there")
 
 
 # The owner's profile, read from the private data dir (mounted read-only on the VM).
@@ -156,6 +162,8 @@ def prompt_note(conversation_id: str) -> str:
         parts.append(f"<profile>\n{quoted(profile)}\n</profile>")
     if block is not None:
         parts.append(briefing_note(block))
+    elif conversation_id in talk_calls:
+        parts.append(TALK_NOTE)
     return "\n\n".join(parts)
 
 
@@ -166,7 +174,11 @@ OWNER_GREETINGS = ("Hi {name}, it's {assistant}. What are we prepping?",
 
 def owner_greeting(conversation_id: str) -> str:
     """One of a few openings, fixed per call, so not the same words every time he calls."""
-    name = memory.display_name(conversation_id) or owner_name()
+    # The name he set on the Profile page wins over the one memory learned from calls.
+    name = (owner.first_name("") if owner.cached("display_name") else "") \
+        or memory.display_name(conversation_id) or owner_name()
+    if conversation_id in talk_calls:
+        return TALK_GREETING.format(name=name, assistant=ASSISTANT_NAME)
     line = OWNER_GREETINGS[zlib.crc32(conversation_id.encode()) % len(OWNER_GREETINGS)]
     return line.format(name=name, assistant=ASSISTANT_NAME)
 
@@ -236,13 +248,63 @@ async def load_for_call(conversation_id: str, block_ref: str) -> None:
     except Exception as error:  # noqa: BLE001
         logger.warning("VALR briefing not loaded: %s", type(error).__name__)
         return
-    if block is not None:
+    if block is not None and not block["slot_keys"]:
+        talk_calls.add(conversation_id)  # "Call me" with nothing coming up (call_now.call_talk_now).
+    elif block is not None:
         order = {key: index for index, key in enumerate(block["slot_keys"])}
         block["slots"] = sorted(slots, key=lambda slot: order.get(slot["key"], 0))
         briefings[conversation_id] = block
 
 
+async def prepare_web_call(conversation_id: str, intent: str, ref: str = "") -> str:
+    """"Talk here" (app/webrtc.py), before the call opens, so it starts like the phone call.
+
+    intent "brief_next": the interview "Call me" would brief (`call_now.pick`: `ref`, else the
+    next one), its briefs loaded the way a phone briefing loads its block's. Nothing coming
+    up, or intent "talk": general owner mode. Returns "brief" or "talk". Bounded; never raises."""
+    if intent == "brief_next":
+        event = await next_event(ref)
+        if event is not None:
+            await load_event_for_call(conversation_id, event)
+            if conversation_id in briefings:
+                return "brief"
+    talk_calls.add(conversation_id)
+    return "talk"
+
+
+async def next_event(ref: str = "") -> SlotEvent | None:
+    if research.pool is None:
+        return None
+    from app import call_now
+    from app.valr_view import LOOK_AHEAD
+    now = datetime.now(timezone.utc)
+    try:
+        async with asyncio.timeout(LOAD_TIMEOUT_S), research.pool.connection() as connection:
+            await calendar_sync.setup(connection)
+            events = await calendar_sync.upcoming(connection, now, now + LOOK_AHEAD)
+    except Exception as error:  # noqa: BLE001
+        logger.warning("VALR next interview not loaded: %s", type(error).__name__)
+        return None
+    return call_now.pick(events, ref or "next", now)
+
+
+async def load_event_for_call(conversation_id: str, event: SlotEvent) -> None:
+    """One interview's brief as an on-demand block (no greeting countdown), like "Call me"'s."""
+    from app.call_now import label_for
+    try:
+        async with asyncio.timeout(LOAD_TIMEOUT_S), research.pool.connection() as connection:  # type: ignore[union-attr]
+            slots = await interview_store.load_slots(connection, [event.key])
+    except Exception as error:  # noqa: BLE001
+        logger.warning("VALR briefing not loaded: %s", type(error).__name__)
+        slots = []
+    briefings[conversation_id] = {"block_id": "briefing-ondemand-web", "label": label_for(event),
+                                  "start_utc": datetime.fromisoformat(event.start_utc),
+                                  "slot_keys": [event.key], "slots": slots}
+
+
 def greeting(conversation_id: str, reason: str) -> str:
+    if conversation_id in talk_calls:
+        return owner_greeting(conversation_id)
     block = briefings.get(conversation_id)
     label = (block or {}).get("label") or reason or "your interviews"
     name = memory.display_name(conversation_id) or owner_name()
@@ -257,6 +319,7 @@ def greeting(conversation_id: str, reason: str) -> str:
 
 def call_ended(conversation_id: str) -> None:
     briefings.pop(conversation_id, None)
+    talk_calls.discard(conversation_id)
     proposals.pop(conversation_id, None)
     workflow = pending.pop(conversation_id, None)
     if workflow is None:

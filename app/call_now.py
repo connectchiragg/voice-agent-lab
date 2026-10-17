@@ -1,6 +1,6 @@
 """Call the owner now with a briefing for one interview ("Call me now", and the admin CLI
 `python -m app.research_worker call-now [next|<slot>]`), or for a block's interviews
-(Telegram's [Call me now] and [In 10 min] buttons, `call_block_now`).
+(the heads-up's "tap for your briefing call" and Call me, `call_block_now`).
 
 An on-demand BlockCallWorkflow for that one interview, signalled at once (there is no call
 to wait for). If the interview's brief is not current, its slot workflow is asked to
@@ -20,6 +20,9 @@ from app.interview_workflow import (TASK_QUEUE, BlockCallWorkflow, BlockInput,
 
 PROMISE = timedelta(minutes=5)
 RESEARCH_S = 165
+# "Call me" with nothing coming up: a block with no interviews. The app side
+# (interviews.load_for_call) then starts the call in general owner mode.
+TALK_LABEL = "a quick chat"
 
 
 async def start_slot_research(client: Any, event: SlotEvent, owner_key: str, block_id: str,
@@ -48,11 +51,18 @@ async def call_now(client: Any, event: SlotEvent, owner_key: str, phone_e164: st
                                 phone_e164, label_for(event), job_usd, dials_per_day, **rpc)
 
 
+async def call_talk_now(client: Any, owner_key: str, phone_e164: str, dials_per_day: int = 12,
+                        **rpc: Any) -> str:
+    """No upcoming interview: ring the owner anyway (once), for a general chat."""
+    return await call_block_now(client, [], [], owner_key, phone_e164, TALK_LABEL,
+                                dials_per_day=dials_per_day, **rpc)
+
+
 async def call_block_now(client: Any, events: list[SlotEvent], todo: list[SlotEvent],
                          owner_key: str, phone_e164: str, label: str, job_usd: float = 0.40,
                          dials_per_day: int = 12, dial_at: datetime | None = None,
                          **rpc: Any) -> str:
-    """Call about these interviews now, or at `dial_at` (Telegram's "In 10 min").
+    """Call about these interviews now, or at `dial_at`.
 
     `todo`: the ones whose brief is not current; they research first (within the
     five-minute promise when calling now). Returns the call workflow's id."""

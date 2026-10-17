@@ -12,7 +12,7 @@ import stat
 import pytest
 
 from app import post_call as post_call_app
-from app import telegram_api, valr_page
+from app import notifications, valr_page
 from app.profile import coach, importer, impressions, performance, post_call, rubric
 from app.profile.llm import Ledger, LLMError
 from tests.test_profile_evaluate import COMP, rubric_reply, settings as base_settings
@@ -390,7 +390,7 @@ def test_process_skips_non_interviews(tmp_path):
 
 
 class FakeConn:
-    """The post_call_reports and telegram_link queries, in memory."""
+    """The post_call_reports queries, in memory."""
 
     def __init__(self, chat=None):
         self.rows: dict[tuple, dict] = {}
@@ -422,13 +422,11 @@ class FakeCursor:
             key = (params[-2], params[-1])
             for name, value in zip(names, params):
                 rows[key][name] = value
-        elif "SELECT chat_id FROM telegram_link" in sql:
-            self.result = [(conn.chat,)] if conn.chat else []
         elif "WHERE status = 'queued'" in sql:
             self.result = [(r["provider"], r["external_id"], r["sealed"], r["recording_url"])
                            for r in rows.values() if r["status"] == "queued"]
         elif "WHERE status = 'pending_telegram'" in sql:
-            self.result = [(r["provider"], r["external_id"], r["text"]) for r in rows.values()
+            self.result = [(r["provider"], r["external_id"], r["text"], r["title"]) for r in rows.values()
                            if r["status"] == "pending_telegram" and r["text"]]
         elif "GROUP BY status" in sql:
             counts = {}
@@ -445,16 +443,18 @@ class FakeCursor:
         return self.result
 
 
-class FakeBot(telegram_api.Bot):
-    def __init__(self, fail=False):
-        super().__init__("token")
-        self.sent, self.fail = [], fail
+class Pushes:
+    """app/notifications.notify_now, faked: the bell items it was given, and its answer."""
 
-    async def send(self, chat_id, text, keyboard=None):
-        if self.fail:
-            raise telegram_api.TelegramError("sendMessage: 400")
-        self.sent.append((chat_id, text))
-        return 42
+    def __init__(self, monkeypatch, answer="sent", fail=False):
+        self.sent, self.answer, self.fail = [], answer, fail
+
+        async def notify_now(connection, note, now=None):
+            if self.fail:
+                raise RuntimeError("database down")
+            self.sent.append(note)
+            return self.answer
+        monkeypatch.setattr(notifications, "notify_now", notify_now)
 
 
 def ready(meeting_):
@@ -466,45 +466,45 @@ def ready(meeting_):
             "performance_note": ""}
 
 
-def test_on_new_interview_sends_when_linked(monkeypatch):
-    monkeypatch.delenv("TELEGRAM_OWNER_CHAT_ID", raising=False)
-    conn, bot = FakeConn(chat=1234), FakeBot()
-    status = asyncio.run(post_call_app.on_new_interview(meeting(), connection=conn, process=ready, bot=bot,
+def test_a_ready_review_goes_to_the_bell_and_the_phone(monkeypatch):
+    pushes = Pushes(monkeypatch)
+    conn = FakeConn()
+    status = asyncio.run(post_call_app.on_new_interview(meeting(), connection=conn, process=ready,
                                                         recording_url="https://fathom.example.com/share/x"))
-    assert status == "sent" and bot.sent[0][0] == 1234 and "Post-call" in bot.sent[0][1]
+    assert status == "sent" and len(pushes.sent) == 1
+    note = pushes.sent[0]
+    assert note["kind"] == "review" and note["link"] == "/valr/interviews/past/fathom-901"
+    assert note["source_id"] == "review:fathom:901" and "coach review" in note["title"].lower()
     row = conn.rows[("fathom", "901")]
-    assert row["status"] == "sent" and row["message_id"] == 42 and row["sealed"] is None
+    assert row["status"] == "sent" and "Post-call" in row["text"] and row["sealed"] is None
 
 
-def test_report_waits_for_telegram_and_is_sent_once_linked(monkeypatch):
-    monkeypatch.delenv("TELEGRAM_OWNER_CHAT_ID", raising=False)
-    conn, bot = FakeConn(chat=None), FakeBot()
-    assert asyncio.run(post_call_app.on_new_interview(meeting(), connection=conn, process=ready, bot=bot)) \
-        == "pending_telegram"
-    view = asyncio.run(post_call_app.overview(conn))
-    assert view["pending"] == 1 and not bot.sent
-    conn.chat = 1234
-    assert asyncio.run(post_call_app.send_pending(conn, bot)) == 1
-    assert conn.rows[("fathom", "901")]["status"] == "sent"
+def test_without_a_phone_the_review_waits_in_the_bell(monkeypatch):
+    Pushes(monkeypatch, answer="no_device")
+    conn = FakeConn()
+    assert asyncio.run(post_call_app.on_new_interview(meeting(), connection=conn, process=ready)) == "sent"
+    assert "phone notifications are off" in conn.rows[("fathom", "901")]["detail"]
 
 
-def test_failures_are_recorded_and_telegram_errors_retry(monkeypatch):
-    monkeypatch.delenv("TELEGRAM_OWNER_CHAT_ID", raising=False)
-    conn = FakeConn(chat=1)
+def test_failures_are_recorded_and_undelivered_reports_retry(monkeypatch):
+    pushes = Pushes(monkeypatch, fail=True)
+    conn = FakeConn()
 
     def boom(m):
         raise LLMError("x")
     assert asyncio.run(post_call_app.on_new_interview(meeting(), connection=conn, process=boom)) == "failed"
-    conn2 = FakeConn(chat=1)
-    assert asyncio.run(post_call_app.on_new_interview(meeting(), connection=conn2, process=ready,
-                                                      bot=FakeBot(fail=True))) == "pending_telegram"
+    conn2 = FakeConn()
+    assert asyncio.run(post_call_app.on_new_interview(meeting(), connection=conn2, process=ready)) == "pending_telegram"
+    assert asyncio.run(post_call_app.overview(conn2))["pending"] == 1
+    pushes.fail = False  # Next pass: delivered (rows left from the Telegram days the same way).
+    assert asyncio.run(post_call_app.send_pending(conn2)) == 1
+    assert conn2.rows[("fathom", "901")]["status"] == "sent" and len(pushes.sent) == 1
 
 
 def test_notetaker_hook_only_queues_and_the_worker_processes_the_queue(monkeypatch):
     from app.profile import notetaker_hook
     monkeypatch.delenv("VALR_TOKEN_KEY", raising=False)
-    monkeypatch.delenv("TELEGRAM_OWNER_CHAT_ID", raising=False)
-    conn = FakeConn(chat=7)
+    conn = FakeConn()
 
     async def connect():
         return conn
@@ -514,9 +514,9 @@ def test_notetaker_hook_only_queues_and_the_worker_processes_the_queue(monkeypat
     again = asyncio.run(notetaker_hook.evaluate_recording("fathom", "901", None, connect=connect, fetch=no_meeting))
     assert first.startswith("queued") and "worker" in first and again.startswith("already queued")
     assert conn.rows[("fathom", "901")]["status"] == "queued"
-    bot = FakeBot()
-    done = asyncio.run(post_call_app.run_queue(conn, fetch=lambda p, i: meeting(), process=ready, bot=bot))
-    assert done == 1 and bot.sent and conn.rows[("fathom", "901")]["status"] == "sent"
+    pushes = Pushes(monkeypatch)
+    done = asyncio.run(post_call_app.run_queue(conn, fetch=lambda p, i: meeting(), process=ready))
+    assert done == 1 and pushes.sent and conn.rows[("fathom", "901")]["status"] == "sent"
     missing = FakeConn()
     asyncio.run(post_call_app.enqueue(missing, "fathom", "902"))
     asyncio.run(post_call_app.run_queue(missing, fetch=lambda p, i: None, process=ready))
@@ -555,7 +555,6 @@ def test_notetaker_hook_fetches_and_seals_the_meeting(monkeypatch):
     assert status == "queued for the post-call report"
     sealed = conn.rows[("fathom", "901")]["sealed"]
     assert "token bucket" not in sealed and json.loads(google_oauth.decrypt(key, sealed))["id"] == "901"
-    bot = FakeBot()
-    conn.chat = 5
-    asyncio.run(post_call_app.run_queue(conn, fetch=lambda p, i: None, process=ready, bot=bot))
-    assert bot.sent and conn.rows[("fathom", "901")]["sealed"] is None  # dropped once processed
+    pushes = Pushes(monkeypatch)
+    asyncio.run(post_call_app.run_queue(conn, fetch=lambda p, i: None, process=ready))
+    assert pushes.sent and conn.rows[("fathom", "901")]["sealed"] is None  # dropped once processed

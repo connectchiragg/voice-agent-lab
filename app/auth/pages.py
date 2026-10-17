@@ -87,12 +87,21 @@ The Google account you picked isn't on the list, and VALR kept nothing about it.
 
 
 def account_menu(email: str) -> str:
-    """The top bar's account control: an initial and Sign out (the app is owner-only, so no
-    address on show)."""
-    initial = (email[:1] or "?").upper()
+    """The top bar's account control: the owner's photo (or initials; app/owner.py), then
+    Profile, Settings and Sign out (the app is owner-only, so no address on show)."""
+    from app import owner
+    name = owner.name()
+    initials = "".join(part[0] for part in name.split()[:2]).upper() or (email[:1] or "?").upper()
+    if owner.photo_etag():
+        face = (f'<img class="acct-avatar photo" src="/valr/profile/photo?v={e(owner.photo_etag())}" alt="" '
+                'width="32" height="32" data-avatar>')
+    else:
+        face = f'<span class="acct-avatar" aria-hidden="true">{e(initials)}</span>'
     return f"""<details class="menu acct" data-menu>
-  <summary class="acct-btn" aria-label="Account"><span class="acct-avatar" aria-hidden="true">{e(initial)}</span></summary>
+  <summary class="acct-btn" aria-label="Account">{face}</summary>
   <div class="menu-pop align-end" role="menu">
+    <a class="menu-item" role="menuitem" href="/valr/profile">{icon('users', 16)}<span>Profile</span></a>
+    <a class="menu-item" role="menuitem" href="/valr/settings">{icon('settings', 16)}<span>Settings</span></a>
     <form method="post" action="/logout"><button class="menu-item" role="menuitem" type="submit">{icon('log-out', 16)}<span>Sign out</span></button></form>
   </div>
 </details>"""

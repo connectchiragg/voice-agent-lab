@@ -44,7 +44,7 @@ def client(monkeypatch):
     async def setup(connection):
         return None
 
-    async def set_flag(connection, name, enabled):
+    async def set_flag(connection, name, enabled, until=None):
         flags[name] = enabled
 
     monkeypatch.setattr(valr_view, "collect", collect)
@@ -138,7 +138,7 @@ def test_pause_flag_round_trip_needs_owner_and_csrf(client):
     assert ok.status_code == 200 and ok.json()["paused"] is True
     assert client.flags == {interview_store.DIALS_PAUSED: True}
     page = client.get("/valr", headers=GOOD).text
-    # The default is a Telegram heads-up (no automatic call), so it is the heads-ups that pause.
+    # The default is a push heads-up (no automatic call), so it is the heads-ups that pause.
     assert "Reminders are paused" in page and 'data-paused="false">Resume' in page
     assert ">Paused<" in client.get("/valr/interviews", headers=GOOD).text
     assert client.get("/valr/api/state", headers=GOOD).json()["next_call"] is None
@@ -254,10 +254,10 @@ async def _view():
 
 
 @pytest.mark.parametrize("scenario,expected", [
-    ("empty", {"/valr": ["Google isn't connected", "No phone number on file", "Connect Google to see your interviews here."],
+    ("empty", {"/valr": ["Google isn't connected", "Connect Google to see your interviews here."],
                "/valr/interviews": ["Connect Google to see your interviews here."],
                "/valr/progress": ["Your progress appears after"],
-               "/valr/settings": ["Connect Google", "Missing"]}),
+               "/valr/settings": ["Connect Google", "Add your phone", "Turn on phone notifications"]}),
     ("error", {"/valr/interviews": ["We couldn't load your interviews just now"],
                "/valr": ["Google access expired", "Reconnect Google", "The last calendar sync failed"]}),
 ])
@@ -313,53 +313,21 @@ def test_performance_reads_schema_2_and_falls_back_only_when_missing(tmp_path, m
     assert valr_view.performance(valr_view.profile_files()[0])["available"] is False
 
 
-def test_telegram_mode_tile_statuses_and_start_code(client, monkeypatch):
-    from app import telegram_api
-
+def test_heads_up_mode_with_phone_notifications_off(client, monkeypatch):
     async def collect(pool, now=None):
         view = sample_view()
-        view["mode"] = "telegram"
-        view["connections"]["telegram"] = {"configured": True, "linked": False, "linked_at": None}
-        from app.valr_ui import attention
-        attention.next_slot(view)[0]["heads_up"] = {"outcome": "later", "sent_at": view["generated_at"],
-                                         "outcome_at": view["generated_at"],
-                                         "call_at": "2026-10-16T10:40:00+00:00"}
+        view["mode"] = "heads_up"
+        view["connections"]["push"] = {"configured": True, "devices": []}
         return view
 
-    codes = []
-
-    async def none(connection):
-        return None
-
-    async def new_code(connection, now=None):
-        codes.append("246810")
-        return "246810"
-
     monkeypatch.setattr(valr_view, "collect", collect)
-    monkeypatch.setattr(telegram_api, "setup", none)
-    monkeypatch.setattr(telegram_api, "new_code", new_code)
-    home = client.get("/valr", headers=GOOD).text
-    assert "Connect Telegram to get a reminder" in home and 'href="/valr/settings#telegram"' in home
-    assert "Telegram isn't connected" in html.unescape(home) and "tries again" not in home  # Broken: on the alert line.
-    upcoming = client.get("/valr/interviews", headers=GOOD).text
-    assert "VALR calls you at <time" in upcoming and ">4:10 PM</time>" in upcoming
-    settings = client.get("/valr/settings", headers=GOOD).text
-    assert "Connect Telegram" in settings and 'data-action="tglink"' in settings
-    assert "TELEGRAM_" not in settings and "FATHOM_API_KEY" not in settings  # No server talk.
-    assert client.get("/valr/system", headers=GOOD, follow_redirects=False).headers["location"] == "/valr/settings#advanced"
+    home = html.unescape(client.get("/valr", headers=GOOD).text)
+    assert "Turn on phone notifications to get the heads-up" in home and 'href="/valr/settings#phone-push"' in home
+    settings = html.unescape(client.get("/valr/settings", headers=GOOD).text)
+    assert "Phone notifications are off, so heads-ups only reach the bell" in settings
+    assert "Telegram" not in settings and "TELEGRAM_" not in settings and "FATHOM_API_KEY" not in settings
+    assert "Advanced" not in settings and "Research log" not in settings
+    assert client.get("/valr/system", headers=GOOD, follow_redirects=False).headers["location"] == "/valr/settings"
     csrf = token(client)
     headers = {**GOOD, "Content-Type": "application/json", "X-CSRF-Token": csrf}
-    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
-    assert client.post("/valr/api/telegram/code", content="{}", headers=headers).status_code == 503
-    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "1:x")
-    monkeypatch.setenv("TELEGRAM_WEBHOOK_SECRET", "y" * 40)
-    assert client.post("/valr/api/telegram/code", content="{}", headers=GOOD).status_code in (403, 415)
-    guest = {**headers, "Cf-Access-Jwt-Assertion": "guest"}
-    assert client.post("/valr/api/telegram/code", content="{}", headers=guest).status_code == 403
-    assert codes == []
-    async def username(client_=None):
-        return "valr_sample_bot"
-    monkeypatch.setattr(telegram_api, "bot_username", username)
-    ok = client.post("/valr/api/telegram/code", content="{}", headers=headers)
-    assert ok.status_code == 200 and ok.json()["command"] == "/start 246810"
-    assert ok.json()["link"] == "https://t.me/valr_sample_bot?start=246810"  # One tap: /start 246810.
+    assert client.post("/valr/api/telegram/code", content="{}", headers=headers).status_code in (404, 405)

@@ -39,6 +39,15 @@ class Settings:
     performance_fallback: Path | None = None
 
 
+def owner_recording_name() -> str:
+    """The owner's name in transcripts: the Profile page's (app/owner.py), else the env."""
+    try:
+        from app import owner
+        return owner.recording_name()
+    except Exception:  # noqa: BLE001 - this package also runs as a stand-alone CLI
+        return (os.getenv("VALR_CANDIDATE_NAME", "").strip() or os.getenv("VALR_OWNER_NAME", "").strip())
+
+
 def settings() -> Settings:
     return Settings(
         profile_path=_path("VALR_PROFILE_PATH", "data/profile.json"),
@@ -50,8 +59,7 @@ def settings() -> Settings:
         performance_csv=_path("VALR_PERFORMANCE_CSV", "data/performance_scores.csv"),
         compensation_path=_path("VALR_COMPENSATION_PATH", "data/compensation.json"),
         cache_dir=_path("VALR_RECORDINGS_CACHE", "data/raw_recordings"),
-        candidate_name=(os.getenv("VALR_CANDIDATE_NAME", "").strip()
-                        or os.getenv("VALR_OWNER_NAME", "").strip() or "Candidate"),
+        candidate_name=owner_recording_name() or "Candidate",
         classifier_model=os.getenv("VALR_CLASSIFIER_MODEL", "claude-haiku-5-5"),
         evaluator_model=os.getenv("VALR_EVALUATOR_MODEL", "claude-sonnet-5-5"),
         performance_fallback=(_path("VALR_PERFORMANCE_FALLBACK", "")

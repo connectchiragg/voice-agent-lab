@@ -13,8 +13,8 @@ Activities:
 - `research_finish`: saves the result and the job's duration to `research_jobs`.
 
 Background tasks: the post-call report loop (app/post_call.py; VALR_POST_CALL=0 turns it
-off): queued recordings -> scores, interviewer cues and a Telegram report; the notifications
-dispatch (app/notifications.py: Telegram alerts, quiet hours, the 09:00 digest); and phone
+off): queued recordings -> scores, interviewer cues and a review in the bell; the notifications
+dispatch (app/notifications.py: phone pushes, quiet hours, the 09:00 digest push); and phone
 call recordings (app/phone_recordings.py: Deepgram, then the notetaker pipeline;
 VALR_PHONE_RECORDINGS=0 turns it off); with VALR_LEADS=1, the fast Gmail check
 (app/lead_worker.GmailCheck, every VALR_GMAIL_CHECK_S=30 s) that starts a sync when new mail
@@ -226,7 +226,9 @@ async def show_blocks(start_workflows: bool) -> None:
     from app.interview_types import group_blocks
     from app.interview_workflow import BlockCallWorkflow, InterviewSlotWorkflow
     from app.interview_types import slot_workflow_id
-    zone = ZoneInfo(os.getenv("ASSISTANT_TIMEZONE", "Asia/Kolkata"))
+    from app import owner
+    await owner.refresh(force=True)
+    zone = owner.zone()
     now = datetime.now(timezone.utc)
     client = await temporal_client() if start_workflows else None
     if client is not None:
@@ -279,8 +281,11 @@ async def call_now_cli(ref: str) -> None:
     """`call-now [next|<slot>]`: brief the owner by phone now (research first if needed)."""
     from app import call_now, calendar_sync, interview_store, interview_worker
     from app.interview_types import brief_is_current
+    from app import owner
+    await owner.refresh(force=True)
     if not interview_worker.owner_phone():
-        sys.exit("VALR_OWNER_PHONE is not set.")
+        print("No phone on file: add it in VALR Settings › Calls & reminders.", file=sys.stderr)
+        raise SystemExit(1)
     now = datetime.now(timezone.utc)
     async with await connect() as connection:
         events = await calendar_sync.upcoming(connection, now - timedelta(minutes=30), now + timedelta(days=8))
@@ -361,8 +366,9 @@ async def main() -> None:
     from app import post_call
     from app import notifications, phone_recordings
     reports = asyncio.create_task(post_call.loop(connect)) if post_call.enabled() else None
-    # The bell's Telegram side (held items at 08:00, the 09:00 digest) and phone recordings.
-    background = [asyncio.create_task(notifications.loop(connect))]
+    # The bell's pushes (held items when quiet hours end, the digest) and phone recordings.
+    from app import owner  # The owner's profile (name, zone, phone), re-read every minute.
+    background = [asyncio.create_task(notifications.loop(connect)), asyncio.create_task(owner.keep_fresh())]
     from app import lead_worker
     if lead_worker.enabled():  # A Gmail push that never came: caught within ~a minute.
         background.append(asyncio.create_task(lead_worker.check_loop(

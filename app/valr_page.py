@@ -30,7 +30,7 @@ CALL_STATUS = {
 }
 
 
-HEADS_UP = {  # Telegram heads-up outcome -> (label, tone); "{at}" is the call time.
+HEADS_UP = {  # Heads-up outcome -> (label, tone); "{at}" is the call time.
     "sent": ("Heads-up sent · no reply, no call", "info"), "called": ("Called at {at}", "ok"),
     "calling": ("Calling by {at}", "accent"), "later": ("Calling at {at}", "accent"),
     "skipped": ("Skipped", "muted"),
@@ -169,14 +169,6 @@ def short_day(date: str) -> str:
         return datetime.fromisoformat(date).strftime("%d %b").lstrip("0")
     except ValueError:
         return date
-
-
-def telegram_line(tg: dict[str, Any], clock: Clock) -> str:
-    if not tg.get("configured"):
-        return "not set up"
-    if not tg.get("linked"):
-        return "bot ready · not connected (send the /start code)"
-    return "connected" + (f" · since {clock.when(tg['linked_at'])}" if tg.get("linked_at") else "")
 
 
 def mail_source(url: str) -> str:

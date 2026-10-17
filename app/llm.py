@@ -95,7 +95,8 @@ def system_prompt() -> str:
 
 def time_note(now: datetime | None = None) -> str:
     """The volatile part, sent after the latest user message (see MAX_CALL_MESSAGES)."""
-    zone = os.getenv("ASSISTANT_TIMEZONE", "Asia/Kolkata")
+    from app import owner
+    zone = owner.zone_name()
     now = now or datetime.now(ZoneInfo(zone))
     hour = now.strftime("%I").lstrip("0")
     return f"The user's local time is {now:%A, %d %B %Y}, {hour}:{now:%M %p} ({zone})."

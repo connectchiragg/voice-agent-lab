@@ -5,11 +5,10 @@ Pages and data (any verified Access login): `GET /valr` and the other pages
 app/valr_page.py), and `GET /valr/api/state`, the view as JSON (app/valr_view.py).
 
 Actions (`POST /valr/api/...`, the owner only, see `action_owner`): `sync` starts a
-calendar sync; `dials` {paused} sets the pause switch the briefing workflows check
-before each heads-up or automatic dial; `telegram/code` issues a one-time `/start`
-code (15 minutes) and its t.me deep link that links the owner's Telegram chat;
-`telegram/test` sends the linked chat a test message; `slots/<ref>/refresh` re-runs one interview's research
-with the caches bypassed. Each needs a same-origin JSON request carrying the page's
+calendar sync; `dials` {paused, days?} sets the pause switch the briefing workflows check
+before each heads-up or automatic dial (for 1 or 7 days, or until resumed); `reach` {mode}
+picks the heads-up or the automatic call; `slots/<ref>/refresh` re-runs one interview's
+research with the caches bypassed. Settings and Profile actions: app/settings_web.py. Each needs a same-origin JSON request carrying the page's
 CSRF token (HMAC of the viewer's email and the issue time, 12 hours).
 
 Who may see it is app/auth's decision (VALR_AUTH_MODE): the owner's VALR session (Sign in
@@ -35,7 +34,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Resp
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from app import (access, auth, calendar_sync, callbacks, google_oauth, interview_store, interviews,
-                 research, telegram_api, valr_view)
+                 research, valr_view)
 from app.interview_types import group_blocks, slot_workflow_id
 
 logger = logging.getLogger("uvicorn.error")
@@ -134,6 +133,12 @@ async def google_start(request: Request) -> RedirectResponse:
         settings.token_key)), status_code=303, headers=NO_CACHE)
 
 
+def back_to_settings(error: str = "") -> RedirectResponse:
+    """The Google card again, with a toast (connected) or the problem shown in the card."""
+    where = f"/valr/settings?google_error={error}#google" if error else "/valr/settings?connected=google#google"
+    return RedirectResponse(where, status_code=303, headers=NO_CACHE)
+
+
 @router.get("/oauth/google/callback", response_class=HTMLResponse)
 async def google_callback(request: Request, code: str = "", state: str = "",
                           error: str = "") -> Response:
@@ -142,30 +147,24 @@ async def google_callback(request: Request, code: str = "", state: str = "",
     await owner(request)
     settings = google_oauth.OAuthSettings.from_env()
     if settings is None or research.pool is None:
-        raise HTTPException(503, "Google OAuth or Postgres is not configured.")
+        return back_to_settings("unavailable")
     if error or not code:
-        return HTMLResponse(f"<p>Gmail was not connected: {e(error or 'no code')}.</p>",
-                            status_code=400, headers=NO_CACHE)
+        return back_to_settings("cancelled" if error == "access_denied" else "failed")
     if not google_oauth.check_state(settings.token_key, state):
-        raise HTTPException(400, "This consent link expired; start again from /oauth/google/start.")
+        return back_to_settings("expired")
     try:
         async with httpx.AsyncClient(timeout=10) as http:
             refresh, scope, account = await google_oauth.exchange_code(settings, code, http)
     except (ValueError, httpx.HTTPError) as failure:
         logger.warning("Gmail consent failed: %s", type(failure).__name__)
-        return HTMLResponse(f"<p>Gmail was not connected: {e(failure)}.</p>", status_code=400,
-                            headers=NO_CACHE)
+        return back_to_settings("failed")
     if settings.account and account != settings.account:
-        return HTMLResponse(f"<p>That was {e(account) or 'another account'}; please connect "
-                            f"{e(settings.account)}.</p>", status_code=400, headers=NO_CACHE)
+        return back_to_settings("account")
     async with research.pool.connection() as connection:
         await google_oauth.setup(connection)
         await google_oauth.store(connection, settings, account, refresh, scope)
     logger.info("Gmail connected for VALR (read-only)")
-    return HTMLResponse(f"<!doctype html><meta name=viewport content='width=device-width'>"
-                        f"<p style='font:16px system-ui;margin:24px'>Gmail connected read-only for "
-                        f"{e(account)}. <a href='/valr'>Back to the dashboard</a></p>",
-                        headers=NO_CACHE)
+    return back_to_settings()
 
 
 @router.get("/valr", response_class=HTMLResponse)
@@ -236,6 +235,7 @@ async def action_owner(request: Request) -> str:
 class DialsRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     paused: bool
+    days: Literal[1, 7] | None = None  # Pause for a day or a week; None: until resumed.
 
 
 @router.post("/valr/api/sync")
@@ -257,32 +257,43 @@ async def set_dials(request: Request) -> JSONResponse:
         raise HTTPException(400, "Expected {\"paused\": true|false}.") from error
     if research.pool is None:
         raise HTTPException(503, "Postgres is unavailable.")
+    from datetime import timedelta
+    until = datetime.now(timezone.utc) + timedelta(days=body.days) if body.paused and body.days else None
     async with research.pool.connection() as connection:
         await interview_store.setup(connection)
-        await interview_store.set_flag(connection, interview_store.DIALS_PAUSED, body.paused)
-    logger.info("VALR automatic briefing calls %s from the dashboard",
-                "paused" if body.paused else "resumed")
-    return JSONResponse({"ok": True, "paused": body.paused,
-                         "message": "Automatic calls paused." if body.paused
-                         else "Automatic calls resumed."}, headers=NO_CACHE)
+        await interview_store.set_flag(connection, interview_store.DIALS_PAUSED, body.paused, until)
+    logger.info("VALR reminders %s from the dashboard", "paused" if body.paused else "resumed")
+    if not body.paused:
+        message = "Reminders resumed."
+    elif until:
+        from app import owner as profile
+        message = f"Reminders paused until {until.astimezone(profile.zone()):%a %-d %b}."
+    else:
+        message = "Reminders paused until you resume them."
+    return JSONResponse({"ok": True, "paused": body.paused, "until": until.isoformat() if until else None,
+                         "message": message}, headers=NO_CACHE)
 
 
 class ReachRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
-    mode: Literal["telegram", "call"]
+    mode: Literal["heads_up", "call"]
 
 
 @router.post("/valr/api/reach")
 async def set_reach(request: Request) -> JSONResponse:
-    """Settings: a Telegram heads-up (default) or the automatic T-30 call. Stored in the
-    database; overrides VALR_AUTO_DIAL. Either way one attempt, no retries."""
+    """Settings: a heads-up on the phone (default) or the automatic T-30 call. Stored in the
+    database; overrides VALR_AUTO_DIAL. Either way one attempt, no retries. The automatic
+    call needs a phone on file."""
     await action_owner(request)
     try:
         body = ReachRequest.model_validate_json(await request.body())
     except ValidationError as error:
-        raise HTTPException(400, "Expected {\"mode\": \"telegram\"|\"call\"}.") from error
+        raise HTTPException(400, "Expected {\"mode\": \"heads_up\"|\"call\"}.") from error
     if research.pool is None:
         raise HTTPException(503, "Postgres is unavailable.")
+    from app import owner as profile
+    if body.mode == "call" and not profile.phone():
+        raise HTTPException(400, "Add your phone first: VALR has no number to call.")
     async with research.pool.connection() as connection:
         await interview_store.setup(connection)
         await interview_store.set_flag(connection, interview_store.AUTO_DIAL, body.mode == "call")
@@ -290,7 +301,7 @@ async def set_reach(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True, "mode": body.mode,
                          "message": ("VALR will call you 30 minutes before each interview, once."
                                      if body.mode == "call" else
-                                     "VALR will send a Telegram heads-up; no automatic calls.")},
+                                     "VALR will send a heads-up to your phone; no automatic calls.")},
                         headers=NO_CACHE)
 
 
@@ -318,56 +329,10 @@ async def set_prep(request: Request) -> JSONResponse:
                         headers=NO_CACHE)
 
 
-@router.post("/valr/api/telegram/code")
-async def telegram_code(request: Request) -> JSONResponse:
-    """A one-time code: the owner sends `/start <code>` to the bot to link his chat."""
-    await action_owner(request)
-    if not telegram_api.configured():
-        raise HTTPException(503, "Telegram is not set up yet (deploy/install-telegram.sh).")
-    if research.pool is None:
-        raise HTTPException(503, "Postgres is unavailable.")
-    async with research.pool.connection() as connection:
-        await telegram_api.setup(connection)
-        code = await telegram_api.new_code(connection)
-    logger.info("VALR Telegram link code issued from the dashboard")
-    minutes = int(telegram_api.CODE_TTL.total_seconds() // 60)
-    username = await telegram_api.bot_username()
-    link = telegram_api.deep_link(username, code) if username else None
-    return JSONResponse({"ok": True, "command": f"/start {code}", "expires_minutes": minutes,
-                         "link": link, "bot": f"@{username}" if username else None,
-                         "message": (f"Tap \"Open Telegram\" and press Start within {minutes} minutes."
-                                     if link else
-                                     f"Send /start {code} to the VALR bot within {minutes} minutes.")},
-                        headers=NO_CACHE)
-
-
-@router.post("/valr/api/telegram/test")
-async def telegram_test(request: Request) -> JSONResponse:
-    """Send the linked owner chat a short test message, so he can see the link works."""
-    await action_owner(request)
-    client = telegram_api.bot()
-    if client is None or not telegram_api.configured():
-        raise HTTPException(503, "Telegram is not set up yet.")
-    if research.pool is None:
-        raise HTTPException(503, "Postgres is unavailable.")
-    async with research.pool.connection() as connection:
-        await telegram_api.setup(connection)
-        chat = await telegram_api.owner_chat(connection)
-    if chat is None:
-        raise HTTPException(409, "Telegram isn't connected yet: tap \"Open Telegram & connect\" first.")
-    try:
-        await client.send(chat, "VALR test message: heads-ups will arrive here 30 minutes before "
-                                "each interview.")
-    except telegram_api.TelegramError as error:
-        logger.warning("VALR Telegram test message failed: %s", type(error).__name__)
-        raise HTTPException(502, "Telegram didn't accept the message. Try again in a minute.") from None
-    logger.info("VALR Telegram test message sent from the dashboard")
-    return JSONResponse({"ok": True, "message": "Test message sent. Check Telegram."}, headers=NO_CACHE)
-
-
 @router.post("/valr/api/call-now")
 async def call_me_now(request: Request) -> JSONResponse:
-    """Call the owner now with the brief for his next interview (research it first if needed)."""
+    """Call the owner now with the brief for his next interview (research it first if needed);
+    with nothing coming up, a general chat. Rings once, no retries."""
     await action_owner(request)
     if research.pool is None:
         raise HTTPException(503, "Postgres is unavailable.")
@@ -377,19 +342,22 @@ async def call_me_now(request: Request) -> JSONResponse:
     from app import call_now
     from app.interview_worker import owner_key, owner_phone
     if not owner_phone():
-        raise HTTPException(503, "VALR_OWNER_PHONE is not set.")
+        raise HTTPException(409, "Add your phone in Settings first, or use Talk here.")
     now = datetime.now(timezone.utc)
     async with research.pool.connection() as connection:
         await calendar_sync.setup(connection)
         events = await calendar_sync.upcoming(connection, now, now + valr_view.LOOK_AHEAD)
     event = call_now.pick(events, "next", now)
-    if event is None:
-        raise HTTPException(404, "No upcoming interview to brief.")
+    if event is None:  # Nothing coming up: still ring him, for a general chat.
+        await call_now.call_talk_now(client, owner_key(), owner_phone(), rpc_timeout=callbacks.RPC_TIMEOUT)
+        logger.info("VALR call-now requested from the dashboard (no interview: talk mode)")
+        return JSONResponse({"ok": True, "mode": "talk", "message": "Calling you now. Nothing's coming up, "
+                             "so it's a general chat."}, headers=NO_CACHE)
     ready, _ = await interviews.split_ready([event])
     await call_now.call_now(client, event, owner_key(), owner_phone(), bool(ready),
                             rpc_timeout=callbacks.RPC_TIMEOUT)
     logger.info("VALR call-now requested from the dashboard (brief %s)", "ready" if ready else "researching")
-    return JSONResponse({"ok": True, "message": "Calling you now." if ready else
+    return JSONResponse({"ok": True, "mode": "brief", "message": "Calling you now." if ready else
                          "Researching first; VALR calls you within five minutes."}, headers=NO_CACHE)
 
 

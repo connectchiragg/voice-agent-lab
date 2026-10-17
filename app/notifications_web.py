@@ -10,9 +10,11 @@
   push_p95_s, sla_p50_s, sla_p95_s, met, window_h}: how fast new emails reached the bell
   (Gmail's arrival time -> the item) and the phone (-> the push) over the last 24 hours, against
   the owner's SLA (p95 10 s, p50 5 s; notifications.latency_report).
-- `POST /valr/api/notifications/settings` {immediate?, digest?, quiet?, delivery?}: the Telegram
-  switches (immediate alerts, the 09:00 digest, quiet hours 23:00-08:00) and where alerts go:
-  "both" (Telegram + phone push), "push" (phone push only) or "telegram" (app/webpush.py).
+- `POST /valr/api/notifications/settings` {immediate?, digest?, quiet?, digest_at?, quiet_start?,
+  quiet_end?}: the alert switches (immediate pushes, the daily digest push, quiet hours) and
+  their times ("HH:MM", the owner's time zone).
+- `POST /valr/api/notifications/test` {kind: "digest"}: a sample digest push now, made of the
+  last unread items (or a sample line), so the owner sees what 09:00 looks like.
 """
 from __future__ import annotations
 
@@ -92,12 +94,17 @@ async def mark_read(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True, "marked": changed, "unread": count}, headers=NO_CACHE)
 
 
+TIME = r"^(?:[01]\d|2[0-3]):[0-5]\d$"
+
+
 class SwitchRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     immediate: bool | None = None
     digest: bool | None = None
     quiet: bool | None = None
-    delivery: Literal["both", "push", "telegram"] | None = None
+    digest_at: str | None = Field(default=None, pattern=TIME)
+    quiet_start: str | None = Field(default=None, pattern=TIME)
+    quiet_end: str | None = Field(default=None, pattern=TIME)
 
 
 @router.post("/valr/api/notifications/settings")
@@ -107,13 +114,51 @@ async def switches(request: Request) -> JSONResponse:
         body = SwitchRequest.model_validate_json(await request.body())
     except ValidationError:
         raise HTTPException(400, 'Expected {immediate?, digest?, quiet?} as true or false, or '
-                                 '{delivery: "both" | "push" | "telegram"}.') from None
+                                 'times as "HH:MM".') from None
     values = {k: v for k, v in body.model_dump().items() if v is not None}
     if not values:
         raise HTTPException(400, "Nothing to change.")
+    if values.get("quiet_start") and values.get("quiet_start") == values.get("quiet_end"):
+        raise HTTPException(400, "Quiet hours need a different start and end.")
     async with pool().connection() as connection:
         store = notifications.Store(connection)
         await store.setup()
         await store.save_switches(**values)
         now = await store.switches()
     return JSONResponse({"ok": True, "switches": now.view()}, headers=NO_CACHE)
+
+
+class TestRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    kind: Literal["digest"]
+
+
+SAMPLE = [{"kind": "reply", "company": "", "title": ""}]
+
+
+@router.post("/valr/api/notifications/test")
+async def test(request: Request) -> JSONResponse:
+    """A sample of the daily digest, pushed now (nothing is marked as digested)."""
+    from app import webpush
+    await valr_dashboard.action_owner(request)
+    try:
+        TestRequest.model_validate_json(await request.body())
+    except ValidationError:
+        raise HTTPException(400, 'Expected {"kind": "digest"}.') from None
+    now = datetime.now(timezone.utc)
+    async with pool().connection() as connection:
+        sender = await webpush.sender(connection)
+        if sender is None:
+            raise HTTPException(503, "Phone notifications aren't set up on the server yet (VALR_VAPID_* keys).")
+        if not await sender.subscribers():
+            raise HTTPException(409, "Phone notifications are off: enable them on your phone first.")
+        store = notifications.Store(connection)
+        await store.setup()
+        rows = [r for r in await store.listing(True, now - notifications.KEEP_FOR, 20)
+                if r["importance"] == "digest"][:8] or SAMPLE
+        message = notifications.digest_message(rows)
+        message["tag"] = "valr-digest-sample"
+        result = await sender.send(message, now)
+    if not result.delivered:
+        raise HTTPException(502, "The push service didn't take it. Try Send a test on the device.")
+    return JSONResponse({"ok": True, "message": "Sample digest sent. Check your phone."}, headers=NO_CACHE)

@@ -1,6 +1,6 @@
 """Page wording from the stored data: clean interview labels, a written (second-person)
 briefing instead of the phone script, prep items worth showing, India-only pay, and what
-kind of reminder a block actually got (a Telegram heads-up or a phone call).
+kind of reminder a block actually got (a heads-up on the phone or a phone call).
 
 Pure functions; unit-tested in tests/test_valr_pages.py.
 """
@@ -130,7 +130,7 @@ def reminder_kind(block: dict[str, Any], mode: str) -> str:
         return "heads_up"
     if block.get("state") in CALL_STATES:
         return "call"
-    return "heads_up" if mode == "telegram" else "call"
+    return "call" if mode == "call" else "heads_up"
 
 
 # Leads, in the owner's words (no classifier labels, no repeated company names).
