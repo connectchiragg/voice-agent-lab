@@ -165,3 +165,14 @@ def test_migration_moves_caller_memory_once(monkeypatch):
     assert set(data["legacy_keys"]) == {f"tel:{PHONE}", "email:owner@example.com"}
     assert saved["phone_e164"] == NEW and removed["phone_e164"] is None and removed["phone_removed"]
     assert owner.phone() == ""  # The cache follows the saves.
+
+
+def test_refresh_does_not_import_the_app_research_module(monkeypatch):
+    # The research worker image has no groq; app.research imports it.
+    import sys
+    from app import owner
+    monkeypatch.delitem(sys.modules, "app.research", raising=False)
+    monkeypatch.setattr(owner, "stale", lambda: True)
+    import asyncio
+    asyncio.run(owner.refresh())
+    assert "app.research" not in sys.modules
