@@ -179,14 +179,14 @@ def telegram_line(tg: dict[str, Any], clock: Clock) -> str:
     return "connected" + (f" · since {clock.when(tg['linked_at'])}" if tg.get("linked_at") else "")
 
 
-FONTS = ('<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>'
-         '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1'
-         '&family=Inter:wght@400;500;600;700&display=swap">')
+# The faces (Newsreader, Source Sans 3) are self-hosted in static/fonts (static/valr-ds.css
+# @font-face); preload the two every page paints first, so text doesn't reflow.
+FONTS = ('<link rel="preload" href="/static/fonts/source-sans-3-latin-wght-normal.woff2" as="font" type="font/woff2" crossorigin>'
+         '<link rel="preload" href="/static/fonts/newsreader-latin-opsz-normal.woff2" as="font" type="font/woff2" crossorigin>')
 
-
-ICON = ("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' "
-        "fill='%230b0c0f'/%3E%3Ccircle cx='16' cy='16' r='8' fill='none' stroke='%238b8cfb' stroke-width='2'/%3E"
-        "%3Ccircle cx='16' cy='16' r='3' fill='%23ffffff'/%3E%3C/svg%3E")
+# The Signal V on a porcelain tile (an ink tile in dark browser chrome): scripts/make_icons.py.
+ICON = ('<link rel="icon" href="/static/icons/favicon.svg" type="image/svg+xml">'
+        '<link rel="icon" href="/static/icons/favicon-32.png" sizes="32x32" type="image/png">')
 
 
 def error_page(message: str) -> str:

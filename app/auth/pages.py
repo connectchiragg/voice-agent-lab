@@ -24,15 +24,10 @@ GOOGLE_G = (  # Google's "G" mark, in its four colours.
     '<path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/></svg>')
 
 
-ORBIT = ('<svg class="auth-orbit" viewBox="0 0 320 320" aria-hidden="true">'
-         '<defs><radialGradient id="ag" cx="40%" cy="35%" r="70%"><stop offset="0" stop-color="#2b3a78"/>'
-         '<stop offset="1" stop-color="#0a0f22"/></radialGradient></defs>'
-         '<circle cx="160" cy="160" r="96" fill="url(#ag)"/><circle cx="160" cy="160" r="96" class="o-line"/>'
-         '<ellipse cx="160" cy="160" rx="96" ry="34" class="o-line"/><ellipse cx="160" cy="160" rx="34" ry="96" class="o-line"/>'
-         '<ellipse cx="160" cy="160" rx="150" ry="52" class="o-ring" transform="rotate(-18 160 160)"/>'
-         '<circle cx="118" cy="122" r="5" class="o-hot"/><circle cx="196" cy="140" r="4" class="o-warm"/>'
-         '<circle cx="150" cy="198" r="3.5" class="o-cool"/><circle cx="210" cy="196" r="3" class="o-cold"/>'
-         '<circle cx="292" cy="118" r="4" class="o-sat"/></svg>')
+# The sign-in art: VALR's mark, the Signal V (scripts/make_icons.py), large on its porcelain tile.
+MARK_ART = ('<svg class="auth-mark" viewBox="0 0 100 100" aria-hidden="true">'
+            '<path class="m-ink" d="M28 9.8Q30 8.2 32 9.8C34 12.64 35 16.28 35 19.4L35 50.6C35 53.72 34 57.36 32 60.2Q30 61.8 28 60.2C26 57.36 25 53.72 25 50.6L25 19.4C25 16.28 26 12.64 28 9.8ZM68 9.8Q70 8.2 72 9.8C74 12.64 75 16.28 75 19.4L75 50.6C75 53.72 74 57.36 72 60.2Q70 61.8 68 60.2C66 57.36 65 53.72 65 50.6L65 19.4C65 16.28 66 12.64 68 9.8Z"/>'
+            '<path class="m-accent" d="M48 39.8Q50 38.2 52 39.8C54 42.64 55 46.28 55 49.4L55 80.6C55 83.72 54 87.36 52 90.2Q50 91.8 48 90.2C46 87.36 45 83.72 45 80.6L45 49.4C45 46.28 46 42.64 48 39.8Z"/></svg>')
 
 
 def frame(title: str, body: str, theme: str | None) -> str:
@@ -40,7 +35,7 @@ def frame(title: str, body: str, theme: str | None) -> str:
 <link rel="stylesheet" href="{asset('valr-auth.css')}">
 </head><body class="auth-page">
 <main class="auth-main">
-<div class="auth-art">{ORBIT}</div>
+<div class="auth-art"><div class="auth-tile">{MARK_ART}</div></div>
 <section class="auth-card">
 <p class="brand"><span class="brand-mark" aria-hidden="true"></span><span class="brand-word">valr</span></p>
 {body}

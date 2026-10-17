@@ -39,10 +39,10 @@ const SPAN = 0.9;  // Latitudes kept within ±64°: no pile-up of labels at the 
 export const BANDS = [["hot", 75, 100], ["warm", 50, 75], ["cool", 25, 50], ["cold", 0, 25]];
 export const BAND_LABEL = { hot: "Hot", warm: "Warm", cool: "Cool", cold: "Cold", closed: "Closed" };
 const ORDER = { hot: 0, warm: 1, cool: 2, cold: 3, closed: 4 };
-// [cold end, warm end] per band; static/leads.css's dark set (the globe panel is always dark).
+// [cold end, warm end] per band; static/leads.css's dark set (the globe panel is always deep ink).
 export const DEFAULT_PALETTE = {
-  cold: ["#3553a8", "#4f7be6"], cool: ["#23877c", "#2fb3a0"], warm: ["#d9b64c", "#eda233"],
-  hot: ["#f0703a", "#e8392b"], closed: ["#5a6170", "#5a6170"],
+  cold: ["#4f5f9c", "#8189dc"], cool: ["#418a72", "#6cbb92"], warm: ["#c7a55e", "#e0a64c"],
+  hot: ["#c25e48", "#de5b45"], closed: ["#5e5f6e", "#5e5f6e"],
 };
 export const STAGE_SIZE = { sourced: 3, applied: 3.4, screening: 4.4, interviewing: 5.8, final: 6.6, offer: 7.4,
   "closed-won": 5, "closed-lost": 3, ghosted: 3, closed: 3 };
@@ -181,7 +181,7 @@ export async function mount(el, data, options = {}) {
   const THREE = await import(options.threeUrl || THREE_URL);
   const palette = Object.fromEntries(Object.entries(DEFAULT_PALETTE).map(([band, [lo, hi]]) =>
     [band, [cssColor(el, `--band-${band}-lo`, lo), cssColor(el, `--band-${band}`, hi)]]));
-  const ink = cssColor(el, "--ash", "#9aa5ba"), signal = cssColor(el, "--signal", "#4b8bff");
+  const ink = cssColor(el, "--ash", "#cfcac2"), signal = cssColor(el, "--signal", "#a9aaf0");
   const now = () => options.now || new Date();
 
   const renderer = new THREE.WebGLRenderer({ antialias: !small, alpha: true, powerPreference: "low-power" });
@@ -241,14 +241,14 @@ export async function mount(el, data, options = {}) {
   const VERTEX = "varying vec3 vN; varying vec3 vV; void main(){ vec4 mv = modelViewMatrix * vec4(position, 1.0); vN = normalize(normalMatrix * normal); vV = normalize(-mv.xyz); gl_Position = projectionMatrix * mv; }";
   const coreMaterial = shaded(VERTEX,
     "uniform vec3 inner; uniform vec3 rim; varying vec3 vN; varying vec3 vV; void main(){ float f = 1.0 - max(dot(vN, vV), 0.0); float r = pow(f, 2.4); gl_FragColor = vec4(mix(inner, rim, r), 0.82 + 0.18 * r); }",
-    { inner: { value: new THREE.Color("#0a1030") }, rim: { value: new THREE.Color(signal).lerp(new THREE.Color("#8f93ff"), 0.4) } });
+    { inner: { value: new THREE.Color("#171933") }, rim: { value: new THREE.Color(signal).lerp(new THREE.Color("#c9c6f2"), 0.35) } });
   const core = new THREE.Mesh(new THREE.SphereGeometry(RADIUS * 0.985, 64, 48), coreMaterial);
   core.renderOrder = 0;
   world.add(core);
   // The atmosphere: a back-facing shell, glowing at the limb.
   const glowMaterial = shaded(VERTEX,
     "uniform vec3 glow; varying vec3 vN; varying vec3 vV; void main(){ float i = pow(clamp(0.72 + dot(vN, vV), 0.0, 1.0), 3.2); gl_FragColor = vec4(glow * i, i); }",
-    { glow: { value: new THREE.Color("#5b62ff") } }, { side: THREE.BackSide, blending: THREE.AdditiveBlending, depthWrite: false });
+    { glow: { value: new THREE.Color("#6e70c8") } }, { side: THREE.BackSide, blending: THREE.AdditiveBlending, depthWrite: false });
   const atmosphere = new THREE.Mesh(new THREE.SphereGeometry(RADIUS * 1.16, 64, 48), glowMaterial);
   scene.add(atmosphere);
   // A sparse starfield, far behind.
@@ -261,7 +261,7 @@ export async function mount(el, data, options = {}) {
   }
   const starGeometry = new THREE.BufferGeometry();
   starGeometry.setAttribute("position", new THREE.Float32BufferAttribute(starPositions, 3));
-  const stars = new THREE.Points(starGeometry, new THREE.PointsMaterial({ color: 0xb9c2ff, size: 1.4, sizeAttenuation: false,
+  const stars = new THREE.Points(starGeometry, new THREE.PointsMaterial({ color: 0xe6e0f0, size: 1.4, sizeAttenuation: false,
     transparent: true, opacity: 0.55, depthWrite: false }));
   scene.add(stars);
   // The halo every lead wears: a soft radial sprite, added on top.
