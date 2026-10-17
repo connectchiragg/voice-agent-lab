@@ -638,3 +638,10 @@ def test_postgres_store_against_a_real_database():
             assert await pg.session_email(fresh) is None
             store._ready_pool = saved
     asyncio.run(main())
+
+
+def test_safari_form_post_with_null_origin_is_same_origin_only_with_fetch_metadata():
+    from app.auth import core
+    assert core.same_origin({"origin": "null", "sec-fetch-site": "same-origin"}, "valr.example.com")
+    assert not core.same_origin({"origin": "null", "sec-fetch-site": "cross-site"}, "valr.example.com")
+    assert not core.same_origin({"origin": "null"}, "valr.example.com")

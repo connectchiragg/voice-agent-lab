@@ -136,6 +136,8 @@ def same_origin(headers: Mapping[str, str], host: str | None) -> bool:
     origin = headers.get("origin")
     if origin is None:
         return True
+    if origin == "null":  # Safari sends this for a form POST under referrer policy no-referrer.
+        return site == "same-origin"
     return bool(host) and origin.split("://", 1)[-1].lower() == host.lower()  # type: ignore[union-attr]
 
 
