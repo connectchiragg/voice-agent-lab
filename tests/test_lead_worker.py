@@ -136,6 +136,11 @@ def fake_classify(email, owners):
                     usage={"input_tokens": 850, "output_tokens": 170, "cache_read": 0, "cache_write": 0})
 
 
+def fake_judge(email, decision, kind, ctx):
+    from app.notify_context import Verdict
+    return Verdict("new", "fake", "llm")
+
+
 needs_postgres = pytest.mark.skipif(not os.getenv("VALR_TEST_POSTGRES"),
                                     reason="set VALR_TEST_POSTGRES to a scratch database's conninfo")
 
@@ -168,7 +173,7 @@ def world(monkeypatch, tmp_path):
     monkeypatch.setattr(lead_worker, "owner_emails", lambda: {OWNER})
     monkeypatch.setattr(interview_worker, "gmail_access", access)
     http = httpx.AsyncClient(transport=httpx.MockTransport(gmail.handler))
-    activities = lead_worker.LeadActivities(http, fake_classify)
+    activities = lead_worker.LeadActivities(http, fake_classify, fake_judge)
 
     async def reset():
         async with await connect() as connection:
@@ -533,3 +538,46 @@ def test_without_pubsub_the_check_syncs_new_mail_at_once(world, monkeypatch):
     gmail.messages["q1"] = raw_message(dataclasses.replace(EMAILS[0][0], id="q1", thread_id="t-q1"))
     gmail.history = ["q1"]
     assert asyncio.run(check.tick()) == "started" and started == ["check"]  # No push to wait for.
+
+
+@needs_postgres
+def test_a_reminder_or_a_repeat_in_a_known_thread_makes_no_bell_item(world, monkeypatch):
+    """Context from Postgres (app/notify_context.gather): the company's touchpoints and bell items."""
+    gmail, activities, connect, _ = world
+    spy_dispatch(monkeypatch)
+    asyncio.run(activities.gmail_sync(GmailSyncInput("poll")))  # The backfill: Orbit Labs mail is known.
+    inbound = next(e for e, item in EMAILS if item["step"] == "model" and item["expect"] == "keep")
+    now = datetime.now(timezone.utc)
+    answers, asked = ["new", "duplicate"], []
+
+    def judge(email, decision, kind, ctx):
+        from app.notify_context import Verdict
+        asked.append((email.id, bool(ctx.touches), len(ctx.notes)))
+        return Verdict(answers.pop(0), "fake", "llm", {"input_tokens": 600, "output_tokens": 15,
+                                                       "cache_read": 0, "cache_write": 0})
+    activities._judge = judge
+
+    def deliver(message_id, history, subject, minutes):
+        gmail.messages[message_id] = raw_message(dataclasses.replace(
+            inbound, id=message_id, thread_id="t-n1", at=now - timedelta(minutes=minutes), subject=subject))
+        gmail.history, gmail.history_id = [message_id], history
+        return asyncio.run(activities.gmail_sync(GmailSyncInput("push", history)))
+
+    one = deliver("n1", 5100, "Interview with Orbit Labs", 30)
+    assert one.notified == 1 and asked == [("n1", True, 0)]  # History known: the model said new.
+    two = deliver("n2", 5200, "Reminder: Interview with Orbit Labs tomorrow", 20)
+    assert two.kept == 1 and two.notified == 0 and len(asked) == 1  # A rule: no model call.
+    three = deliver("n3", 5300, "Interview with Orbit Labs", 10)
+    assert three.notified == 0 and asked[-1] == ("n3", True, 1)  # Its earlier bell item is in the context.
+    bell = asyncio.run(rows(connect, "SELECT source_id FROM notifications WHERE source_id LIKE 'gmail:n%%'"))
+    assert bell == [("gmail:n1",)]
+    novelty = dict(asyncio.run(rows(connect, "SELECT id, data->>'novelty' FROM lead_touchpoints "
+                                             "WHERE id LIKE 'gmail:n%%'")))
+    assert novelty == {"gmail:n1": "new", "gmail:n2": "reminder", "gmail:n3": "duplicate"}
+    spend = asyncio.run(rows(connect, "SELECT count(*) FROM research_spend WHERE kind = 'notify_context'"))
+    assert spend == [(2,)] and asyncio.run(lead_worker_calls(connect)) == 2
+
+
+async def lead_worker_calls(connect):
+    async with await connect() as connection:
+        return await lead_worker.judge_calls_today(connection)

@@ -32,6 +32,10 @@
   label changes; older unread mail is added silently, mail read in Gmail is read in VALR);
   after each rebuild, email notifications are linked to their lead and anything due is pushed
   (`notify_rebuild`). `python -m app.lead_worker unread` runs the unread pass now.
+  Before a kept inbound email notifies, `novelty` judges it against what VALR already knows
+  about the company and thread (app/notify_context.py: rules, then one short Haiku call only
+  when there is history and the rules do not settle it, within the day's budget and
+  VALR_NOTIFY_JUDGE_PER_DAY); a reminder, duplicate or confirmation makes no bell item.
 - LinkedIn messages and InMails (their email notifications, app/lead_classify.linkedin_message)
   become touchpoints from the named person: title "LinkedIn message", a contact with a name and
   no email address, the company from their stated employer, grouped by LinkedIn conversation,
@@ -40,7 +44,8 @@
 
 Settings: VALR_LEADS=1 turns the schedules on; VALR_GMAIL_TOPIC; VALR_LEADS_BACKFILL_DAYS (30),
 VALR_LEADS_BACKFILL_MAX (500), VALR_LEADS_LLM_PER_DAY (300), VALR_LEADS_POLL_MINUTES (30),
-VALR_LEADS_FETCH_PER_RUN (150), VALR_GMAIL_RPS (4), VALR_LEADS_LLM_RESERVE (50), VALR_GMAIL_CHECK_S (30).
+VALR_LEADS_FETCH_PER_RUN (150), VALR_GMAIL_RPS (4), VALR_LEADS_LLM_RESERVE (50), VALR_GMAIL_CHECK_S (30),
+VALR_NOTIFY_JUDGE_PER_DAY (100).
 Nothing here logs an address, a subject or an email's text.
 """
 from __future__ import annotations
@@ -58,7 +63,8 @@ import httpx
 import psycopg
 from temporalio import activity
 
-from app import company_names, company_resolver, gmail_api, google_oauth, lead_classify, leads, leads_store, research_jobs
+from app import (company_names, company_resolver, gmail_api, google_oauth, lead_classify, leads, leads_store,
+                 notify_context, research_jobs)
 from app.lead_classify import Decision, Email
 from app.lead_workflow import GmailSyncInput, GmailSyncSummary, RefreshSummary, WatchSummary
 from app.leads import Contact, Touch
@@ -90,6 +96,18 @@ def enabled() -> bool:
 
 def topic() -> str:
     return os.getenv("VALR_GMAIL_TOPIC", "").strip()
+
+
+def judge_per_day() -> int:
+    """Novelty model calls a day at most (VALR_NOTIFY_JUDGE_PER_DAY, 100); over it, new."""
+    return int(os.getenv("VALR_NOTIFY_JUDGE_PER_DAY", "100"))
+
+
+async def judge_calls_today(connection: Any) -> int:
+    cursor = await connection.execute(
+        "SELECT count(*) FROM research_spend WHERE kind = 'notify_context' "
+        "AND at >= date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'")
+    return int((await cursor.fetchone())[0])
 
 
 def llm_per_day() -> int:
@@ -294,9 +312,11 @@ class Budget:
 
 class LeadActivities:
     def __init__(self, http: httpx.AsyncClient | None = None,
-                 classify: Callable[[Email, set[str]], Decision] | None = None) -> None:
+                 classify: Callable[[Email, set[str]], Decision] | None = None,
+                 judge: Callable[..., notify_context.Verdict] | None = None) -> None:
         self.http = http or httpx.AsyncClient(timeout=30, follow_redirects=True)
         self._classify = classify
+        self._judge = judge
 
     def all(self) -> list[Any]:
         return [self.gmail_sync, self.leads_refresh, self.gmail_watch]
@@ -306,6 +326,50 @@ class LeadActivities:
             return self._classify(email, owners)
         from app import llm_gateway
         return lead_classify.classify(email, owners, llm_gateway.shared().client(timeout=60))
+
+    def judge(self, email: Email, decision: Decision, kind: str, ctx: notify_context.Context) -> notify_context.Verdict:
+        if self._judge is not None:
+            return self._judge(email, decision, kind, ctx)
+        from app import llm_gateway
+        return notify_context.judge(email, decision, kind, ctx, llm_gateway.shared().client(timeout=20))
+
+    async def novelty(self, connection: Any, email: Email, decision: Decision, touch: Touch, new_thread: bool,
+                      budget: "Budget", rows: list[dict[str, Any]]) -> notify_context.Verdict | None:
+        """Is this kept inbound email news, given what VALR already knows (app/notify_context.py)?
+        None when it would not notify anyway. Rules first; nothing known -> new; else one short
+        model call within the budget. Fails open (new): a missed reminder costs less than a
+        missed event. Logs codes only."""
+        from app import notifications
+        if not decision.keep or touch.direction != "in":
+            return None
+        kind = notifications.email_kind(decision.category, decision.action_requested, decision.stage_hint, new_thread,
+                                        email.subject, decision.summary)
+        if kind is None:
+            return None
+        try:
+            ctx = await notify_context.gather(connection, touch, email.id, datetime.now(timezone.utc))
+        except Exception as error:  # noqa: BLE001 - never lose the notification over the context
+            logger.warning("VALR notify context unavailable (%s); notifying", type(error).__name__)
+            return notify_context.Verdict("new", "context unavailable", "default")
+        verdict = notify_context.rules(email.subject, decision.summary, kind, decision, ctx, email.at)
+        if verdict is None and ctx.empty:
+            verdict = notify_context.Verdict("new", "first contact", "default")
+        if verdict is None:
+            if await judge_calls_today(connection) < judge_per_day() and budget.take():
+                try:
+                    verdict = await asyncio.to_thread(self.judge, email, decision, kind, ctx)
+                except Exception as error:  # noqa: BLE001
+                    logger.warning("VALR notify context: model failed (%s); notifying", type(error).__name__)
+                    verdict = notify_context.Verdict("new", "model error", "default")
+                if verdict.usage:
+                    rows.append({"part": "leads", "kind": "notify_context", "model": notify_context.MODEL,
+                                 **verdict.usage})
+            else:
+                verdict = notify_context.Verdict("new", "no model budget", "default")
+        logger.info("VALR notify context: %s by %s (%s; %d known)", verdict.novelty, verdict.method,
+                    verdict.reason if verdict.method != "llm" else kind,
+                    len(ctx.touches) + len(ctx.notes) + len(ctx.events))
+        return verdict
 
     # Gmail.
 
@@ -534,6 +598,11 @@ class LeadActivities:
             if verdict == "keep":
                 summary.kept += 1
                 touch = email_touch(email, decision, owners)
+                if live_mail(email):  # News, or a reminder / duplicate / confirmation of something known?
+                    judged = await self.novelty(connection, email, decision, touch, email.thread_id not in known,
+                                                budget, rows)
+                    touch.novelty = judged.novelty if judged is not None else ""
+                    summary.llm_calls += bool(judged is not None and judged.usage)
                 await leads_store.upsert_touch(connection, touch, snippet_cipher(email))
                 # Never old mail from the backfill (not news); mail that arrived since it began is.
                 if live_mail(email):
