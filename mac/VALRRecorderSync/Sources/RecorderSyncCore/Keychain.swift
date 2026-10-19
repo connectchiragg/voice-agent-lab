@@ -1,7 +1,8 @@
 import Foundation
 import Security
 
-/// The upload token lives only in the login Keychain (generic password).
+/// Where VALR for Mac up to 1.0.2 kept the upload token (login Keychain, generic password).
+/// Since 1.0.3 TokenStore only reads it once, moves it to a file and deletes the item.
 public struct TokenKeychain: Sendable {
     public var service: String
 

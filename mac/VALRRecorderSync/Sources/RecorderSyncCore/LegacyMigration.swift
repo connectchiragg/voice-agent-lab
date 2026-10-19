@@ -6,7 +6,7 @@ import Foundation
 ///  - the state folder (what was already sent): ~/Library/Application Support/VALR Recorder Sync/
 ///    is moved to …/VALR/ when the new folder has no state yet;
 ///  - the settings (VALR address, options, "setup done") from the old preferences domain.
-/// The upload token needs nothing: the Keychain service name never changed (Keychain.swift).
+/// The upload token needs nothing here: TokenStore moves it out of the Keychain on first use (TokenStore.swift).
 public enum LegacyMigration {
     public static let legacyDefaultsDomain = "com.haciensus.valr.recordersync"
     public static let settingsKey = "settings"

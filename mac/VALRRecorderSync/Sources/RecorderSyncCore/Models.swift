@@ -39,7 +39,7 @@ public struct AudioAttachment: Equatable, Sendable {
     }
 }
 
-/// User choices. The upload token is NOT here: it lives in the Keychain.
+/// User choices. The upload token is NOT here: it lives in TokenStore (Application Support/VALR/upload-token, 0600).
 public struct AppSettings: Codable, Equatable, Sendable {
     public var serverURL: URL
     /// Move the note to Recently Deleted after VALR confirmed the upload. Default off.
@@ -51,18 +51,38 @@ public struct AppSettings: Codable, Equatable, Sendable {
     public var includeOtherAudio: Bool
     public var onboardingDone: Bool
     public var setupDate: Date
+    /// A quiet Mac notification (no sound) when VALR received a call recording. Default on.
+    public var notifyWhenSent: Bool
 
     public static let defaultServer = URL(string: "https://valr.haciensus.com")!
 
     public init(serverURL: URL = AppSettings.defaultServer, deleteNoteAfterUpload: Bool = false,
                 includeExistingRecordings: Bool = true, includeOtherAudio: Bool = false,
-                onboardingDone: Bool = false, setupDate: Date = Date()) {
+                onboardingDone: Bool = false, setupDate: Date = Date(), notifyWhenSent: Bool = true) {
         self.serverURL = serverURL
         self.deleteNoteAfterUpload = deleteNoteAfterUpload
         self.includeExistingRecordings = includeExistingRecordings
         self.includeOtherAudio = includeOtherAudio
         self.onboardingDone = onboardingDone
         self.setupDate = setupDate
+        self.notifyWhenSent = notifyWhenSent
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case serverURL, deleteNoteAfterUpload, includeExistingRecordings, includeOtherAudio, onboardingDone, setupDate, notifyWhenSent
+    }
+
+    /// Tolerant decoding: settings saved by an older version (without newer keys) keep everything they had.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let d = AppSettings()
+        serverURL = try c.decodeIfPresent(URL.self, forKey: .serverURL) ?? d.serverURL
+        deleteNoteAfterUpload = try c.decodeIfPresent(Bool.self, forKey: .deleteNoteAfterUpload) ?? d.deleteNoteAfterUpload
+        includeExistingRecordings = try c.decodeIfPresent(Bool.self, forKey: .includeExistingRecordings) ?? d.includeExistingRecordings
+        includeOtherAudio = try c.decodeIfPresent(Bool.self, forKey: .includeOtherAudio) ?? d.includeOtherAudio
+        onboardingDone = try c.decodeIfPresent(Bool.self, forKey: .onboardingDone) ?? d.onboardingDone
+        setupDate = try c.decodeIfPresent(Date.self, forKey: .setupDate) ?? d.setupDate
+        notifyWhenSent = try c.decodeIfPresent(Bool.self, forKey: .notifyWhenSent) ?? d.notifyWhenSent
     }
 }
 

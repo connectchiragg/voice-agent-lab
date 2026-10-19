@@ -12,7 +12,7 @@ struct SettingsView: View {
         Form {
             Section("VALR") {
                 LabeledContent("Address", value: model.settings.serverURL.absoluteString)
-                LabeledContent("Upload token", value: model.hasToken ? "Saved in Keychain" : "Missing")
+                LabeledContent("Upload token", value: model.hasToken ? "Saved on this Mac" : "Missing")
                 HStack {
                     SecureField("Paste a new token", text: $newToken)
                     Button("Check & save") { Task { await replaceToken() } }.disabled(newToken.isEmpty)
@@ -24,15 +24,16 @@ struct SettingsView: View {
                 Toggle("Move the note to Recently Deleted after VALR has it", isOn: $model.settings.deleteNoteAfterUpload)
                 Toggle("Also send recordings already in Notes", isOn: $model.settings.includeExistingRecordings)
                 Toggle("Also send other audio in Notes (not just calls)", isOn: $model.settings.includeOtherAudio)
+                Toggle("Notify me when a call is sent (no sound)", isOn: $model.settings.notifyWhenSent)
                 Toggle("Open at login", isOn: Binding(get: { model.launchAtLogin }, set: { model.launchAtLogin = $0 }))
             }
             Section("Notes access") {
-                LabeledContent("Full Disk Access", value: model.access == .granted ? "Granted" : (model.access == .notesMissing ? "No Notes data found" : "Not granted"))
+                LabeledContent("Full Disk Access", value: model.fullDiskAccessText)
                 HStack {
                     Button("Open Full Disk Access settings") { model.openFullDiskAccessSettings() }
                     Button("Check Notes") { diagnostics = model.diagnose() }
                 }
-                LabeledContent("Notes automation", value: automationText)
+                LabeledContent("Notes automation", value: model.automationText)
                 Text("Used to ask Notes to download a call recording from iCloud when only the note has arrived. macOS asks once; you can change it in Privacy & Security › Automation.")
                     .font(.caption).foregroundStyle(.secondary)
                 Button("Open Automation settings") { model.openAutomationSettings() }
@@ -50,19 +51,10 @@ struct SettingsView: View {
         .onAppear { model.refreshAccess() }
     }
 
-    private var automationText: String {
-        switch NotesDownloadFetcher.automationState() {
-        case .allowed: return "Allowed"
-        case .denied: return "Not allowed"
-        case .notAsked: return "Not asked yet"
-        case .unknown: return "Unknown (Notes is not open)"
-        }
-    }
-
     private func replaceToken() async {
         switch await model.checkToken(newToken) {
         case .valid:
-            do { try model.saveToken(newToken); newToken = ""; message = "Saved." } catch { message = "Could not save to the Keychain." }
+            do { try model.saveToken(newToken); newToken = ""; message = "Saved." } catch { message = "Could not save the token on this Mac." }
         case .invalid: message = "VALR did not accept this token."
         case .notConfigured: message = "This VALR has recording uploads turned off."
         case .unreachable(let why): message = "Could not reach VALR (\(why))."

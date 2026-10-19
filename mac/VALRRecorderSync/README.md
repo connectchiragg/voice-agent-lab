@@ -14,7 +14,11 @@ iPhone call  →  Notes (iCloud)  →  this Mac  →  VALR (menu bar)  →  POST
 - It sends **only the audio** and a few hints: the file name, the note title ("Call with Jane"), the
   contact name, and the time of the call. It never sends any other note text. If a title has digits
   (a phone number), it is replaced with "Phone call", so no number leaves the Mac.
-- The upload token is kept in the macOS **Keychain**. The app never writes it to a file or a log.
+- The upload token is kept on this Mac, readable only by your user account:
+  `~/Library/Application Support/VALR/upload-token` (folder 0700, file 0600, written atomically). It is
+  read once per launch and never written to a log. (Up to 1.0.2 it was in the Keychain; because the app
+  is ad-hoc signed, every build looked like a new app to the Keychain and macOS asked again and again.
+  1.0.3 reads the old Keychain item once, moves it to the file and deletes the item.)
 - An item counts as done only after VALR answers `ok`. What was sent is recorded in
   `~/Library/Application Support/VALR/state.json`, which holds attachment IDs, SHA-256
   digests and VALR IDs only.
@@ -54,7 +58,7 @@ its icon; in the menu bar it shows a monochrome version of the orb that follows 
    1. **VALR address:** leave `https://valr.haciensus.com`.
    2. **Upload token:** in VALR, open **Settings › Phone call recordings › Show upload token**.
       Copy the token, paste it into the app, and click **Check & save**. The app checks the token
-      without sending any audio, then stores it in the Keychain.
+      without sending any audio, then stores it on this Mac (readable only by your user account).
       - If you already put this token in the iPhone Shortcut, use the same token. Pressing
         **Rotate** in VALR would break the Shortcut.
    3. **Full Disk Access:**
@@ -71,15 +75,26 @@ its icon; in the menu bar it shows a monochrome version of the orb that follows 
 6. **Check it:** open **Settings… › Check Notes**. It shows counts only, for example
    "Call recordings ready to send: 1".
 7. **Test it end to end:** make a short call on the iPhone and record it. Wait until the note appears
-   in Notes on the Mac; the app asks Notes for the audio if it hasn't downloaded. Within about 2 minutes you get the notification
-   *"Sent 1 call recording to VALR"*.
+   in Notes on the Mac; the app asks Notes for the audio if it hasn't downloaded. Within about 2 minutes you get a
+   quiet notification (no sound) *"Call with Jane sent to VALR"* (Settings › Sync can turn it off).
 
 **The menu shows:** the status, the last sync time, how many were sent today, **Sync now**,
-**Open VALR**, **Settings…** and **Quit**.
+**Open VALR**, **VALR for Mac window…**, **Settings…** and **Quit**.
 
-**When you rebuild the app:** an ad-hoc signature changes with every build, so macOS may:
-- ask again for Keychain access (click **Always Allow**);
-- need Full Disk Access granted again (remove the app from the list and add it back).
+**Always reachable (1.0.3):**
+- **Opening VALR** from Finder, Spotlight or Launchpad (while it runs or not) opens the
+  **VALR for Mac** window: status, VALR connection, last sync, still to send, waiting for iCloud,
+  Full Disk Access and Notes automation, plus **Sync now**, **Fetch now**, **Settings…** and **Quit**.
+  Opening at login stays quiet.
+- **One copy at a time.** A second copy of the same or an older version shows the running copy's window
+  and quits. A newer version asks older copies to quit (force-quit after 5 s) and takes over, so an
+  update dragged in while an old VALR runs just works.
+- **Hidden icon.** macOS hides menu-bar icons that don't fit (on a MacBook with a notch, anything that
+  would sit under or left of the notch). VALR notices and opens its window once with *"Your menu bar is
+  full, so macOS hid VALR's icon. Open VALR from Spotlight anytime."* It does not nag again.
+
+**When you rebuild the app:** an ad-hoc signature changes with every build, so macOS may
+need Full Disk Access granted again (remove the app from the list and add it back).
 
 A Developer ID signature (see below) avoids this.
 
@@ -90,8 +105,8 @@ On its first launch, VALR (`Sources/RecorderSyncCore/LegacyMigration.swift`):
 - moves `~/Library/Application Support/VALR Recorder Sync/` to `…/VALR/`, so recordings already
   sent are not sent again (VALR de-duplicates anyway);
 - copies the settings (VALR address, options, setup done) from the old preferences;
-- reads the same Keychain item: its service name, `com.haciensus.valr.recordersync.upload-token`,
-  did not change. macOS may ask once whether VALR may use it: click **Always Allow**.
+- moves the token out of the old Keychain item (service `com.haciensus.valr.recordersync.upload-token`)
+  into the token file, once; macOS may ask one last time whether VALR may use it.
 
 What you do by hand:
 1. Quit the old app (menu › **Quit VALR Recorder Sync**) and move it from Applications to the Bin.
@@ -179,7 +194,7 @@ forensic tools do:
 
 | Option | Cost | What a new user sees |
 |---|---|---|
-| **Ad-hoc signed .zip/.dmg** (implemented: `mac/build.sh`) | free | Must right-click › Open once, or clear quarantine (`xattr -dr com.apple.quarantine …`). Rebuilds need Full Disk Access and Keychain access granted again. |
+| **Ad-hoc signed .zip/.dmg** (implemented: `mac/build.sh`) | free | Must right-click › Open once, or clear quarantine (`xattr -dr com.apple.quarantine …`). Rebuilds need Full Disk Access granted again. |
 | **Developer ID signed + notarized** (TODOs with exact `notarytool` commands in `build.sh`) | Apple Developer Program, **US$99/year** | Opens normally with no warnings. Permissions survive updates, because the signature identity stays the same. |
 | **Sparkle auto-updates** (described, not built) | free library; needs a place to host `appcast.xml` (VALR's static files, or GitHub Releases) | The app checks for updates and installs them itself. Use it together with Developer ID signing. Updates are signed with an EdDSA key kept outside the repo. |
 | **Homebrew cask** (described) | free | `brew install --cask valr`. A cask points at a versioned .dmg URL and its SHA-256. You can use your own tap (`brew tap haciensus/valr`) from the start. The official homebrew-cask repository only accepts notarized, reasonably popular apps. |
@@ -202,7 +217,7 @@ VALR is single-owner today: there is one upload token, a hash of which is stored
       `ABCD-1234`, that works once and expires after 10 minutes.
    2. The app sends `POST /hooks/device-pair {code, device}`.
    3. VALR answers `{ok, token, account}`.
-   4. The app stores the token in the Keychain.
+   4. The app stores the token on the Mac (`upload-token`, 0600).
    5. The route must be public: add a Cloudflare Access bypass, like the one for
       `/hooks/recording-upload`, and rate-limit it.
 3. **Per-user limits and storage quotas**, instead of only the per-IP limit used today.
@@ -243,7 +258,9 @@ cd VALRRecorderSync && swift build         # debug build
 | `Uploader.swift` | Multipart upload, token check, error types. |
 | `SyncEngine.swift` | One sync pass: retries with backoff, state, optional delete, diagnostics. |
 | `StateStore.swift` | `state.json`. |
-| `Keychain.swift` | The token. |
+| `TokenStore.swift` | The token file (0600), read once per launch; moves an old Keychain token over once. |
+| `Keychain.swift` | The pre-1.0.3 Keychain item, read only by that migration. |
+| `AppPresence.swift` | One copy at a time, when the window opens, hidden-icon detection, the sent notification text. |
 | `NotesDeleter.swift` | AppleScript to move a note to Recently Deleted, after checking the note's title. |
 | `Pairing.swift` | The future "Connect a Mac" pairing. |
 | `LegacyMigration.swift` | Carries an install over from the old name, VALR Recorder Sync. |

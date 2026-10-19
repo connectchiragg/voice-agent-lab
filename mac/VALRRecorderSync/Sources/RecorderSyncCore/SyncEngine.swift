@@ -36,6 +36,8 @@ public struct SyncReport: Equatable, Sendable {
         case notesAutomationDenied
     }
     public var sent = 0
+    /// One entry per recording counted in `sent`: the contact name, or nil when none is known.
+    public var sentContacts: [String?] = []
     public var duplicates = 0
     public var rejected = 0
     /// Call recordings whose note is on this Mac but whose audio is not downloaded yet.
@@ -160,7 +162,7 @@ public actor SyncEngine {
                                                         at: now(), notePK: a.notePK)
                         if response.duplicate != true { $0.sentByDay[day, default: 0] += 1 }
                     }
-                    if response.duplicate == true { report.duplicates += 1 } else { report.sent += 1 }
+                    if response.duplicate == true { report.duplicates += 1 } else { report.sent += 1; report.sentContacts.append(contact) }
                     log.info("Upload ok (duplicate: \(response.duplicate == true, privacy: .public))")
                 case .failure(.unauthorized):
                     report.problem = .unauthorized

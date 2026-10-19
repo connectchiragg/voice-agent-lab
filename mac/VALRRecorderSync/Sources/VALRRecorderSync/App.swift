@@ -52,15 +52,34 @@ struct BrandHeader: View {
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    private var launchedAtLogin = false
+
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        launchedAtLogin = AppInfo.launchedAtLogin()
+        MainActor.assumeIsolated { InstanceChannel.listen() }
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory) // no Dock icon (LSUIElement also set in Info.plist)
+        let atLogin = launchedAtLogin
         Task { @MainActor in
-            if AppModel.shared.needsOnboarding {
-                Windows.shared.showOnboarding()
-            } else {
-                AppModel.shared.start()
+            // One VALR at a time: hand over to a running copy, or quit older ones and take over.
+            guard await SingleInstanceGuard.resolve() else { NSApp.terminate(nil); return }
+            let model = AppModel.shared
+            switch LaunchWindowPolicy.onLaunch(needsOnboarding: model.needsOnboarding, launchedAtLogin: atLogin) {
+            case .onboarding: Windows.shared.showOnboarding()
+            case .main: Windows.shared.showMain(); model.start()
+            case .none: model.start()
             }
+            StatusIconWatcher.shared.start()
         }
+    }
+
+    /// Opening VALR again (Finder, Spotlight, Launchpad, `open -a VALR`) shows its window.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        NSLog("VALR: opened again; showing the window")
+        MainActor.assumeIsolated { Windows.shared.showMainOrOnboarding() }
+        return false
     }
 }
 
@@ -87,6 +106,7 @@ struct MenuContent: View {
             .disabled(model.isSyncing || model.needsOnboarding)
             .keyboardShortcut("s")
         Button("Open VALR") { model.openVALR() }
+        Button("VALR for Mac window…") { Windows.shared.showMain() }
         Divider()
         if model.needsOnboarding {
             Button("Finish setup…") { Windows.shared.showOnboarding() }
@@ -104,6 +124,16 @@ final class Windows {
     static let shared = Windows()
     private var onboarding: NSWindow?
     private var settings: NSWindow?
+    private var main: NSWindow?
+
+    func showMain() {
+        if main == nil { main = make(title: "VALR for Mac", view: MainWindowView(model: AppModel.shared)) }
+        present(main)
+    }
+
+    func showMainOrOnboarding() {
+        if AppModel.shared.needsOnboarding { showOnboarding() } else { showMain() }
+    }
 
     func showOnboarding() {
         if onboarding == nil {

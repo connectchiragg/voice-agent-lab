@@ -33,7 +33,7 @@ struct OnboardingView: View {
                         Button("Connect") { Task { await pair() } }.disabled(pairingCode.isEmpty || busy)
                     }
                 } else {
-                    Text("In VALR open Settings › Phone call recordings › Show upload token, copy it, and paste it here. It is kept in your macOS Keychain.")
+                    Text("In VALR open Settings › Phone call recordings › Show upload token, copy it, and paste it here. It is kept on this Mac, readable only by your user account.")
                         .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     HStack {
                         SecureField("Upload token", text: $token).textFieldStyle(.roundedBorder)
@@ -114,8 +114,8 @@ struct OnboardingView: View {
         busy = true; defer { busy = false }
         switch await model.checkToken(token) {
         case .valid:
-            do { try model.saveToken(token); token = ""; tokenOK = true; tokenMessage = "Token works and is saved in the Keychain." }
-            catch { tokenOK = false; tokenMessage = "Could not save to the Keychain." }
+            do { try model.saveToken(token); token = ""; tokenOK = true; tokenMessage = "Token works and is saved on this Mac." }
+            catch { tokenOK = false; tokenMessage = "Could not save the token on this Mac." }
         case .invalid: tokenOK = false; tokenMessage = "VALR did not accept this token. Copy it again, or rotate it in VALR."
         case .notConfigured: tokenOK = false; tokenMessage = "This VALR has recording uploads turned off."
         case .unreachable(let why): tokenOK = false; tokenMessage = "Could not reach VALR (\(why)). Check the address."
@@ -134,7 +134,7 @@ struct OnboardingView: View {
         } catch let error as PairingClient.PairingError {
             tokenOK = false; tokenMessage = error.description
         } catch {
-            tokenOK = false; tokenMessage = "Could not save to the Keychain."
+            tokenOK = false; tokenMessage = "Could not save the token on this Mac."
         }
     }
 

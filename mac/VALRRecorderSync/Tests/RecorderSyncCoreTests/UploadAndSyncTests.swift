@@ -98,6 +98,7 @@ struct SyncEngineTests {
 
         let r1 = await engine.run(settings: settings, uploader: uploader)
         #expect(r1.sent == 2 && r1.problem == nil && r1.waitingForDownload == 1)
+        #expect(r1.sentContacts.count == 2 && r1.sentContacts.contains("Jane Doe"))
         #expect(server.requests.count == 2)
         let st = store.state
         #expect(st.done[jane.attachmentID]?.sha256 == (try FileHasher.sha256(of: jane.file!)))
