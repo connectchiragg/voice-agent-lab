@@ -155,6 +155,7 @@ class Touch:
     action: str = ""  # What it asks, in a few words
     stated: str = ""  # The company the source itself gave (classifier, calendar, scorecard)
     company_how: str = ""  # How `company` was found (app/company_resolver.py)
+    novelty: str = ""  # Emails: new | reminder | duplicate | confirmation (app/notify_context.py); "" not judged
 
 
 @dataclass

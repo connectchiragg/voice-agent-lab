@@ -116,6 +116,8 @@ class Decision:
     next_step: str = ""
     action_requested: bool | None = None  # The email asks the candidate to do something (None: not asked)
     action: str = ""  # What, in a few words ("share your availability")
+    event_at: str = ""  # The interview time it schedules, confirms, moves to or cancels (ISO 8601), or ""
+    novelty: str = ""  # From the email alone: new | reminder | duplicate | confirmation (app/notify_context.py)
     usage: dict[str, int] = field(default_factory=dict)
 
 
@@ -194,7 +196,13 @@ Reply with JSON only, no prose:
  availability or book a slot, answer a question, send documents, do an assignment or test,
  decide on an offer, share salary details); false for acknowledgements, alerts, rejections,
  updates and his own replies,
- "action": "<= 8 words, what he should do, starting with a verb, or \\"\\""}
+ "action": "<= 8 words, what he should do, starting with a verb, or \\"\\"",
+ "event_at": the date and time of the interview or call this email schedules, confirms, reminds
+ of, moves (the NEW time) or cancels, ISO 8601 with the UTC offset the email gives (e.g.
+ "2026-10-20T18:30+05:30"), or "" when it names no specific time,
+ "novelty": from this email alone: "reminder" (reminds him of an interview, call, assessment
+ or ask already arranged), "confirmation" (confirms something already booked or done, nothing new
+ to act on), "duplicate" (a forwarded or re-sent copy) or "new"}
 stage_hint: sourced = recruiter outreach before he applied; applied = application received;
 screening = recruiter or HR screen; interviewing = interview rounds or assessments; final = near an
 offer (a final round, an offer discussion, references or a background check, compensation talk
@@ -268,7 +276,21 @@ def parse(text: str) -> Decision:
         cue=body.get("cue") if body.get("cue") in ("positive", "negative") else "none",
         summary=clip(body.get("summary"), 24), next_step=clip(body.get("next_step"), 14),
         action_requested=body["action_requested"] if isinstance(body.get("action_requested"), bool) else None,
-        action=clip(body.get("action"), 10)[:100])
+        action=clip(body.get("action"), 10)[:100], event_at=event_time(body.get("event_at")),
+        novelty=body.get("novelty") if body.get("novelty") in NOVELTY else "")
+
+
+NOVELTY = ("new", "reminder", "duplicate", "confirmation")
+
+
+def event_time(value: Any) -> str:
+    """The model's event time when it reads as ISO 8601, else ""."""
+    text = str(value or "").strip()[:40]
+    try:
+        datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return ""
+    return text
 
 
 def classify(email: Email, owner_emails: set[str], client: Any, model: str = MODEL) -> Decision:

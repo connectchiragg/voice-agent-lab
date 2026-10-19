@@ -59,6 +59,10 @@ class MemoryStore:
                  and r["kind"] != n.INCOMING]
         return max(found, key=lambda r: r["created_at"]) if found else None
 
+    async def recent(self, since):
+        return sorted((r for r in self.rows if r["created_at"] >= since and r["kind"] != n.INCOMING),
+                      key=lambda r: r["created_at"], reverse=True)
+
     async def recent_for_lead(self, lead_id, since):
         return [r for r in self.rows if r.get("lead_id") == lead_id and r["created_at"] >= since]
 

@@ -394,6 +394,63 @@ latency: email in the bell N s after it arrived" and, hourly, "VALR notification
 Without Pub/Sub (`VALR_GMAIL_TOPIC` unset) the SLA cannot be met: the worker logs an
 error at start and checks Gmail every 15 s instead.
 
+## Notifications with context (only genuinely new events)
+
+The owner (2026-10-19): notifications were too stateless; "a reminder of an event is not a new
+event". Before a kept inbound email becomes a bell item, `app/notify_context.py` judges it
+against what VALR already knows about that company and thread, all from Postgres (no extra
+Gmail or Calendar calls):
+
+- the company's and thread's touchpoints of the last 30 days (date, category, subject, summary);
+- the bell items of the last 30 days for that company or thread (kind, title, the interview time
+  they announced);
+- the company's stored calendar events (a day ago to 45 days on).
+
+Each email gets a `novelty`, stored on its touchpoint:
+
+| novelty | Examples | Bell / push |
+|---|---|---|
+| `new` | first contact, a new round, a reschedule to a new time, a cancellation, a new person, an offer, a rejection, a new ask or deadline | item, pushed as before |
+| `reminder` | "Reminder: Interview 1 at 8:30 pm", "Your interview is tomorrow", "Starting in 1 hour", Google Calendar "Notification: ...", an ATS "complete your assessment" reminder | nothing |
+| `duplicate` | a forwarded or re-sent copy; the calendar-invite email of an interview the bell already announced (same company or thread, the same time +-15 min); a second copy of an offer or rejection | nothing |
+| `confirmation` | "Interview confirmed" for a slot the bell already has; "All tasks completed"; "your application is still under review" | nothing |
+
+"Nothing" means no bell item, no push and no unread dot (the unread pass skips these touchpoints
+too); the email stays on the lead's timeline. The `incoming` item shown while the classifier ran
+is retracted.
+
+How, cheapest first:
+
+1. **Rules** (no model): offer and rejection are news unless the bell already has one for that
+   thread (or that company within 3 days); a cancellation or reschedule is news unless the bell
+   already announced that exact change; reminder wording; forwarded or re-sent copies of a known
+   thread or subject; "still under review" and completion receipts; an interview time (the
+   classifier's new `event_at` field) the bell already announced; the classifier's own
+   `novelty` hint "reminder" when something is known.
+2. **Nothing known** about the company or thread: new (first contact), no model call.
+3. Otherwise **one short Haiku call** with the compact context (at most 8 touchpoints, 6 bell
+   items, 4 calendar events) and the email, both inside tags as data. It counts against the
+   run's lead budget and the research month cap, and at most `VALR_NOTIFY_JUDGE_PER_DAY` (100)
+   a day (counted from `research_spend`, kind `notify_context`). Over budget, a model error or an
+   unreadable answer: new (a missed reminder costs less than a missed event). It goes through
+   `app/llm_gateway.py`, so the OpenRouter 402 -> Anthropic fallback applies.
+
+Calendar: an interview `added`, or `moved` to a time, that the bell already announced for the
+same company (+-15 min; an email's interview item now stores the time it names in
+`interview_at`, as does every calendar item) is not notified again. Two calendar events for one
+interview notify once. Cancellations always notify; moving back to a time announced more than
+two days ago is news.
+
+Latency: the `incoming` bell item is still created before any model call, so the bell SLA is
+unchanged. The context is three small queries (milliseconds); the judge call (about 1 s) only
+delays the push of an email that has history and that the rules did not settle.
+
+Cost: the judge is about 1,300 input and 25 output tokens, about $0.00014 a call. Only notifying
+mail with history reaches it (a handful a day): about $0.001 a day; at the cap, $0.014 a day. The
+classifier's two new fields add about 20 output tokens a call.
+
+Logs carry codes only: "VALR notify context: reminder by rule (reminder wording; 3 known)".
+
 ## Measurements and cost
 
 **Classifier**, on the 25 synthetic emails in `tests/fixtures/lead_emails.json`
@@ -422,7 +479,8 @@ per email that reaches it:
 | `tests/test_lead_classify.py` | heuristics on the eval set, reply parsing, contacts | |
 | `tests/test_leads_web.py` | OIDC with generated RSA keys, the webhook's answers, owner-only page and JSON, CSRF, the correction endpoint | |
 | `tests/test_lead_workflow.py` | pokes and the refresh | Temporal test server |
-| `tests/test_lead_worker.py` | calendar rules, scorecard anchors; backfill, history, recovery, his own replies, budget deferral, watch, encrypted snippet, no content in the log, corrections storage, the reconnect alert in the bell (once per expiry) | fake Gmail, fake model, Postgres via `VALR_TEST_POSTGRES` |
+| `tests/test_lead_worker.py` | calendar rules, scorecard anchors; backfill, history, recovery, his own replies, budget deferral, watch, encrypted snippet, no content in the log, corrections storage, the reconnect alert in the bell (once per expiry), a reminder or repeat in a known thread makes no bell item | fake Gmail, fake model, Postgres via `VALR_TEST_POSTGRES` |
+| `tests/test_notify_context.py` | each novelty rule, the context (company, thread, 30 days), the judge prompt and parsing with a fake client, the worker's budget and fallbacks, no bell item for a reminder, the unread pass, calendar invites of an announced interview | fake model, in-memory bell |
 | `tests/test_leads_temperature.py` | the band archetypes, counts, ball in court | |
 | `tests/leads-globe.test.mjs` | bands, colours (colour-blind check on static/leads.css), layout, label collisions, tooltip | `node --test` |
 

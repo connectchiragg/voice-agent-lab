@@ -22,6 +22,14 @@ Where they come from (all in the research worker):
   an interview-like event added, moved (its time changed) or cancelled. The first sync (no
   stored snapshots yet) only seeds them, silently, like the email backfill.
 
+Not stateless (the owner, 2026-10-19: "a reminder of an event is not a new event"): before a
+kept email becomes an item, app/notify_context.py judges it against what VALR already knows
+about the company and thread (touchpoints, earlier bell items, calendar events): reminders,
+duplicates and confirmations of something already known make no item at all (its touchpoint
+carries `novelty`, so the unread pass skips it too). A calendar interview added (or moved to a
+time) that an email in the bell already announced for that company is not notified again
+(`from_calendar`); an email's interview item carries the time it names (`interview_at`).
+
 Only concrete new events notify (the owner, 2026-10-17: "only new events, not what the LLM
 thinks needs attention"). Nothing inferred from a lead rebuild (stage changes, "your move",
 gone quiet, new lead) and no pinned action items: `after_rebuild` only links email
@@ -420,6 +428,13 @@ class Store:
         row = await cursor.fetchone()
         return dict(zip(FIELDS, row)) if row else None
 
+    async def recent(self, since: datetime) -> list[dict[str, Any]]:
+        """Settled items since `since` (app/notify_context.py)."""
+        cursor = await self.c.execute(
+            f"SELECT {', '.join(FIELDS)} FROM notifications WHERE created_at >= %s AND kind <> %s "
+            "ORDER BY created_at DESC LIMIT 500", (since, INCOMING))
+        return [dict(zip(FIELDS, row)) for row in await cursor.fetchall()]
+
     async def recent_for_lead(self, lead_id: str, since: datetime) -> list[dict[str, Any]]:
         cursor = await self.c.execute(
             f"SELECT {', '.join(FIELDS)} FROM notifications WHERE lead_id = %s AND created_at >= %s",
@@ -634,14 +649,23 @@ async def call_failed(store: Any, provider: str, external_id: str, other: str, n
     return True
 
 
+def stale(novelty: str | None) -> bool:
+    """Not news: a reminder, duplicate or confirmation of something already known."""
+    from app.notify_context import SUPPRESSED
+    return (novelty or "") in SUPPRESSED
+
+
 async def from_email(store: Any, email: Any, decision: Any, touch: Any, new_thread: bool, now: datetime) -> int | None:
     """A kept email -> a notification (or nothing). Inbound mail only. Its `incoming` item, when
-    there is one, is replaced (keeping when it appeared) or, when it does not notify, retracted."""
+    there is one, is replaced (keeping when it appeared) or, when it does not notify, retracted.
+    Not news (`touch.novelty`: a reminder, duplicate or confirmation, app/notify_context.py):
+    nothing."""
     incoming = await store.get_source(f"gmail:{email.id}")
     if incoming is not None and incoming["kind"] != INCOMING:
         return None  # Settled already (a re-run).
     kind = None
-    if decision.keep and touch.direction == "in" and now - email.at <= max_age():
+    if decision.keep and touch.direction == "in" and now - email.at <= max_age() \
+            and not stale(getattr(touch, "novelty", "")):
         kind = email_kind(decision.category, decision.action_requested, decision.stage_hint, new_thread,
                           email.subject, decision.summary)
     if incoming is not None:
@@ -653,6 +677,11 @@ async def from_email(store: Any, email: Any, decision: Any, touch: Any, new_thre
             "body": (decision.summary or "")[:240], "company": (touch.company or "")[:120],
             "link": lead_link(""), "gmail_url": touch.url or "", "thread_id": getattr(touch, "thread", "") or email.thread_id,
             "action": (decision.action or "")[:120], "arrived_at": email.at}
+    if kind == "interview":
+        from app.notify_context import parse_when
+        when = parse_when(getattr(decision, "event_at", "") or "")
+        if when is not None and when > now - timedelta(hours=1):
+            note["interview_at"] = when  # The calendar invite for it is then not news (`from_calendar`).
     from app import lead_classify  # A LinkedIn message is a person's, though LinkedIn relays it as bulk mail.
     bulk = lead_classify.is_bulk(email) and lead_classify.linkedin_message(email) is None
     if warm_reply(kind, decision.sender_role, decision.sentiment, decision.cue, bulk):
@@ -758,8 +787,9 @@ def unread_kind(touch: Any, new_thread: bool) -> str | None:
 def silent_note(touch: Any, new_thread: bool) -> dict[str, Any] | None:
     """A bell item for a kept inbound email touchpoint, dated when the mail arrived, that is
     never pushed."""
-    if touch.kind != "email" or touch.direction != "in" or not touch.id.startswith("gmail:"):
-        return None
+    if touch.kind != "email" or touch.direction != "in" or not touch.id.startswith("gmail:") \
+            or stale(getattr(touch, "novelty", "")):
+        return None  # Not mail to him, or not news (a reminder, a duplicate, a confirmation).
     kind = unread_kind(touch, new_thread)
     if kind is None:
         return None
@@ -886,7 +916,9 @@ async def from_calendar(store: Any, event: Any, change: str, now: datetime, befo
     """One calendar change (`change`: added, moved or cancelled) of an interview-like event ->
     one notification. Deduped per event, change and (for a move) the new time. The caller
     decides what is interview-like (app/interview_types.looks_like_interview) and skips the
-    first, seeding sync."""
+    first, seeding sync. An interview added (or moved to a time) that the bell already announced
+    for the same company, from an email or another event, is not notified again."""
+    from app import notify_context
     from app.interview_types import slot_workflow_id
     if change not in CALENDAR_CHANGES:
         return None
@@ -894,6 +926,13 @@ async def from_calendar(store: Any, event: Any, change: str, now: datetime, befo
     if start < now:
         return None  # Already over (or in progress): not news.
     source = f"calendar:{event.key}:{change}" + (f":{event.start_utc}" if change == "moved" else "")
+    if change in ("added", "moved") and await store.get_source(source) is None:
+        known = notify_context.calendar_known(await store.recent(now - notify_context.WINDOW), event.company or "",
+                                              start, f"calendar:{event.key}:", change, now)
+        if known is not None:
+            logger.info("VALR calendar change not notified: %s, already in the bell (%s)", change,
+                        "email" if str(known.get("source_id") or "").startswith("gmail:") else "calendar")
+            return None
     note = {"source_id": source, "kind": "calendar",
             "importance": "immediate" if start - now <= CALENDAR_SOON or recruiter_call(event) else "digest",
             "title": calendar_title(change, event.company, event.start_utc, before_utc),
