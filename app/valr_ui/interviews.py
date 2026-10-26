@@ -144,17 +144,17 @@ def pay_section(pay: dict[str, Any], target: dict[str, Any] | None) -> str:
             return (f'<div class="range-row"><span class="range-name">{e(name)}</span><span class="range-track">'
                     f'<i class="{cls}" style="left:{left:.1f}%;width:{width:.1f}%"></i></span>'
                     f'<span class="range-val num">{e(r["min"])}–{e(r["max"])} LPA</span></div>')
-        rows = bar("Their band", market, "market") + bar("Your target", target, "target")
+        rows = bar("Reported pay", market, "market") + bar("Your target", target, "target")
         if target["min"] > market["max"]:
-            verdict = "Your target is above their band: ask early whether the role has room, and lead with scope."
+            verdict = "Your target is above the reported range: confirm the role's actual budget early."
         elif target["max"] < market["min"]:
-            verdict = "Their band is above your target: let them name a number first."
+            verdict = "Reported pay is above your target: ask for the current role budget first."
         elif target["max"] > market["max"]:
-            verdict = "Your target overlaps the top of their band: anchor on scope and impact, not the number."
+            verdict = "Your target overlaps the reported range: confirm fixed versus total pay and the role level."
         else:
-            verdict = "Your target sits inside their band: ask for their range before giving yours."
+            verdict = "Your target sits inside the reported range: ask for their current budget first."
     elif market:
-        rows = f'<p class="num">Their band: <b>{e(market.get("min"))}–{e(market.get("max"))} LPA</b></p>'
+        rows = f'<p class="num">Reported pay: <b>{e(market.get("min"))}–{e(market.get("max"))} LPA</b></p>'
     elif india["claims"]:
         claim = india["claims"][0]
         rows = f'<p>{e(claim["claim"])} {link(claim["url"], "source") if claim["url"] else ""}</p>'
