@@ -29,5 +29,5 @@ def prompt_block(profile_path: Path | None = None, evaluation_path: Path | None 
     if profile and profile.get("brief"):
         parts.append("## Profile\n" + profile["brief"])
     if evaluation and evaluation.get("brief_text"):
-        parts.append("## Self-evaluation from recent interviews\n" + evaluation["brief_text"])
+        parts.append("## Previous interview feedback\n" + evaluation["brief_text"])
     return HEADER + "\n" + "\n\n".join(parts) if parts else ""

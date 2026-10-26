@@ -143,7 +143,8 @@ OWNER_RULES = (
 
 def compact(profile: str, evaluation_chars: int) -> str:
     """The profile brief, plus the start of the self-evaluation (its weak topics)."""
-    head, marker, evaluation = profile.partition("## Self-evaluation")
+    heading = "## Previous interview feedback" if "## Previous interview feedback" in profile else "## Self-evaluation"
+    head, marker, evaluation = profile.partition(heading)
     return head + (marker + evaluation[:evaluation_chars] if evaluation else "")
 
 

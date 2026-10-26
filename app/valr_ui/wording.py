@@ -5,6 +5,7 @@ kind of reminder a block actually got (a heads-up on the phone or a phone call).
 Pure functions; unit-tested in tests/test_valr_pages.py.
 """
 from app.company_names import NOT_IDENTIFIED
+from app.briefing_quality import useful_fact
 import re
 from collections import Counter
 from typing import Any
@@ -74,6 +75,8 @@ def written(text: str, owner: str = "") -> str:
                  "", out, flags=re.I)
     out = re.sub(r"\byou is\b", "you are", out)
     out = re.sub(r"\byou has\b", "you have", out)
+    out = re.sub(r"\b(?:his|your)\s+(?:own\s+)?self[- ](?:evaluation|assessment)\b",
+                 "previous interview feedback", out, flags=re.I)
     out = out.strip()
     return out[:1].upper() + out[1:]
 
@@ -88,8 +91,31 @@ def key_points(brief: dict[str, Any] | None, owner: str = "", limit: int = 5) ->
     the first sentences of the written-out script."""
     if not brief:
         return []
-    notes = [written(n["fact"], owner) for n in brief.get("notes") or []
-             if not n.get("sensitive") and n.get("fact") and "[email hidden]" not in n["fact"]]
+    candidates = [n for n in brief.get("notes") or []
+                  if not n.get("sensitive") and n.get("fact") and "[email hidden]" not in n["fact"]]
+    # New research prioritizes decision-useful facts. Legacy notes often start with
+    # redundant invite timestamps, so leave those to the existing schedule header.
+    order = {"company": 0, "interviewer": 1, "previous_round": 2, "finance": 3, "round": 4, "prep": 5}
+    candidates.sort(key=lambda n: order.get(n.get("category"), 6))
+    # Give each useful subject a place before spending the screen on more company facts.
+    first, rest, categories = [], [], set()
+    for note in candidates:
+        category = note.get("category")
+        if category in order and category not in categories:
+            first.append(note)
+            categories.add(category)
+        else:
+            rest.append(note)
+    candidates = first + rest
+    notes, seen = [], set()
+    for note in candidates:
+        text = written(note["fact"], owner)
+        if not useful_fact(text, note.get("category", "")):
+            continue
+        key = re.sub(r"\W+", " ", text).strip().lower()
+        if key and key not in seen:
+            notes.append(text)
+            seen.add(key)
     if notes:
         return notes[:limit]
     return sentences(written(brief.get("spoken") or "", owner), limit)

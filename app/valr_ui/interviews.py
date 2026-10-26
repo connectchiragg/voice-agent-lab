@@ -194,7 +194,7 @@ def detail_page(view: dict[str, Any], block: dict[str, Any], slot: dict[str, Any
     d, brief = slot["detail"], slot.get("brief")
     lab = wording.interview_label(slot)
     owner = view.get("owner_name") or ""
-    points = wording.key_points(brief, owner, limit=3)
+    points = wording.key_points(brief, owner, limit=5)
     if brief:
         quality = {"partial": "Some research came back thin, so this one is shorter.",
                    "apologized": "VALR couldn't find anything reliable for this one."}.get(brief.get("quality") or "", "")

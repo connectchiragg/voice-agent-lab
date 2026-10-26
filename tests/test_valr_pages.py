@@ -922,3 +922,19 @@ def test_message_links_name_linkedin_or_gmail():
     item = {"id": "n1", "title": "Arcworks replied", "gmail_url": "https://www.linkedin.com/messaging/thread/2-abc/"}
     assert ">Open in LinkedIn</a>" in note_item(item, now)
     assert ">Open in Gmail</a>" in note_item({**item, "gmail_url": "https://mail.google.com/mail/u/0/#all/abc"}, now)
+
+
+def test_briefing_prioritizes_company_people_previous_rounds_and_finance():
+    brief = {"notes": [
+        {"fact": "The invitation was sent yesterday."},
+        {"fact": "The company builds an employee assistant.", "category": "company"},
+        {"fact": "Your last round covered failure recovery.", "category": "previous_round"},
+        {"fact": "The company builds an employee assistant.", "category": "company"},
+        {"fact": "The interviewer built distributed systems.", "category": "interviewer"},
+        {"fact": "Funding was announced last year; runway is unknown.", "category": "finance"}]}
+    points = wording.key_points(brief, limit=5)
+    assert len(points) == 4
+    assert "employee assistant" in points[0] and "interviewer" in points[1]
+    assert "last round" in points[2] and "Funding" in points[3]
+    assert "invitation" not in " ".join(points)
+    assert wording.written("His self-evaluation suggests a shorter answer.") == "Previous interview feedback suggests a shorter answer."

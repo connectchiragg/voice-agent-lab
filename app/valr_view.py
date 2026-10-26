@@ -202,7 +202,8 @@ def brief(slot: dict[str, Any] | None) -> dict[str, Any] | None:
         if not isinstance(note, dict):
             continue
         links = [urls.get(sid, "") for sid in note.get("source_ids", [])]
-        notes.append({"fact": scrub(note.get("fact")), "sensitive": bool(note.get("sensitive")),
+        notes.append({"fact": scrub(note.get("fact")), "category": note.get("category", ""),
+                      "sensitive": bool(note.get("sensitive")),
                       "private": bool(note.get("private")),
                       "sources": [u for u in links if u.startswith(("https://", "http://"))]})
     return {"spoken": scrub(slot.get("spoken")), "notes": notes, "quality": slot.get("status")}

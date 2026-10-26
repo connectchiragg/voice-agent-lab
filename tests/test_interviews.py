@@ -3,6 +3,7 @@ import asyncio
 import base64
 import json
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -600,3 +601,57 @@ def test_an_interview_about_to_start_gets_no_research_callback(monkeypatch):
         turn=TurnContext("my next interview", 1)))
     assert result["too_soon"] and "proposed" not in result and "soon" not in interviews.proposals
     assert "don't offer it" in result["how"]
+
+
+def test_prior_round_excerpt_preserves_question_and_answer_without_contacts():
+    turns = [{"speaker": "Host", "text": "Welcome."},
+             {"speaker": "Dev", "text": "How did you recover a failed external write?"},
+             {"speaker": "Candidate", "text": "I reconciled its state before retrying. Contact a@private.example."}]
+    text = private_sources.transcript_excerpt(turns)
+    assert "failed external write" in text and "reconciled its state" in text
+    assert "a@private.example" not in text and "[email hidden]" in text
+    assert "Welcome" not in text
+
+
+def test_stored_rounds_uses_live_transcripts_and_exact_company(monkeypatch):
+    import asyncio
+    from app import google_oauth
+    monkeypatch.setenv("VALR_TOKEN_KEY", "test-only")
+    monkeypatch.setattr(google_oauth, "decrypt", lambda key, sealed: json.dumps({"turns": [
+        {"speaker": "Interviewer", "text": "How would you prevent duplicate actions?"},
+        {"speaker": "Candidate", "text": "Use an idempotency key."}]}))
+    class Connection:
+        async def execute(self, sql, args):
+            assert "lower(r.company_domain) = lower(%s)" in sql
+            assert "notetaker_hidden" in sql and "r.started_at < %s" in sql
+            assert args[2:4] == ("acme.com", "acme.com")
+            self.rows = [("fathom", "r1", "Earlier technical round", "2026-10-01", "https://fathom.video/share/r1", "sealed")]
+            return self
+        async def fetchall(self):
+            return self.rows
+    event = SimpleNamespace(company="Acme", company_domain="acme.com", start_utc="2026-10-20T12:00:00Z", key="current")
+    text, urls = asyncio.run(private_sources.stored_rounds(Connection(), event))
+    assert "transcript excerpts" in text and "idempotency key" in text
+    assert urls == ["https://fathom.video/share/r1"]
+
+
+def test_fathom_retrieves_questions_from_matching_recording(monkeypatch):
+    monkeypatch.setenv("FATHOM_API_KEY", "test")
+    def handler(request):
+        if request.url.path.endswith("/transcript"):
+            return httpx.Response(200, json={"transcript": [
+                {"speaker": {"display_name": "Dev"}, "text": "Why did you choose a queue?"},
+                {"speaker": {"display_name": "Candidate"}, "text": "To absorb temporary load."}]})
+        return httpx.Response(200, json={"items": [{"recording_id": 123, "title": "Impromptu meeting",
+            "calendar_invitees": [{"email": "dev@acme.com"}], "share_url": "https://fathom.video/share/123"}]})
+    with httpx.Client(transport=httpx.MockTransport(handler)) as http:
+        text, urls = private_sources.fathom_search(http, ["acme.com"])
+    assert "Why did you choose a queue?" in text and "temporary load" in text
+    assert urls == ["https://fathom.video/share/123"]
+
+
+def test_company_matching_does_not_match_part_of_a_person_or_company_name():
+    assert not private_sources.matches("Call with Badis Zormati", ["Mati"])
+    assert not private_sources.matches("AcmeCloud technical", ["Acme"])
+    assert private_sources.matches("Mati Labs technical round", ["Mati"])
+    assert private_sources.matches("Dev (matiapp.ai)", ["matiapp.ai"])

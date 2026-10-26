@@ -139,7 +139,8 @@ def gmail_search(http: httpx.Client, access_token: str | None, query: str,
 
 def matches(text: str, terms: list[str]) -> bool:
     low = (text or "").lower()
-    return any(term and term.lower() in low for term in terms)
+    return any(term and re.search(r"(?<!\w)" + re.escape(term.lower()) + r"(?!\w)", low)
+               for term in terms)
 
 
 def fathom_search(http: httpx.Client, terms: list[str], key: str | None = None) -> tuple[str, list[str]]:
@@ -153,20 +154,34 @@ def fathom_search(http: httpx.Client, terms: list[str], key: str | None = None) 
     response.raise_for_status()
     lines, urls = [], []
     for item in response.json().get("items") or []:
-        invitees = " ".join(f"{i.get('name', '')} {i.get('email_domain', '')}"
+        invitees = " ".join(f"{i.get('name', '')} {i.get('email_domain', '')} {i.get('email', '').rpartition('@')[2]}"
                             for i in item.get("calendar_invitees") or [])
         title = item.get("meeting_title") or item.get("title") or ""
         if not matches(f"{title} {invitees}", terms):
             continue
         url = item.get("share_url") or item.get("url") or f"https://fathom.video/calls/{item.get('recording_id')}"
         summary = ((item.get("default_summary") or {}).get("markdown_formatted") or "")
-        summary = re.sub(r"\s+", " ", re.sub(r"[#*_\[\]()]", " ", summary))[:600]
+        summary = re.sub(r"\s+", " ", re.sub(r"[#*_\[\]()]", " ", summary))[:900]
+        # A summary/listing alone often omits the actual questions. Read at most two
+        # matching transcripts using the same official endpoint as notetakers/fathom.py.
+        turns = []
+        if item.get("recording_id") and len(lines) < 2:
+            try:
+                detail = http.get(f"https://api.fathom.ai/external/v1/recordings/{item['recording_id']}/transcript",
+                                  headers={"X-Api-Key": key, "Accept": "application/json"})
+                if detail.status_code == 200:
+                    turns = [{"speaker": (t.get("speaker") or {}).get("display_name", "Speaker"),
+                              "text": t.get("text", "")} for t in detail.json().get("transcript") or []]
+            except httpx.HTTPError:
+                pass  # Keep the summary; do not invent missing transcript content.
+        if turns:
+            summary += "\nTranscript excerpts:\n" + transcript_excerpt(turns, limit=1200)
         date = (item.get("recording_start_time") or item.get("created_at") or "")[:10]
         lines.append(f"- {date} '{title[:80]}' [source_url: {url}]: {summary}")
         urls.append(url)
         if len(lines) >= 4:
             break
-    return ("Fathom recordings:\n" + "\n".join(lines)) if lines else "Fathom: no matching recordings.", urls
+    return ("Fathom recordings (summary unless marked transcript excerpts):\n" + "\n".join(lines)) if lines else "Fathom: no matching recordings.", urls
 
 
 GRANOLA_NOTES = "https://public-api.granola.ai/v1/notes"
@@ -214,25 +229,102 @@ def history_path() -> Path:
 
 def history(company: str, terms: list[str], path: Path | None = None) -> tuple[str, list[str]]:
     """Earlier recorded rounds with this company, from the derived evaluation file."""
-    try:
-        data = json.loads((path or history_path()).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return "Interview history: not available.", []
-    lines, urls = [], []
-    for item in data.get("interviews") or []:
-        if not matches(f"{item.get('company') or ''} {item.get('title') or ''}", [company] + terms):
+    paths = [path] if path else [history_path()]
+    if path is None:
+        from app.profile.config import settings
+        paths.insert(0, settings().performance_path)  # Updated after every evaluated round.
+    interviews = []
+    for source in paths:
+        try:
+            interviews.extend(json.loads(source.read_text(encoding="utf-8")).get("interviews") or [])
+        except (OSError, ValueError):
             continue
+    if not interviews:
+        return "Interview history: not available.", []
+    lines, urls, seen = [], [], set()
+    for item in sorted(interviews, key=lambda i: str(i.get("date") or ""), reverse=True):
+        if not matches(f"{item.get('company') or ''} {item.get('title') or ''}", [company] if company else terms):
+            continue
+        identity = item.get("interview_id") or f"{item.get('source')}:{item.get('id')}"
+        if identity in seen:
+            continue
+        seen.add(identity)
         url = f"valr://history/{item.get('source')}/{item.get('id')}"
         weak = "; ".join(str(w.get("topic", ""))[:60] for w in item.get("weak_answers") or [])[:240]
-        asked = "; ".join(str(q)[:80] for q in (item.get("questions_asked") or [])[:5])
+        questions = item.get("questions_asked") or [q.get("question", "") for q in item.get("question_feedback") or []]
+        asked = "; ".join(str(q)[:120] for q in questions[:4])
         people = ", ".join(str(p.get("name") if isinstance(p, dict) else p)[:40]
                            for p in item.get("interviewers") or [])[:160]
+        feedback = "; ".join(str(q.get("improve") or "")[:100] for q in (item.get("question_feedback") or [])[:2])
         lines.append(f"- {str(item.get('date', ''))[:10]} {item.get('company')}: "
                      f"{item.get('round_type')} [source_url: {url}]; interviewers: {people or '-'}; "
-                     f"asked: {asked or '-'}; his weak spots: {weak or '-'}")
+                     f"asked: {asked or '-'}; review suggestions (not interviewer statements): {feedback or weak or '-'}")
         urls.append(url)
     return ("Earlier recorded rounds:\n" + "\n".join(lines[:4])) if lines else \
         "Interview history: no earlier recorded rounds with this company.", urls[:4]
+
+
+def transcript_excerpt(turns: list[dict], limit: int = 1800) -> str:
+    """Questions and adjacent answers, not just the start of a long recording.
+
+    This is source material, not an assessment of interviewer sentiment or a pass/fail.
+    Preserve order and speaker labels; bound the text sent to the researcher.
+    """
+    selected: set[int] = set()
+    for index, turn in enumerate(turns):
+        text = str(turn.get("text") or "")
+        if "?" in text or RELEVANT.search(text):
+            selected.update(range(index, min(index + 2, len(turns))))
+    lines, size = [], 0
+    for index in sorted(selected):
+        turn = turns[index]
+        text = re.sub(r"\s+", " ", str(turn.get("text") or "")).strip()
+        text = re.sub(r"\b[\w.+-]+@[\w.-]+\.[a-zA-Z]{2,}\b", "[email hidden]", text)
+        line = f"{str(turn.get('speaker') or 'Speaker')[:60]}: {text[:450]}"
+        if size + len(line) > limit:
+            break
+        lines.append(line)
+        size += len(line) + 1
+    return "\n".join(lines)
+
+
+async def stored_rounds(connection: Any, event: Any) -> tuple[str, list[str]]:
+    """Read previous rounds of this exact company from the live recording store.
+
+    No provider calls, notifications or transcript writes. Domain wins over ambiguous
+    company names. Hidden recordings and the current/future round are excluded.
+    """
+    from app import google_oauth
+    key = os.getenv("VALR_TOKEN_KEY", "").strip()
+    if not key or not (event.company_domain or event.company):
+        return "", []
+    cursor = await connection.execute(
+        "SELECT r.provider, r.external_id, r.title, r.started_at, r.share_url, t.sealed "
+        "FROM notetaker_recordings r JOIN recording_transcripts t "
+        "ON t.provider = r.provider AND t.external_id = r.external_id "
+        "WHERE r.started_at < %s AND (r.event_key IS NULL OR r.event_key <> %s) "
+        "AND NOT EXISTS (SELECT 1 FROM notetaker_hidden h "
+        "WHERE h.provider = r.provider AND h.external_id = r.external_id) "
+        "AND ((%s <> '' AND lower(r.company_domain) = lower(%s)) "
+        "OR ((r.company_domain IS NULL OR r.company_domain = '') AND %s <> '' "
+        "AND (lower(r.company) = lower(%s) OR lower(r.event_company) = lower(%s)))) "
+        "ORDER BY r.started_at DESC LIMIT 3",
+        (event.start_utc, event.key, event.company_domain, event.company_domain,
+         event.company, event.company, event.company))
+    lines, urls = [], []
+    for provider, external_id, title, started, share_url, sealed in await cursor.fetchall():
+        try:
+            data = json.loads(google_oauth.decrypt(key, sealed))
+        except (google_oauth.ReconnectNeeded, ValueError):
+            continue
+        excerpt_text = transcript_excerpt(data.get("turns") or [], limit=1200)
+        if not excerpt_text:
+            continue
+        url = share_url or f"valr://recording/{provider}/{external_id}"
+        lines.append(f"Earlier round {str(started)[:10]} '{title[:120]}' "
+                     f"[source_url: {url}] (transcript excerpts):\n{excerpt_text}")
+        urls.append(url)
+    return "\n\n".join(lines), urls
 
 
 def pushed(texts: list[str]) -> tuple[str, list[str]]:

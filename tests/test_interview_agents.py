@@ -124,10 +124,10 @@ def test_merge_overlays_new_parts_and_drops_removed_interviewers():
     assert interview_worker.interviewed(merged) == {"b@acme.com", "new@acme.com"}
 
 
-def test_slot_guardrail_wants_120_to_190_spoken_words_and_sourced_notes():
+def test_slot_guardrail_accepts_concise_speech_and_requires_sourced_notes():
     check = slot_guardrail({"https://a.example"}, Meter("synth"))
     note = SimpleNamespace(fact="f", source_urls=["https://a.example"])
-    good = SimpleNamespace(pydantic=SimpleNamespace(spoken=" ".join(["word"] * 180), notes=[note]))
+    good = SimpleNamespace(pydantic=SimpleNamespace(spoken=" ".join(["word"] * 130), notes=[note]))
     assert check(good)[0]
     short = SimpleNamespace(pydantic=SimpleNamespace(spoken="Too short.", notes=[note]))
     assert not check(short)[0]
@@ -149,7 +149,7 @@ def test_round_and_company_extras_follow_the_sourcing_rule():
     out = extras("round", found, known)
     assert out["likely_questions"][0]["source_url"] == "https://glassdoor.example/acme"
     assert "source_url" not in out["likely_questions"][1]  # Unknown URL: kept unsourced.
-    assert out["prep"][:2] == ["Revise queueing", "Practise a 60 s intro"] and len(out["prep"]) == 6
+    assert out["prep"][:2] == ["Revise queueing", "Practise a 60 s intro"] and len(out["prep"]) == 3
     pay = PayRange(min=40, max=60, unit="LPA", currency="INR", level="Senior SWE",
                    source_url="https://glassdoor.example/acme", confidence="medium")
     assert extras("company", CompanyFindings(summary="s", claims=[], pay_range=pay), known)["pay_range"]["max"] == 60
@@ -171,3 +171,62 @@ def test_the_briefing_prompt_names_the_owner_from_settings(monkeypatch):
     assert agents.owner() == "the candidate"
     monkeypatch.setenv("VALR_OWNER_NAME", "Alex")
     assert "for Alex, a candidate" in agents.SLOT_HOW.format(subject="x", notes_max=3, owner=agents.owner())
+
+
+def test_briefing_rejects_meta_coaching_and_note_overload():
+    check = slot_guardrail({"https://a.example"}, Meter("synth"))
+    note = SimpleNamespace(fact="Relevant company fact", source_urls=["https://a.example"])
+    text = " ".join(["word"] * 95)
+    assert check(SimpleNamespace(pydantic=SimpleNamespace(spoken=text, notes=[note])))[0]
+    assert not check(SimpleNamespace(pydantic=SimpleNamespace(spoken=text + " His self-evaluation says so.", notes=[note])))[0]
+    assert not check(SimpleNamespace(pydantic=SimpleNamespace(spoken=text, notes=[note] * 9)))[0]
+
+
+def test_verifier_checks_first_last_sentences_and_visible_notes(monkeypatch):
+    prompts = fake_anthropic(monkeypatch, '{"unsupported": [1, 3, 5]}')
+    attempt = agents.SlotSynthesis(spoken="Wrong company. Correct product. Unsupported closing.", notes=[
+        agents.SlotNote(fact="Verified interviewer role.", category="interviewer", source_urls=["https://a.example"]),
+        agents.SlotNote(fact="Unrelated company raised money.", category="finance", source_urls=["https://b.example"])])
+    spoken, notes = agents.verify_briefing(attempt, EVENT, "Evidence", Meter("check"))
+    assert spoken == "Correct product."
+    assert [n.fact for n in notes] == ["Verified interviewer role."]
+    assert "acme.com" in prompts[0] and "Unrelated company raised money" in prompts[0]
+
+
+def test_verifier_does_not_publish_when_result_is_invalid(monkeypatch):
+    fake_anthropic(monkeypatch, '{"unsupported": "unknown"}')
+    with pytest.raises(ValueError):
+        agents.verify_briefing(agents.SlotSynthesis(spoken="Company fact.", notes=[]), EVENT, "", Meter("check"))
+
+
+def test_unresolved_namesake_sources_are_removed_across_research_parts():
+    data = {
+        "company": {"ok": True, "evidence": "Wrong company raw text", "findings": {"summary": "Mixed identity", "claims": [
+            {"claim": "OtherCompany uses other.example. Identity is unconfirmed.", "source_url": "https://directory.example/other"},
+            {"claim": "Acme builds an assistant.", "source_url": "https://acme.com"},
+            {"claim": "Generic market salary is thirty lakh.", "source_url": "https://salary.example/india"}]}},
+        "round": {"findings": {"claims": [
+            {"claim": "OtherCompany's CEO is Someone Else.", "source_url": "https://directory.example/ceo"}]}},
+    }
+    clean = agents.identity_safe_parts(data)
+    assert clean["company"]["findings"]["claims"] == [{"claim": "Acme builds an assistant.", "source_url": "https://acme.com"}]
+    assert clean["round"]["findings"]["claims"] == []
+    assert clean["company"]["evidence"] == "" and clean["company"]["findings"]["summary"] == ""
+    assert len(data["company"]["findings"]["claims"]) == 3  # Preserve the stored source for review.
+
+
+def test_public_search_is_anchored_to_invite_domain(monkeypatch):
+    queries = []
+    monkeypatch.setattr(agents, "web_search", lambda ctx, query, part: queries.append(query) or "No matches")
+    tools = interview_tools("company", ctx("company"), EVENT, [], PrivateInputs())
+    tool_named(tools, "web_search").run(query="Acme funding")
+    assert queries == ['"acme.com" Acme funding']
+
+
+def test_conflicting_website_disqualifies_the_source_not_the_official_site():
+    data = {"company": {"findings": {"claims": [
+        {"claim": "The listing gives its website as other.example rather than acme.com.", "source_url": "https://directory.example/other"},
+        {"claim": "Its CEO is the wrong person.", "source_url": "https://directory.example/ceo"},
+        {"claim": "Acme makes a messenger.", "source_url": "https://acme.com"}]}}}
+    kept = agents.identity_safe_parts(data, "acme.com")["company"]["findings"]["claims"]
+    assert kept == [{"claim": "Acme makes a messenger.", "source_url": "https://acme.com"}]

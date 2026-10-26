@@ -50,6 +50,7 @@ from app.interview_workflow import (TASK_QUEUE, BlockCallWorkflow, BlockInput, B
 logger = logging.getLogger("valr")
 HORIZON = timedelta(days=7)
 SYNC_LOCK = 7_202_610_17
+RESEARCH_VERSION = 2  # Identity-safe, concise briefings and current previous-round context.
 HEARTBEAT_S = 5
 
 
@@ -358,7 +359,8 @@ class InterviewActivities:
             await research_jobs.setup(connection)
             await interview_store.setup(connection)
             existing = await interview_store.load_slot(connection, event.key)
-            same_inputs = bool(existing and existing["parts"].get("_fingerprint") == fingerprint(event))
+            same_inputs = bool(existing and existing["parts"].get("_fingerprint") == fingerprint(event)
+                               and existing["parts"].get("_research_version") == RESEARCH_VERSION)
             if (not plan.refresh and same_inputs and existing["status"] in ("done", "partial")
                     and set(parts) >= {"private", "round", "company"}):
                 await research_jobs.record_cache_hit(connection, "cache-" + uuid.uuid4().hex[:11],
@@ -366,8 +368,9 @@ class InterviewActivities:
                                                      "slot research reused (inputs unchanged)")
                 logger.info("VALR slot cache hit (inputs unchanged)")
                 return PlanResult("", [], ["slot"])
-            if "company" in parts and not plan.refresh and \
-                    await interview_store.company(connection, company_key(event)) is not None:
+            cached_company = await interview_store.company(connection, company_key(event))
+            if "company" in parts and not plan.refresh and cached_company and \
+                    cached_company.get("research_version") == RESEARCH_VERSION:
                 parts.remove("company")
                 hits.append("company")
             job_id = "iv-" + uuid.uuid4().hex[:13]
@@ -397,6 +400,11 @@ class InterviewActivities:
                 await interview_store.setup(connection)
                 private.pushed_texts = await decrypt_pushes(connection, event)
                 private.fathom_key, private.granola_key = await notetaker_keys(connection)
+                try:
+                    from app import private_sources
+                    private.stored_rounds, private.stored_round_urls = await private_sources.stored_rounds(connection, event)
+                except Exception as error:  # Existing provider/history fallbacks still work.
+                    logger.warning("VALR earlier rounds unavailable: %s", type(error).__name__)
             if task.part in ("private", "round", "interviewers"):
                 candidates = interviewers or people(event, owner_emails())
                 if task.part == "interviewers":
@@ -415,7 +423,7 @@ class InterviewActivities:
             await save_spend(task.job_id, meter.rows)
             return InterviewPartResult(task.part, skipped=skipped, usd=meter.usd())
         if task.part == "private" and not (private.gmail_token or private.fathom_key or private.granola_key
-                                           or private.pushed_texts or history_available()):
+                                           or private.pushed_texts or private.stored_rounds or history_available()):
             return InterviewPartResult(task.part, error=f"no private sources (Gmail {private.gmail_status})")
         box: list = []
         coaching = "\n".join(owner_context()) if task.part == "round" else ""
@@ -460,7 +468,10 @@ class InterviewActivities:
         if "company" not in parts and cached_company:
             parts["company"] = cached_company
         parts["_fingerprint"] = fingerprint(event)
-        research = {k: v for k, v in parts.items() if not k.startswith("_")}
+        parts["_research_version"] = RESEARCH_VERSION
+        research = interview_agents.identity_safe_parts(
+            {k: v for k, v in parts.items() if not k.startswith("_")}, event.company_domain)
+        parts.update(research)  # The expanded research view must not show discarded namesakes.
         known = {url for part in research.values() if isinstance(part, dict) and "seen_urls" in part
                  for url in part["seen_urls"]}
         known |= {url for part in (parts.get("interviewers_by_email") or {}).values()
@@ -582,7 +593,7 @@ def heads_up_note(block_id: str, events: list[SlotEvent], now: datetime) -> dict
 
 def part_record(result: InterviewPartResult) -> dict[str, Any]:
     return {"ok": result.ok, "findings": json.loads(result.findings) if result.findings else None,
-            "evidence": result.evidence, "seen_urls": result.seen_urls}
+            "evidence": result.evidence, "seen_urls": result.seen_urls, "research_version": RESEARCH_VERSION}
 
 
 def merge_parts(stored: dict[str, Any], results: list[InterviewPartResult],
@@ -619,7 +630,8 @@ def interviewed(parts: dict[str, Any]) -> set[str]:
 
 def history_available() -> bool:
     from app.private_sources import history_path
-    return history_path().exists()
+    from app.profile.config import settings
+    return history_path().exists() or settings().performance_path.exists()
 
 
 async def decrypt_pushes(connection: Any, event: SlotEvent) -> list[str]:
