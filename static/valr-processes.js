@@ -71,6 +71,24 @@ export function recentEvents(prepared, t, limit = 6, only = "") {
   return out;
 }
 
+// The feed ("As it happened") is a log of every event up to t, newest first. Going forward it
+// only adds the events since the last frame; going back (the scrubber) or changing the company
+// rebuilds it. It used to show the latest 6 events of each frame: when more than 6 happened
+// within one frame (a busy day, or a long range played in 24 s) the rest never appeared, so
+// whole companies were missing from the replay.
+// -> {reset, items (newest first: the whole log on reset, else only the new ones), count, only}.
+export function feedUpdate(prepared, previous, t, only = "") {
+  const count = countUpTo(prepared.events, t);
+  const reset = !previous || previous.only !== only || count < previous.count;
+  const from = reset ? 0 : previous.count;
+  const items = [];
+  for (let i = count - 1; i >= from; i -= 1) {
+    const event = prepared.events[i];
+    if (!only || event.process === only) items.push(event);
+  }
+  return {reset, items, count, only};
+}
+
 // Playback: the date after `elapsedMs` of real time at `speed`, never past the end.
 export function advance(prepared, t, elapsedMs, speed = 1) {
   const span = prepared.end - prepared.start;
@@ -146,7 +164,7 @@ function mount(root) {
   let frame = null;
   let last = 0;
   let stepTimer = null;
-  let shownEvents = "";
+  let feedState = null;  // What the feed shows (feedUpdate).
   player.hidden = false;
   feed.hidden = false;
   root.classList.add("is-interactive");
@@ -177,28 +195,33 @@ function mount(root) {
     now.textContent = `${label}: ${describe(counts)}`;
     scrub.value = String(toPosition(prepared, t));
     scrub.setAttribute("aria-valuetext", `${dateLabel(t)}. ${describe(counts)}`);
-    const events = recentEvents(prepared, t, 6, only);
-    const key = events.map(e => `${e.t}${e.process}${e.kind}`).join("|");
-    if (key !== shownEvents) {
-      shownEvents = key;
-      feedList.replaceChildren(...events.map((event, index) => {
-        const item = document.createElement("li");
-        item.className = `proc-ev k-${event.kind}${index === 0 && playing ? " is-new" : ""}`;
-        const when = document.createElement("span");
-        when.className = "proc-ev-when num";
-        when.textContent = new Date(event.t).toLocaleDateString("en-GB", {day: "numeric", month: "short"});
-        const kind = document.createElement("span");
-        kind.className = "proc-ev-kind";
-        kind.textContent = event.label;
-        const what = document.createElement("span");
-        what.className = "proc-ev-what";
-        const strong = document.createElement("b");
-        strong.textContent = event.company;
-        what.append(strong, event.title ? ` · ${event.title}` : "");
-        item.append(when, kind, what);
-        return item;
-      }));
+    const update = feedUpdate(prepared, feedState, t, only);
+    feedState = update;
+    if (update.reset || update.items.length) {
+      if (!update.reset) feedList.querySelectorAll(".is-new").forEach(item => item.classList.remove("is-new"));
+      const items = update.items.map(event => feedItem(event, playing && !update.reset));
+      if (update.reset) feedList.replaceChildren(...items);
+      else feedList.prepend(...items);
+      feedList.scrollTop = 0;  // The newest on top, in view.
     }
+  }
+
+  function feedItem(event, fresh) {
+    const item = document.createElement("li");
+    item.className = `proc-ev k-${event.kind}${fresh ? " is-new" : ""}`;
+    const when = document.createElement("span");
+    when.className = "proc-ev-when num";
+    when.textContent = new Date(event.t).toLocaleDateString("en-GB", {day: "numeric", month: "short"});
+    const kind = document.createElement("span");
+    kind.className = "proc-ev-kind";
+    kind.textContent = event.label;
+    const what = document.createElement("span");
+    what.className = "proc-ev-what";
+    const strong = document.createElement("b");
+    strong.textContent = event.company;
+    what.append(strong, event.title ? ` · ${event.title}` : "");
+    item.append(when, kind, what);
+    return item;
   }
 
   function setPlaying(next) {
@@ -263,7 +286,7 @@ function mount(root) {
   company.addEventListener("change", () => {
     only = company.value;
     root.classList.toggle("is-filtered", Boolean(only));
-    shownEvents = "";
+    feedState = null;
     draw();
   });
   // Space or K plays and pauses while the player has focus (not inside the select).

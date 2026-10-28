@@ -78,7 +78,8 @@
   left: calc(var(--label-w) + (100% - var(--label-w) - 12px) * var(--tf)); background: var(--accent); opacity: .7; }
 
 .proc-feed-h { font-size: var(--fs-sm); font-weight: 600; color: var(--text-2); margin-bottom: var(--s2); }
-.proc-feed ol { display: grid; gap: 4px; min-height: 3em; }
+.proc-feed ol { display: grid; align-content: start; gap: 4px; min-height: 3em; max-height: 15.5em; overflow-y: auto;
+  overscroll-behavior: contain; }  /* Every event so far, newest first; scroll for the rest. */
 .proc-ev { display: grid; grid-template-columns: 4.2em 8.5em 1fr; gap: var(--s2); align-items: baseline; font-size: var(--fs-sm);
   padding: 4px var(--s2); border-radius: var(--r-sm); }
 .proc-ev.is-new { background: var(--accent-soft); animation: proc-in var(--t3) var(--ease); }

@@ -1,7 +1,7 @@
 // Interviews → Processes: static/valr-processes.js's playback logic (no browser needed).
 import test from "node:test";
 import assert from "node:assert/strict";
-import {DAY_MS, REPLAY_S, advance, barEnd, countUpTo, describe, fromPosition, nextEventTime, prepare,
+import {DAY_MS, REPLAY_S, advance, barEnd, countUpTo, describe, feedUpdate, fromPosition, nextEventTime, prepare,
         recentEvents, snapshot, statusAt, toPosition} from "../static/valr-processes.js";
 
 const T0 = Date.parse("2026-08-01T00:00:00Z");
@@ -83,4 +83,40 @@ test("an empty or broken payload prepares to nothing instead of throwing", () =>
   const p = prepare({});
   assert.deepEqual(p.processes, []);
   assert.deepEqual(p.events, []);
+});
+
+test("played frame by frame, the feed shows every company, even when many events share a frame", () => {
+  // 40 companies whose first contact lands on the same day (an import, a busy morning), then a
+  // quiet range: at 60 frames a second all 40 fall within one frame. The feed used to show the
+  // latest 6 events of each frame, so 34 of these companies never appeared in the replay.
+  const processes = Array.from({length: 40}, (_, i) => ({id: `p${i}`, company: `Company ${i}`, status: "active",
+    start: day(1), end: null, last_activity: day(1), fizzle_at: null, milestones: []}));
+  const events = processes.map((p, i) => ({at: new Date(Date.parse(day(1)) + i * 60000).toISOString(), process: p.id,
+    company: p.company, kind: "email", label: "Email", title: ""}));
+  const p = prepare({range: {start: day(0), end: day(300)}, processes, events});
+  let t = p.start, state = null, log = [];
+  while (t < p.end) {
+    t = advance(p, t, 1000 / 60);
+    state = feedUpdate(p, state, t);
+    log = state.reset ? [...state.items] : [...state.items, ...log];
+  }
+  assert.equal(new Set(log.map(e => e.process)).size, 40);
+  assert.deepEqual(log.map(e => e.t), [...log.map(e => e.t)].sort((a, b) => b - a));  // Newest first.
+});
+
+test("the feed adds only what is new going forward, and rebuilds going back or for one company", () => {
+  const p = prepare(DATA);
+  const first = feedUpdate(p, null, Date.parse(day(20)));
+  assert.equal(first.reset, true);
+  assert.deepEqual(first.items.map(e => e.kind), ["rejection", "email", "email"]);
+  const next = feedUpdate(p, first, Date.parse(day(30)));
+  assert.equal(next.reset, false);
+  assert.deepEqual(next.items.map(e => e.company), ["Aster", "Cobalt"]);
+  assert.deepEqual(feedUpdate(p, next, Date.parse(day(30))).items, []);  // Nothing new: nothing added.
+  const back = feedUpdate(p, next, Date.parse(day(5)));
+  assert.equal(back.reset, true);
+  assert.deepEqual(back.items.map(e => e.company), ["Aster"]);
+  const one = feedUpdate(p, next, Date.parse(day(30)), "b");
+  assert.equal(one.reset, true);
+  assert.deepEqual(one.items.map(e => e.kind), ["rejection", "email"]);
 });
