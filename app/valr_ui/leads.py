@@ -84,7 +84,9 @@ def corrections(lead: dict[str, Any], others: list[dict[str, Any]], stages: list
                    for o in sorted(others, key=lambda o: o["company"].lower()) if o["id"] != lead["id"])
     merge = (f'<div class="fix-block"><label class="field-label" for="fix-into">Merge into another company</label>'
              f'<input class="input sm" type="search" data-merge-search placeholder="Search companies" aria-label="Search companies to merge into">'
-             f'<div class="field-row"><select class="input" id="fix-into" data-fix-into>{into}</select>'
+             '<p class="field-help" data-merge-none hidden>No company matches.</p>'
+             f'<div class="field-row"><select class="input" id="fix-into" data-fix-into>'
+             f'<option value="" selected>Pick a company</option>{into}</select>'
              '<button class="btn" type="button" data-fix="merge">Merge</button></div></div>' if into else "")
     body = f"""
 <div class="fix-form" data-lead-fix="{e(lead['id'])}" data-company="{e(lead['company'])}">

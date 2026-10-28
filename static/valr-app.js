@@ -212,7 +212,13 @@ document.addEventListener("click", async event => {
     const id = box.dataset.leadFix;
     const body = {action: fix.dataset.fix};
     if (body.action === "stage") body.stage = box.querySelector("[data-fix-stage]").value;
-    if (body.action === "merge") body.into = box.querySelector("[data-fix-into]").value;
+    if (body.action === "merge") {
+      // Only a company he can see picked: a search that matched nothing used to merge into a hidden one.
+      const picked = box.querySelector("[data-fix-into]").selectedOptions[0];
+      if (!picked?.value || picked.hidden || picked.disabled) { toast("Pick a company to merge into."); return; }
+      if (!confirm(`Merge ${box.dataset.company} into ${picked.textContent}? Its emails move to ${picked.textContent}.`)) return;
+      body.into = picked.value;
+    }
     if (body.action === "rename") body.company = box.querySelector("[data-fix-company]").value.trim();
     if (body.action === "dismiss" && !confirm(`Dismiss ${box.dataset.company}? It stays hidden, with its email threads.`)) return;
     const reply = await postJson(`/valr/api/leads/${encodeURIComponent(id)}/override`, body);
@@ -220,7 +226,8 @@ document.addEventListener("click", async event => {
     const params = new URLSearchParams(location.search);
     if (body.action === "dismiss") params.delete("lead");
     if (body.action === "merge") params.set("lead", body.into);
-    setTimeout(() => location.assign(`/valr/leads?${params}${params.get("lead") ? "#lead" : ""}`), 700);
+    const qs = params.toString();
+    setTimeout(() => location.assign(`/valr/leads${qs ? `?${qs}` : ""}${params.get("lead") ? "#lead" : ""}`), 700);
   } catch (error) {
     toast(error.message);
   } finally {
@@ -277,11 +284,16 @@ document.querySelector("[data-merge-search]")?.addEventListener("input", event =
   if (!select) return;
   let first = null;
   for (const option of select.options) {
+    if (!option.value) continue;  // "Pick a company" stays.
     // iOS shows hidden options in its picker anyway; disabled ones at least can't be picked.
     option.hidden = option.disabled = Boolean(q) && !option.textContent.toLowerCase().includes(q);
     if (!option.hidden && !first) first = option;
   }
-  if (first) select.value = first.value;
+  // The first match shows in the box; no match leaves nothing picked (never a hidden company).
+  const current = select.selectedOptions[0];
+  if (!current || current.hidden || !current.value) select.value = q && first ? first.value : "";
+  const none = event.target.closest("[data-lead-fix]")?.querySelector("[data-merge-none]");
+  if (none) none.hidden = !q || Boolean(first);
 });
 
 // Leads: filter the rows as you type (the form still works without JavaScript).

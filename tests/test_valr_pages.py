@@ -382,6 +382,22 @@ def test_lead_corrections_are_on_the_lead_card(client):
     assert "/valr/api/leads/${encodeURIComponent(id)}/override" in script and "X-CSRF-Token" in script
 
 
+def test_merge_needs_a_visible_pick_and_a_confirm(client):
+    """QA B2: a search that matched nothing merged into the first (hidden, preselected) company."""
+    juniper = lead_id("Juniper Robotics")
+    page = client.get(f"/valr/leads?lead={juniper}", headers=GOOD).text
+    select = page.split('data-fix-into>', 1)[1].split("</select>", 1)[0]
+    assert select.startswith('<option value="" selected>Pick a company</option>')  # Nothing picked by default.
+    assert select.count(" selected") == 1 and "data-merge-none hidden" in page  # "No company matches." waits.
+    script = (ROOT / "static/valr-app.js").read_text(encoding="utf-8")
+    merge = script.split('if (body.action === "merge") {', 1)[1].split("body.into = picked.value", 1)[0]
+    assert "picked.hidden" in merge and "!picked?.value" in merge and "confirm(`Merge" in merge
+    search = script.split("[data-merge-search]", 1)[1].split("});", 1)[0]
+    assert 'select.value = q && first ? first.value : ""' in search  # No match: nothing stays picked.
+    # QA B13: after Dismiss the page is /valr/leads, not /valr/leads? .
+    assert "`/valr/leads?${params}" not in script and 'qs ? `?${qs}` : ""' in script
+
+
 def test_settings_reflect_reality(client):
     page = html.unescape(client.get("/valr/settings", headers=GOOD).text)
     order = [page.index(f'id="g-{a}"') for a in ("profile", "conn", "calls", "notify", "rec", "data")]
