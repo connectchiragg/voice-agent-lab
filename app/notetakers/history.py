@@ -294,16 +294,41 @@ async def keep_transcript(connection: Any, recording: Recording, key: str, http:
     return await transcripts.save_quietly(connection, recording.provider, recording.external_id, got.meeting)
 
 
+async def kept_meeting(connection: Any, provider: str, external_id: str) -> dict | None:
+    """The meeting from VALR's own copies, when no provider can be asked: a phone call's sealed
+    meeting (app/phone_recordings.py), else the owner's transcript copy (app/notetakers/transcripts.py)
+    rebuilt into the normalised shape the coach scores."""
+    if provider == "phone":
+        from app import phone_recordings
+        try:
+            meeting = await phone_recordings.sealed_meeting(connection, external_id)
+        except Exception:  # noqa: BLE001 - try the transcript copy
+            meeting = None
+        if meeting:
+            return meeting
+    from app.notetakers import transcripts
+    kept = await transcripts.load(connection, provider, external_id)
+    if not kept or not kept.get("turns"):
+        return None
+    await store.setup(connection)
+    row = await store.recording(connection, provider, external_id) or {}
+    from app import notetakers
+    return {"source": provider, "id": str(external_id), "title": kept.get("title") or row.get("title") or "",
+            "date": notetakers._iso(row.get("started_at")), "duration": None, "scheduled_duration": None,
+            "participants": sorted({str(t.get("speaker") or "") for t in kept["turns"]} - {""}),
+            "turns": kept["turns"], "vendor_summary": None}
+
+
 async def fetch_meeting(connection: Any, provider: str, external_id: str,
                         http: httpx.AsyncClient | None = None) -> dict | None:
     """One recording's normalised meeting (transcript included), from its provider by id. For
     the worker's history items (any age; the post-call fallback looks back 3 days only)."""
     from app import notetakers
     if provider not in HISTORY_PROVIDERS:
-        return None
+        return await kept_meeting(connection, provider, external_id)  # An iPhone call: VALR's own copy.
     key = await notetakers.api_key(connection, provider)
     if not key:
-        return None
+        return await kept_meeting(connection, provider, external_id)
     await store.setup(connection)
     row = await store.recording(connection, provider, external_id) or {}
     listed = Recording(provider, external_id, row.get("title") or "", notetakers._iso(row.get("started_at")),

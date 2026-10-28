@@ -216,10 +216,12 @@ def process(meeting: dict, cfg: Settings, llm: JsonLLM, comp: dict | None = None
     if not meeting.get("turns"):
         return {"status": "no_transcript"}
     analysis = {"source": meeting["source"], "id": meeting["id"], "title": meeting.get("title"),
-                "date": meeting.get("date"), "company": label.get("company"),
+                "date": meeting.get("date"), "company": meeting.get("company_hint") or label.get("company"),
                 "round_type": label.get("round_type"),
                 "speaking_metrics": speaking_metrics(meeting["turns"], cfg.candidate_name)}
     scored = rubric.score_interview(meeting, analysis, llm, cfg.evaluator_model, cfg.candidate_name)
+    if meeting.get("company_hint"):  # A phone call: matched to his calendar, a lead or the resolver.
+        scored["company"] = meeting["company_hint"]
     scored["impression"] = impressions.analyze(meeting, llm, cfg.evaluator_model, cfg.candidate_name)
     updated, note = False, ""
     if update_performance:

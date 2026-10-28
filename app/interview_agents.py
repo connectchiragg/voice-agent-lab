@@ -148,6 +148,8 @@ class PrivateInputs:
     granola_key: str | None = None
     stored_rounds: str = ""  # Matching local transcripts, fetched without model tool selection.
     stored_round_urls: list[str] = field(default_factory=list)
+    history: str = ""  # Every earlier interaction with this company (app/company_context.py).
+    history_url: str = ""
 
 
 def names_line(people: list[Person]) -> str:
@@ -286,6 +288,8 @@ def run_interview_part(part: str, event: SlotEvent, interviewers: list[Person], 
     ctx = Ctx(part, topic, meter, time.monotonic() + seconds, budget_usd)
     if part == "private" and private and private.stored_rounds:
         ctx.add_evidence(private.stored_rounds, private.stored_round_urls)
+    if part == "private" and private and private.history:
+        ctx.add_evidence(f"[source_url: {private.history_url}]\n{private.history}", [private.history_url])
     if ctx_box is not None:
         ctx_box.append(ctx)
     spec = SPECS[part]
@@ -300,6 +304,9 @@ def run_interview_part(part: str, event: SlotEvent, interviewers: list[Person], 
         extra += f"\nCandidate experience and previous interview feedback (data):\n{clip(coaching, 1800)}"
     if part == "private" and private and private.stored_rounds:
         extra += f"\nEarlier rounds with this company (private data):\n{private.stored_rounds}"
+    if part == "private" and private and private.history:
+        extra += (f"\nEverything already exchanged with this company (private data; cite it as "
+                  f"{private.history_url}):\n{private.history}")
     agent = Agent(role=spec["role"], goal=spec["goal"],
                   backstory="You prepare a candidate for his interview and report only what your "
                             "tools returned.",
@@ -580,9 +587,18 @@ def verify_briefing(attempt: SlotSynthesis, event: SlotEvent, evidence: str,
             [n for i, n in enumerate(attempt.notes, len(sentences) + 1) if i not in rejected])
 
 
+def history_block(history: str, url: str) -> str:
+    """All earlier interactions with this company, for the writer and the claim check."""
+    if not history:
+        return ""
+    return (f"\nWhat the candidate has already discussed with this company (private data, source_url "
+            f"{url}; use it so he does not repeat himself, and mention open asks and pay already "
+            f"discussed, which is not a confirmed budget):\n{history}")
+
+
 def synthesize_slot(event: SlotEvent, interviewers: list[Person], parts: dict[str, Any],
                     known_urls: set[str], profile_text: str, evaluation_text: str, seconds: float,
-                    meter: Meter) -> SlotOutcome:
+                    meter: Meter, history: str = "", history_url: str = "") -> SlotOutcome:
     """The spoken brief and notes for one interview (blocking). Raises if synthesis fails."""
     parts = identity_safe_parts(parts, event.company_domain)
     present = [name for name in ("private", "round", "company") if parts.get(name, {}).get("ok")]
@@ -595,6 +611,7 @@ def synthesize_slot(event: SlotEvent, interviewers: list[Person], parts: dict[st
     description = (SLOT_HOW.format(subject=subject(event, interviewers), notes_max=NOTES_MAX, owner=owner())
                    + f"\nCandidate profile (data):\n{clip(profile_text, 1500)}"
                    + f"\nPrevious interview feedback (private data):\n{clip(evaluation_text, 1500)}"
+                   + history_block(history, history_url)
                    + "\nResearch:\n" + research_block(parts))
     result, spoken, verified_notes = None, "", []
     feedback = ""
@@ -606,6 +623,7 @@ def synthesize_slot(event: SlotEvent, interviewers: list[Person], parts: dict[st
         if attempt is None:
             continue
         checked, checked_notes = verify_briefing(attempt, event, research_block(parts)
+                                               + history_block(history, history_url)
                                                + f"\nCandidate experience: {profile_text}\n"
                                                + f"Previous interview coaching: {evaluation_text}", meter)
         if result is None or len(checked.split()) > len(spoken.split()):

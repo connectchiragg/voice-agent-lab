@@ -45,7 +45,7 @@ from app.persona import ASSISTANT_NAME
 logger = logging.getLogger("uvicorn.error")
 LOAD_TIMEOUT_S = 1.5
 OWNER_REPLY_MAX_TOKENS = 700  # A 60-90 s brief is about 300 tokens of speech.
-BRIEF_PROMPT_CHARS = 5000  # About 1,400 tokens of briefs and notes (Groq free tier: 8,000 TPM).
+BRIEF_PROMPT_CHARS = 6500  # About 1,850 tokens: briefs, notes and what was already discussed (Groq: 8,000 TPM).
 EVALUATION_CHARS_ON_BRIEFING = 900
 EVALUATION_CHARS_ON_CALLS = 450  # Normal owner calls: a compact profile (Groq: 8,000 TPM).
 
@@ -217,8 +217,11 @@ def briefing_note(block: dict[str, Any]) -> str:
         notes = "\n".join(f"- {note['fact']}" + (" (private: from his email or recordings)"
                                                  if note.get("private") else "")
                           for note in slot.get("notes") or [])
+        history = ((slot.get("parts") or {}).get("_history_short") or "").strip()
         text = (f"Interview {index}: {when} {slot.get('title', '')}\n"
-                f"Prepared brief: {slot.get('spoken') or '(research not ready)'}\nNotes:\n{notes}")
+                f"Prepared brief: {slot.get('spoken') or '(research not ready)'}\nNotes:\n{notes}"
+                + (f"\nAlready discussed with them (private, from his emails, calls and recordings; "
+                   f"pay figures are what was said, not a confirmed budget):\n{history}" if history else ""))
         if used + len(text) > BRIEF_PROMPT_CHARS:
             text = text[:max(BRIEF_PROMPT_CHARS - used, 300)]
         lines.append(text)
@@ -620,6 +623,9 @@ def brief_payload(event: SlotEvent, slot: dict[str, Any], zone: ZoneInfo) -> dic
         payload["prep"] = list(round_found["prep"])[:PREP_IN_BRIEF]
     if isinstance(pay, dict):
         payload["market_pay"] = {k: pay.get(k) for k in ("min", "max", "unit", "currency", "level")}
+    history = (parts.get("_history_short") or "").strip()
+    if history:  # Everything already exchanged with this company (app/company_context.py), compact.
+        payload["already_discussed"] = history
     return payload
 
 

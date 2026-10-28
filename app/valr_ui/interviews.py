@@ -190,7 +190,23 @@ def unidentified_note(company: str) -> str:
             '<button class="link-btn" type="button" data-sheet="fix-company">Set company</button></p>')
 
 
-def detail_page(view: dict[str, Any], block: dict[str, Any], slot: dict[str, Any], clock: Clock) -> str:
+def history_section(history: dict[str, Any] | None, company: str) -> str:
+    """'What you've already discussed with X': the same context the brief was written from
+    (app/company_context.py), so he can see what VALR knew. "" when there is none."""
+    if not history or not (history.get("summary") or history.get("timeline")):
+        return ""
+    name = company or history.get("company") or "them"
+    summary = "".join(f"<li>{e(line)}</li>" for line in history.get("summary") or [])
+    timeline = "".join(f"<li>{e(line)}</li>" for line in history.get("timeline") or [])
+    more = f'<p class="muted">{e(history["more"])}</p>' if history.get("more") else ""
+    return (f'<section class="card" id="history"><h2 class="card-title">{icon("history", 18)}'
+            f"What you've already discussed with {e(name)}</h2>"
+            + (f'<ul class="points">{summary}</ul>' if summary else "")
+            + (f'<ul class="history-list">{timeline}</ul>' if timeline else "") + more + "</section>")
+
+
+def detail_page(view: dict[str, Any], block: dict[str, Any], slot: dict[str, Any], clock: Clock,
+                history: dict[str, Any] | None = None) -> str:
     d, brief = slot["detail"], slot.get("brief")
     lab = wording.interview_label(slot)
     owner = view.get("owner_name") or ""
@@ -238,6 +254,7 @@ def detail_page(view: dict[str, Any], block: dict[str, Any], slot: dict[str, Any
 <div class="detail-grid">
   <div class="detail-main">
     <section class="card" id="briefing"><h2 class="card-title">{icon('file-text', 18)}Summary</h2>{summary}</section>
+    {history_section(history, company)}
     <section class="card" id="questions"><h2 class="card-title">{icon('help', 18)}Likely questions</h2>
       {f'<ol class="questions">{questions}</ol>' if questions else '<p class="muted">Listed once VALR has looked into this round.</p>'}</section>
     <section class="card" id="prep"><div class="card-head"><h2 class="card-title">{icon('list-checks', 18)}Prep</h2>{prep_head}</div>
@@ -376,7 +393,7 @@ def cue_html(c: dict[str, Any]) -> str:
             + (f'<p class="cue-after">After you said: {e(c["after"])}</p>' if c["after"] else "") + "</li>")
 
 
-TRANSCRIPT_FROM = {"fathom": "Fathom", "fireflies": "Fireflies"}
+TRANSCRIPT_FROM = {"fathom": "Fathom", "fireflies": "Fireflies", "phone": "your phone recording"}
 
 
 def reaction_block(imp: dict[str, Any] | None, iv: dict[str, Any] | None = None) -> str:

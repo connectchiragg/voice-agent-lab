@@ -1004,3 +1004,7 @@ a, button, summary, label, input, select, textarea, [role="button"] { touch-acti
   .moment-seek { padding: 6px 10px; margin: -4px 0; }
   .notif-gmail { padding: 8px 0; margin-top: -14px; margin-bottom: 0; }
 }
+
+/* Interview page: what he has already discussed with the company (app/company_context.py). */
+.history-list { display: grid; gap: var(--s2); margin-top: var(--s3); padding-left: 0; list-style: none; font-size: .92em; color: var(--text-muted, var(--text)); overflow-wrap: anywhere; }
+.history-list li { padding-left: 12px; border-left: 2px solid var(--line-strong); }

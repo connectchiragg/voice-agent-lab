@@ -156,6 +156,37 @@ async def with_details(view: dict[str, Any]) -> dict[str, Any]:
 RECORDINGS_DAYS = 365
 
 
+def is_owner(email: str) -> bool:
+    """The owner (or, with no owner list configured, any signed-in viewer, as valr_dashboard.owner)."""
+    allowed = valr_dashboard.owner_emails()
+    return not allowed or (email or "").lower() in allowed
+
+
+async def load_history(slot: dict[str, Any]) -> dict[str, Any]:
+    """What he has already discussed with this slot's company (app/company_context.py): the same
+    block the brief uses. {} when there is none or Postgres can't say. Owner only: private."""
+    if research.pool is None or not slot.get("key"):
+        return {}
+    try:
+        from app import calendar_sync, company_context
+        from app.phone_recordings import candidate_name
+        async with research.pool.connection() as connection:
+            event = (await calendar_sync.snapshots(connection, [slot["key"]])).get(slot["key"])
+            if event is None:
+                return {}
+            if slot.get("company_how") == "set by you":  # His "Set company" wins over the calendar's.
+                event.company = slot.get("company") or event.company
+            owners = valr_dashboard.owner_emails()
+            emails = [p.email for p in event.attendees if p.email and p.email.lower() not in owners]
+            ctx = await company_context.gather(connection, event.company or "", event.company_domain or "", emails,
+                                               before=company_context.as_dt(event.start_utc),
+                                               exclude_event=event.key, candidate=candidate_name())
+        return company_context.view(ctx)
+    except Exception as error:  # noqa: BLE001 - the page renders without the section.
+        logger.warning("VALR company history unavailable: %s", type(error).__name__)
+        return {}
+
+
 def review_state(eval_status: str, report: str | None) -> str:
     """pending (queued, being scored, or its hand-off is retried on the worker's next start) |
     unavailable (no interview or transcript to score) | sent. A history item scored quietly
@@ -314,7 +345,8 @@ async def render(request: Request, name: str, **params: str) -> HTMLResponse:
         view = await with_slot_names(view)
         found = interviews.find_slot(view, params["ref"])
         if found:
-            body = interviews.detail_page(view, *found, clock)
+            history = await load_history(found[1]) if is_owner(email) else {}
+            body = interviews.detail_page(view, *found, clock, history=history)
             title = interviews.wording.interview_label(found[1])["headline"]
         else:
             body, status = not_found("That interview isn't coming up.", "/valr/interviews", "Interviews"), 404

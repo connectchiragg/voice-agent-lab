@@ -405,6 +405,8 @@ class InterviewActivities:
                     private.stored_rounds, private.stored_round_urls = await private_sources.stored_rounds(connection, event)
                 except Exception as error:  # Existing provider/history fallbacks still work.
                     logger.warning("VALR earlier rounds unavailable: %s", type(error).__name__)
+                private.history, _ = await company_history(connection, event)
+                private.history_url = history_url(event)
             if task.part in ("private", "round", "interviewers"):
                 candidates = interviewers or people(event, owner_emails())
                 if task.part == "interviewers":
@@ -423,7 +425,8 @@ class InterviewActivities:
             await save_spend(task.job_id, meter.rows)
             return InterviewPartResult(task.part, skipped=skipped, usd=meter.usd())
         if task.part == "private" and not (private.gmail_token or private.fathom_key or private.granola_key
-                                           or private.pushed_texts or private.stored_rounds or history_available()):
+                                           or private.pushed_texts or private.stored_rounds or private.history
+                                           or history_available()):
             return InterviewPartResult(task.part, error=f"no private sources (Gmail {private.gmail_status})")
         box: list = []
         coaching = "\n".join(owner_context()) if task.part == "round" else ""
@@ -465,6 +468,8 @@ class InterviewActivities:
             stored = await interview_store.load_slot(connection, event.key)
             parts = merge_parts((stored or {}).get("parts") or {}, task.parts, task.removed)
             cached_company = await interview_store.company(connection, company_key(event))
+            history, history_short = await company_history(connection, event)
+        parts["_history"], parts["_history_short"] = history, history_short
         if "company" not in parts and cached_company:
             parts["company"] = cached_company
         parts["_fingerprint"] = fingerprint(event)
@@ -476,8 +481,11 @@ class InterviewActivities:
                  for url in part["seen_urls"]}
         known |= {url for part in (parts.get("interviewers_by_email") or {}).values()
                   for url in part.get("seen_urls", [])}
+        if history:
+            known.add(history_url(event))
         usable = any(isinstance(p, dict) and (p.get("ok") or p.get("evidence")) for p in research.values()) \
-            or any(p.get("ok") for p in (parts.get("interviewers_by_email") or {}).values())
+            or any(p.get("ok") for p in (parts.get("interviewers_by_email") or {}).values()) \
+            or bool(history)
         current = [p for p in people(event, owner_emails())
                    if p.email.lower() in interviewed(parts)]
         meter = research_agents.Meter("synth")
@@ -488,7 +496,7 @@ class InterviewActivities:
         if usable:
             work = asyncio.ensure_future(asyncio.to_thread(
                 interview_agents.synthesize_slot, event, current, research, known, profile_text,
-                evaluation_text, task.seconds, meter))
+                evaluation_text, task.seconds, meter, history, history_url(event) if history else ""))
             try:
                 await heartbeat_while(work)
                 outcome = await work
@@ -626,6 +634,27 @@ def merge_parts(stored: dict[str, Any], results: list[InterviewPartResult],
 def interviewed(parts: dict[str, Any]) -> set[str]:
     gone = set(parts.get("_removed", []))
     return {email for key in (parts.get("interviewers_by_email") or {}) for email in key.split(",")} - gone
+
+
+CALL_HISTORY_TOKENS = 600  # The briefing call's prompt is resent every turn (Groq free tier: ~6-8k TPM).
+
+
+def history_url(event: SlotEvent) -> str:
+    """The citation for the company-history block (app/company_context.py): private, like Gmail."""
+    return f"valr://company-history/{company_key(event) or event.key}"
+
+
+async def company_history(connection: Any, event: SlotEvent) -> tuple[str, str]:
+    """Every earlier interaction with this company (app/company_context.py), read once: (the
+    research/synthesis block, the briefing call's shorter one). ("", "") on failure."""
+    try:
+        from app import company_context
+        from app.phone_recordings import candidate_name
+        ctx = await company_context.for_event_context(connection, event, owner_emails(), candidate_name())
+        return company_context.render(ctx), company_context.render(ctx, budget_tokens=CALL_HISTORY_TOKENS)
+    except Exception as error:  # noqa: BLE001 - the brief still runs on its other sources.
+        logger.warning("VALR company history unavailable: %s", type(error).__name__)
+        return "", ""
 
 
 def history_available() -> bool:

@@ -674,8 +674,9 @@ class LeadActivities:
         summary = RefreshSummary()
         async with await connect() as connection:
             await leads_store.setup(connection)
+            fathom = await self.fathom_touches(now)
             sources = {"calendar": await self.calendar_touches(connection, now),
-                       "recording": await self.fathom_touches(now),
+                       "recording": fathom + await stored_recording_touches(connection, now, {t.id for t in fathom}),
                        "evaluation": performance_touches(read_performance())}
             for kind, touches in sources.items():
                 summary.sources[kind] = len(touches)
@@ -809,6 +810,54 @@ def fathom_to_touches(items: list[dict[str, Any]], owners: set[str]) -> list[Tou
                          domain=found.domain or next((d for d in domains if d), ""), people=people,
                          title=f"Recording: {title[:120]}", summary=" ".join(summary.split()[:30]),
                          url=url if url.startswith("https://") else "", detail_url=detail_url(f"fathom:{recording}")))
+    return out
+
+
+RECORDING_LABEL = {"fathom": "Fathom", "fireflies": "Fireflies", "granola": "Granola", "phone": "Phone call"}
+
+
+async def stored_recording_touches(connection: Any, now: datetime, skip: set[str]) -> list[Touch]:
+    """Every provider's recordings VALR holds (notetaker_recordings: Fireflies, Granola, iPhone
+    calls, and Fathom when its key is only on the dashboard), as touchpoints. Fathom's API ones
+    (`skip`) win. Hidden and deleted recordings are left out."""
+    try:
+        from app.notetakers import store
+        await store.setup(connection)
+        cursor = await connection.execute(
+            "SELECT provider, external_id, title, started_at, share_url, company, company_domain, company_how, "
+            "event_company, interviewers FROM notetaker_recordings r WHERE started_at >= %s "
+            "AND NOT EXISTS (SELECT 1 FROM notetaker_hidden h WHERE h.provider = r.provider "
+            "AND h.external_id = r.external_id)", (now - timedelta(days=60),))
+        columns = [c.name for c in cursor.description]
+        rows = [dict(zip(columns, row)) for row in await cursor.fetchall()]
+    except Exception as error:  # noqa: BLE001 - the rebuild runs on the other sources.
+        logger.warning("VALR leads: stored recordings unavailable (%s)", type(error).__name__)
+        return []
+    return stored_to_touches(rows, skip)
+
+
+def stored_to_touches(rows: list[dict[str, Any]], skip: set[str] = frozenset()) -> list[Touch]:
+    """notetaker_recordings rows -> recording touchpoints. A phone call has no domain and no
+    addresses: its company (calendar event, a lead with that person, or the resolver; see
+    app/phone_recordings.PhoneWorker.company) and the other party's name attach it."""
+    from app.notetakers.store import names
+    out = []
+    for row in rows:
+        touch_id = f"{row.get('provider')}:{row.get('external_id')}"
+        at = row.get("started_at")
+        if touch_id in skip or not row.get("external_id") or not isinstance(at, datetime):
+            continue
+        company = str(row.get("company") or row.get("event_company") or "")
+        url = str(row.get("share_url") or "")
+        label = RECORDING_LABEL.get(str(row.get("provider")), "Recording")
+        people = [Contact("", name, "interviewer") for name in names(row)]
+        out.append(Touch(id=touch_id, kind="recording", at=at if at.tzinfo else at.replace(tzinfo=timezone.utc),
+                         company=company_names.clean(company)[:80] if company else "",
+                         company_how=str(row.get("company_how") or ("the calendar event" if row.get("event_company") else "")),
+                         domain=str(row.get("company_domain") or ""), people=people,
+                         title=f"Recording: {str(row.get('title') or label)[:120]}",
+                         summary=f"{label} recording" + (f" with {', '.join(p.name for p in people[:2])}" if people else ""),
+                         url=url if url.startswith("https://") else "", detail_url=detail_url(touch_id)))
     return out
 
 
@@ -966,17 +1015,25 @@ def settle_splits(decided: list[tuple[Touch, Any, str]], resolver: company_resol
                                                                "the same thread or lead names it"), baseline)
 
 
+# How a phone call's company was found (app/phone_recordings.PhoneWorker.company) that a re-derivation
+# from the title and name alone must not overwrite: those had more evidence.
+KEPT_HOW = ("the calendar event", "a lead with the same person")
+
+
 async def repair_recordings(connection: Any, resolver: company_resolver.Resolver,
                             dry_run: bool = False) -> list[tuple[str, str, str]]:
     """Stored notetaker recordings' company, re-derived (their invitee domain, titles, names)."""
     from app.notetakers import store
     await store.setup(connection)
     cursor = await connection.execute(
-        "SELECT provider, external_id, title, event_title, company, company_domain, event_company, interviewers "
-        "FROM notetaker_recordings")
+        "SELECT provider, external_id, title, event_title, company, company_domain, event_company, interviewers, "
+        "company_how FROM notetaker_recordings")
     changes = []
-    for provider, external_id, title, event_title, company, domain, event_company, people in await cursor.fetchall():
+    for provider, external_id, title, event_title, company, domain, event_company, people, how in await cursor.fetchall():
         beat()
+        if company and str(how or "").startswith(KEPT_HOW):  # A phone call matched to his calendar or a lead.
+            resolver.kept += 1
+            continue
         ev = company_resolver.Evidence(
             kind="recording", title=event_title or title or "", domains=[domain] if domain else [],
             people=[(n, "") for n in store.names({"interviewers": people})], stated=company or event_company or "")
@@ -1055,8 +1112,9 @@ async def notetakers_meeting(connection: Any, provider: str, external_id: str, t
         if sealed:
             return sealed
     api = await notetakers.api_key(connection, provider)
-    if not api:
-        return None
+    if not api:  # A phone call (no provider), or a disconnected notetaker: VALR's own copies.
+        from app.notetakers import history
+        return await history.kept_meeting(connection, provider, external_id)
     try:
         async with notetakers.http_client() as http:
             found = await notetakers.PROVIDERS[provider].get_recording(api, external_id, http,

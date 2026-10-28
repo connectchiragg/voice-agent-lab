@@ -288,8 +288,8 @@ async def reanalyse(request: Request) -> JSONResponse:
     except ValidationError:
         raise HTTPException(400, "Expected {id}.") from None
     provider, external_id = parse_id(body.id)
-    if provider not in ("fathom", "fireflies"):
-        raise HTTPException(400, "Only Fathom and Fireflies recordings can be read again.")
+    if provider not in ("fathom", "fireflies", "phone"):
+        raise HTTPException(400, "Only Fathom, Fireflies and phone recordings can be read again.")
     async with pool().connection() as connection:
         await store.setup(connection)
         row = await store.recording(connection, provider, external_id) or {}
