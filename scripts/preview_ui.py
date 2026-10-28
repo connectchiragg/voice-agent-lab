@@ -10,6 +10,7 @@ app page (/valr, /valr/interviews, /valr/leads, /valr/progress, /valr/settings, 
     .../valr?push=off                                       # no phone subscribed to notifications
     .../valr/settings?phone=none                            # no phone on file (?phone=env: from the server)
     .../valr/profile                                        # the profile (photo, names, time zone)
+    .../valr/progress?hidden=fathom:1006                    # as if the owner deleted that recording
     .../valr?extras=0                                       # without the other branches' data
     .../valr?theme=light                                    # pin light (or dark) for screenshots
     VALR_DEV_PREVIEW=1 python scripts/preview_ui.py --media /path/to/any.mp4
@@ -97,7 +98,8 @@ def main() -> None:
             return await preview_api(request, path)
         options.set({"leads": "small" if request.query_params.get("leads") == "small" else "live",
                      "push_off": request.query_params.get("push") == "off",
-                     "extras": request.query_params.get("extras") != "0"})
+                     "extras": request.query_params.get("extras") != "0",
+                     "hidden": request.query_params.get("hidden", "")[:64]})
         if request.query_params.get("phone") in ("none", "env", "db"):
             wanted_phone = request.query_params["phone"]
             owner.apply({**owner._row, "phone_e164": "+919800000001" if wanted_phone == "db" else None,
@@ -388,6 +390,11 @@ def main() -> None:
     async def load_overrides(entity_ids):
         return {}  # No "Set company" names are stored in the preview.
     routes.load_overrides = load_overrides
+
+    async def load_hidden():  # ?hidden=fathom:1006: that recording deleted or hidden by the owner.
+        provider, _, external_id = options.get().get("hidden", "").partition(":")
+        return {(provider, external_id)} if external_id else set()
+    routes.load_hidden = load_hidden
 
     class Pool:
         def connection(self):

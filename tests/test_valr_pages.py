@@ -321,6 +321,31 @@ def test_progress_trends_first_then_insights(client):
     client.box["view"] = plain
 
 
+def test_progress_follows_what_past_interviews_show(client, monkeypatch):
+    """A recording the owner deleted or hid leaves Progress too, and a company he set reaches it
+    (Progress used to read performance.json as written: the charts never moved)."""
+    def words(page):
+        return " ".join(re.sub(r"<script.*?</script>|<[^>]+>", " ", page, flags=re.S).split())
+    before = words(html.unescape(client.get("/valr/progress", headers=GOOD).text))
+    assert "3 of 7 interviews moved you to the next round" in before and "Nimbus" in before
+
+    async def load_hidden():
+        return {("fathom", "1006")}
+
+    async def load_overrides(keys):
+        return {"interview:fathom:1005": "Renamed Example"} if "interview:fathom:1005" in keys else {}
+    monkeypatch.setattr(routes, "load_hidden", load_hidden)
+    monkeypatch.setattr(routes, "load_overrides", load_overrides)
+    page = html.unescape(client.get("/valr/progress", headers=GOOD).text)
+    charts = words(page.split('id="trends-title"', 1)[1].split("What it means", 1)[0])
+    assert "3 of 6 interviews moved you to the next round" in charts
+    assert "Nimbus" not in charts and "Renamed Example" in charts and "Tessel" not in charts
+    csv = page.split('download="valr-progress.csv"')[0].rsplit('href="', 1)[1]
+    assert "Nimbus" not in csv and "Renamed%20Example" in csv  # The CSV too.
+    past = words(html.unescape(client.get("/valr/interviews/past", headers=GOOD).text))
+    assert "Renamed Example" in past  # The same name on both pages.
+
+
 def test_leads_filters_live_in_the_url(client):
     offers = client.get("/valr/leads?stage=offer", headers=GOOD).text
     assert offers.count("data-lead-row=") == 1 and "Orbit Labs" in offers

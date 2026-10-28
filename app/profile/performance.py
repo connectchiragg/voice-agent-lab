@@ -48,12 +48,15 @@ subdimension, score, justification, quote.
 import csv
 import io
 import json
+import logging
 from datetime import datetime, timezone
 
 from app.profile.evaluate import cap_tokens
 from app.profile.llm import JsonLLM
 from app.profile import coach, impressions
 from app.profile.rubric import RUBRIC, SCHEMA_VERSION, mean, plain
+
+log = logging.getLogger(__name__)
 
 BADGE_THRESHOLD = 1.0  # fitted points (on the 1-10 scale) across the window
 MIN_POINTS = 3
@@ -241,8 +244,14 @@ def build(scored: list[dict], topics: list[dict]) -> dict:
 def with_coach(perf: dict, llm: JsonLLM | None, model: str, candidate: str,
                comp: dict | None = None, previous: dict | None = None) -> dict:
     """Attach the coach read (cached by input hash; see app/profile/coach.py) and let its
-    headline lead the trend text used by the voice brief."""
-    read = coach.ensure(perf, llm, model, candidate, comp, previous=previous)
+    headline lead the trend text used by the voice brief. A failed refresh keeps the previous
+    read, marked stale: it must never cost the interview its place in performance.json (the
+    scores are already paid for, and Progress would not move)."""
+    try:
+        read = coach.ensure(perf, llm, model, candidate, comp, previous=previous)
+    except Exception as error:  # noqa: BLE001 - LLMError, a timeout, a malformed reply.
+        log.warning("Coach read not refreshed (%s): keeping the previous one", type(error).__name__)
+        read = coach.ensure(perf, None, model, candidate, comp, previous=previous)
     perf = dict(perf)
     if read:
         perf["coach"] = read

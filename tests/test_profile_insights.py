@@ -376,6 +376,21 @@ def test_process_scores_adds_to_performance_and_reports(tmp_path):
         cfg.performance_path.chmod(0o600)
 
 
+def test_a_failed_coach_refresh_still_adds_the_interview(tmp_path):
+    """The scores are in hand; a coach read that fails (an LLM refusal or outage) keeps the old
+    read, marked stale, instead of dropping the interview from performance.json and Progress."""
+    cfg = settings(tmp_path)
+    write_perf(cfg, [scored_iv("2026-10-01", 5, "fathom:800")])
+    assert post_call.process(meeting(), cfg, CueLLM(), COMP)["performance_updated"]
+    later = {**meeting(), "id": "902", "date": "2026-10-12T09:00:00Z"}
+    out = post_call.process(later, cfg, CueLLM(fail_coach=True), COMP)
+    assert out["status"] == "ready" and out["performance_updated"]
+    perf = json.loads(cfg.performance_path.read_text())
+    assert {iv["interview_id"] for iv in perf["interviews"]} == {"fathom:800", "fathom:901", "fathom:902"}
+    assert perf["coach"]["stale"] is True and perf["coach"]["where_you_stand"]
+    assert len(perf["trends"]["overall"]["points"]) == 3
+
+
 def test_process_skips_non_interviews(tmp_path):
     llm = CueLLM()
     llm.json_orig = llm.json

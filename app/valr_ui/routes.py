@@ -138,19 +138,47 @@ async def with_slot_names(view: dict[str, Any]) -> dict[str, Any]:
     return view
 
 
-async def with_details(view: dict[str, Any]) -> dict[str, Any]:
-    """The past interviews with company, interviewers and outcome filled in (app/valr_ui/past.py)."""
+async def with_details(view: dict[str, Any], leads_: dict[str, Any] | None = None) -> dict[str, Any]:
+    """The past interviews with company, interviewers and outcome filled in (app/valr_ui/past.py).
+    `leads_`: the normalised leads when the caller has them already."""
     perf = view.get("performance") or {}
     ivs = perf.get("interviews") or []
     if not ivs:
         return view
     rows = await load_rows(ivs)
-    found = past.all_leads(await load_leads())
+    found = past.all_leads(leads_ if leads_ is not None else await load_leads())
     owner = past.base.owner_words()
     manual = await load_overrides([f"interview:{iv.get('id')}" for iv in ivs])
     filled = [past.enrich(iv, rows.get(iv.get("id") or ""), found, owner, manual.get(f"interview:{iv.get('id')}", ""))
               for iv in ivs]
     return {**view, "performance": {**perf, "interviews": filled}}
+
+
+async def load_hidden() -> set[tuple[str, str]]:
+    """The recordings the owner hid or deleted, as (provider, external id); empty when unknown."""
+    if research.pool is None:
+        return set()
+    try:
+        from app.notetakers import store
+        async with research.pool.connection() as connection:
+            await store.setup(connection)
+            return await store.hidden(connection)
+    except Exception as error:  # noqa: BLE001 - the page still renders, with every scorecard.
+        logger.warning("VALR hidden recordings unavailable: %s", type(error).__name__)
+        return set()
+
+
+async def with_progress(view: dict[str, Any], leads_: dict[str, Any] | None = None) -> dict[str, Any]:
+    """The scored interviews as Past interviews show them: minus those the owner hid or deleted,
+    with the company he set (or VALR found since) filled in. Progress used to read
+    performance.json as written, so a deleted call stayed in every chart and a corrected company
+    never reached the tooltips or the CSV."""
+    view = await with_details(view, leads_)
+    perf = view.get("performance") or {}
+    gone = await load_hidden()
+    kept = [iv for iv in perf.get("interviews") or []
+            if tuple(str(iv.get("id") or "").partition(":")[::2]) not in gone]
+    return {**view, "performance": {**perf, "interviews": kept, "available": bool(kept)}}
 
 
 RECORDINGS_DAYS = 365
@@ -347,7 +375,8 @@ async def render(request: Request, name: str, **params: str) -> HTMLResponse:
                           band=query.get("band", "")[:10], waiting=query.get("waiting", "")[:10],
                           tab=query.get("tab", "")[:6], closed=query.get("closed") == "1", unread=notes["leads"])
     elif name == "progress":
-        body = performance.page(view, clock, await load_leads())
+        found = await load_leads()
+        body = performance.page(await with_progress(view, found), clock, found)
     elif name == "profile":
         body = profile.page(view, clock, email)
     else:
