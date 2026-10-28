@@ -23,6 +23,7 @@ The page and its JSON need the owner's Access login (app/valr_dashboard.owner).
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 import json
@@ -122,13 +123,27 @@ async def current(connection: Any, now: datetime) -> list[leads.Lead]:
     return leads.build(await leads_store.touches(connection), now, await leads_store.overrides(connection))
 
 
+_schema_ready = False
+
+
+def build_graph(touches: list[leads.Touch], overrides: leads.Overrides, now: datetime) -> dict[str, Any]:
+    return leads.graph(leads.build(touches, now, overrides), now)
+
+
 async def collect(pool: Any, now: datetime | None = None) -> dict[str, Any]:
     now = now or datetime.now(timezone.utc)
+    global _schema_ready
     async with pool.connection() as connection:
-        built = await current(connection, now)
+        if not _schema_ready:  # Once per process: its ALTER TABLE locks gmail_state on every page otherwise.
+            await leads_store.setup(connection)
+            _schema_ready = True
+        touches = await leads_store.touches(connection)
+        overrides = await leads_store.overrides(connection)
         state = await leads_store.load_state(connection)
         counts = await leads_store.decision_counts(connection)
-    view = leads.graph(built, now)
+    # Every touchpoint through the company rules is pure CPU: in a thread, so the event loop
+    # (the bell's polls, other pages, a live call) is not held up while it runs.
+    view = await asyncio.to_thread(build_graph, touches, overrides, now)
     view["gmail"] = gmail_view(state, counts, now)
     return view
 

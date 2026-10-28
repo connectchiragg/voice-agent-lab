@@ -31,7 +31,7 @@
 // WebGL it resolves to {supported: false} and draws nothing: the host shows its list. The
 // pure helpers (bandOf, bandColor, layout, placeLabels, nodeRadius, tipText) need no browser.
 
-export const THREE_URL = "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js";
+export const THREE_URL = "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.min.js";  // Minified: 0.67 MB, not 1.27.
 export const RADIUS = 100;
 export const MAX_NODES = 1000;  // Dots are cheap; only labels are capped (placeLabels runs every frame).
 const GOLDEN = Math.PI * (3 - Math.sqrt(5));

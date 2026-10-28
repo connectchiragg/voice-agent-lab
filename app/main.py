@@ -13,12 +13,12 @@ from uuid import uuid4
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, RedirectResponse
-from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from app import (access, agent, auth, callbacks, groq_api, interviews, leads_web, memory,
                  notifications_web, phone_web, recordings, research, settings_web, telnyx, valr_dashboard, valr_hooks, webpush_web, webrtc)
 from app.notetakers import routes as notetaker_routes
+from app.static_files import CachedStaticFiles
 from app.valr_ui import routes as valr_routes
 from app.deepgram import AuraSpeaker, DeepgramSettings, FluxListener
 from app.pipeline import DEFAULT_BACKCHANNEL, Backchannel, Call, Engines, ReplyEvent, ReplyModel
@@ -128,7 +128,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 app = FastAPI(title="Voice Agent Lab", docs_url=None, redoc_url=None, openapi_url=None,
               lifespan=lifespan)
 app.add_middleware(auth.Gate)  # The owner on every route but app/auth/gate.py's public list.
-app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
+app.mount("/static", CachedStaticFiles(directory=ROOT / "static"), name="static")  # Versioned assets: immutable.
 app.include_router(auth.router)  # /login, /login/google, /logout, /private
 app.include_router(webrtc.router)
 app.include_router(telnyx.router)

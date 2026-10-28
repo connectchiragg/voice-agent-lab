@@ -171,7 +171,23 @@ async function mountGlobe() {
     globe.dataset.globeKind = "lite";
   } catch {}
 }
-mountGlobe();
+// The globe last: three.js is a big download and compile, and setting up WebGL holds the main
+// thread. So it starts once the page has painted and is idle (iOS has no requestIdleCallback:
+// a short timeout), and only when the globe is on screen: a tap in the first moments is answered first.
+function whenIdle(fn) {
+  if ("requestIdleCallback" in window) requestIdleCallback(() => fn(), {timeout: 1500});
+  else setTimeout(fn, 300);
+}
+if (globe && "IntersectionObserver" in window) {
+  const seen = new IntersectionObserver(entries => {
+    if (!entries.some(entry => entry.isIntersecting)) return;
+    seen.disconnect();
+    whenIdle(mountGlobe);
+  }, {rootMargin: "200px"});
+  seen.observe(globe);
+} else if (globe) {
+  whenIdle(mountGlobe);
+}
 
 // Toasts and posts (with the page's CSRF token).
 const csrfToken = document.querySelector('meta[name="csrf-token"]')?.content ?? "";
@@ -182,6 +198,15 @@ function toast(text) {
   box.hidden = false;
   clearTimeout(toast.timer);
   toast.timer = setTimeout(() => { box.hidden = true; }, 4000);
+}
+// Go now; static/valr.js shows `text` on the next page (no 700 ms wait for the toast first).
+function goWith(text, href = null) {
+  try { sessionStorage.setItem("valr-toast", JSON.stringify([text, true])); } catch {}
+  document.dispatchEvent(new CustomEvent("valr:leaving", {detail: {href}}));
+  const url = href ? new URL(href, location.href) : null;
+  if (url && url.pathname + url.search !== location.pathname + location.search) { location.assign(url.href); return; }
+  if (url) history.replaceState(history.state, "", url.href);  // Same page, maybe another #anchor:
+  location.reload();                                            // assign() would only scroll.
 }
 async function postJson(path, body) {
   const response = await fetch(path, {method: "POST", credentials: "same-origin",
@@ -212,11 +237,10 @@ document.addEventListener("click", async event => {
     if (body.action === "rename") body.company = box.querySelector("[data-fix-company]").value.trim();
     if (body.action === "dismiss" && !confirm(`Dismiss ${box.dataset.company}? It stays hidden, with its email threads.`)) return;
     const reply = await postJson(`/valr/api/leads/${encodeURIComponent(id)}/override`, body);
-    toast(reply.message || "Saved.");
     const params = new URLSearchParams(location.search);
     if (body.action === "dismiss") params.delete("lead");
     if (body.action === "merge") params.set("lead", body.into);
-    setTimeout(() => location.assign(`/valr/leads?${params}${params.get("lead") ? "#lead" : ""}`), 700);
+    goWith(reply.message || "Saved.", `/valr/leads?${params}${params.get("lead") ? "#lead" : ""}`);
   } catch (error) {
     toast(error.message);
   } finally {
@@ -238,8 +262,7 @@ document.addEventListener("click", async event => {
   button.disabled = true;
   try {
     const reply = await postJson("/valr/api/recordings/remove", {id: button.dataset.id, action});
-    toast(reply.message || "Done.");
-    setTimeout(() => location.assign(reply.next || "/valr/interviews/past"), 700);
+    goWith(reply.message || "Done.", reply.next || "/valr/interviews/past");
   } catch (error) {
     toast(error.message);
   } finally {
@@ -298,8 +321,7 @@ document.addEventListener("click", async event => {
   try {
     const reply = await postJson("/valr/api/interviews/company",
       {id: box.dataset.companyFix, company: box.querySelector("[data-company-input]").value.trim()});
-    toast(reply.message || "Saved.");
-    setTimeout(() => location.reload(), 700);
+    goWith(reply.message || "Saved.");
   } catch (error) {
     toast(error.message);
   } finally {

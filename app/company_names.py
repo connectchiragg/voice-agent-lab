@@ -30,6 +30,7 @@ import os
 import re
 from collections import Counter
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any, Iterable
 
 NOT_IDENTIFIED = "Company not identified"
@@ -472,7 +473,16 @@ def domain_of(email: str) -> str:
 
 
 def on(domain: str, names: frozenset[str]) -> bool:
-    return any(domain == n or domain.endswith("." + n) for n in names)
+    """`domain` is one of `names` or a subdomain of one. Looks up each dot-suffix of the domain
+    (a few set lookups) instead of scanning every name: it runs for every touchpoint."""
+    if domain in names:
+        return True
+    dot = domain.find(".")
+    while dot >= 0:
+        if domain[dot + 1:] in names:
+            return True
+        dot = domain.find(".", dot + 1)
+    return False
 
 
 def is_learning(domain: str) -> bool:
@@ -644,13 +654,21 @@ def resolve(*, attendees: Iterable[str] = (), sender_email: str = "", sender_nam
     return Resolution(agency=agency)
 
 
+@lru_cache(maxsize=64)
+def agency_brands(agencies: frozenset[str] = frozenset()) -> frozenset[str]:
+    """The agency and tool brands as squashed keys (known domains plus `agencies`). Cached:
+    is_agency_name runs for every touchpoint, and rebuilding this set each time was most of a
+    page's CPU (leads.build on every page load)."""
+    return frozenset({key(agency_name(d)).replace(" ", "") for d in AGENCY_DOMAINS | agencies} | TOOL_BRANDS)
+
+
 def is_agency_name(name: str, agencies: Iterable[str] = ()) -> bool:
     """Is this name a known (or learned) agency, platform or ATS brand ("Weekday AI",
     "Recruitee Email", "Hirebridgemail")?"""
     k = key(name).replace(" ", "")
     if not k:
         return False
-    brands = {key(agency_name(d)).replace(" ", "") for d in set(AGENCY_DOMAINS) | set(agencies)} | set(TOOL_BRANDS)
+    brands = agency_brands(frozenset(agencies)) if agencies else agency_brands()
     for brand in brands:
         if len(brand) >= 3 and k.startswith(brand):
             rest = k[len(brand):]

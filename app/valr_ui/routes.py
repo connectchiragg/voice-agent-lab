@@ -23,6 +23,7 @@ Leads dots all come from one load_notes() call, so they always agree.
 `?theme=light|dark` pins the theme for one view (screenshots); otherwise the toggle's choice
 or the system's.
 """
+import contextvars
 import importlib
 import logging
 from datetime import datetime, timedelta, timezone
@@ -96,6 +97,19 @@ async def load_leads() -> dict[str, Any]:
         return contracts.leads(None)
 
 
+_leads_memo: contextvars.ContextVar[dict[str, Any] | None] = contextvars.ContextVar("valr_leads_memo", default=None)
+
+
+async def leads_once() -> dict[str, Any]:
+    """load_leads(), at most once per page render (Processes and the interview pages asked twice)."""
+    memo = _leads_memo.get()
+    if memo is None:
+        return await load_leads()
+    if "leads" not in memo:
+        memo["leads"] = await load_leads()
+    return memo["leads"]
+
+
 async def load_rows(interviews_: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     """The stored recordings of these past interviews (company, people, links), by "<provider>:<id>"."""
     keys = [tuple(str(iv.get("id") or "").partition(":")[::2]) for iv in interviews_]
@@ -146,7 +160,7 @@ async def with_details(view: dict[str, Any], leads_: dict[str, Any] | None = Non
     if not ivs:
         return view
     rows = await load_rows(ivs)
-    found = past.all_leads(leads_ if leads_ is not None else await load_leads())
+    found = past.all_leads(leads_ if leads_ is not None else await leads_once())
     owner = past.base.owner_words()
     manual = await load_overrides([f"interview:{iv.get('id')}" for iv in ivs])
     filled = [past.enrich(iv, rows.get(iv.get("id") or ""), found, owner, manual.get(f"interview:{iv.get('id')}", ""))
@@ -348,6 +362,7 @@ async def render(request: Request, name: str, **params: str) -> HTMLResponse:
     # owner only, like GET /valr/api/leads.
     email = await (valr_dashboard.owner if name in ("leads", "processes", "settings", "profile")
                    else valr_dashboard.viewer)(request)
+    _leads_memo.set({})
     try:
         view = await valr_dashboard.state_view()
     except Exception as error:  # noqa: BLE001 - a page that says so, not a stack trace or JSON.
@@ -365,7 +380,7 @@ async def render(request: Request, name: str, **params: str) -> HTMLResponse:
     status = 200
     title = TITLES[name]
     if name == "home":
-        body = home.page(view, clock, items, await load_leads(), notes)
+        body = home.page(view, clock, items, await leads_once(), notes)
     elif name == "interviews":
         # The Past tab's count must match the Past list: recordings and calendar history included.
         body = interviews.upcoming_page(await with_slot_names(await with_recordings(await with_details(view))), clock)
@@ -402,12 +417,12 @@ async def render(request: Request, name: str, **params: str) -> HTMLResponse:
         past_count = len(((await with_recordings(await with_details(view))).get("performance") or {}).get("interviews") or [])
         body = processes.page(await processes_data(), interviews.tabs("processes", past_count))
     elif name == "leads":
-        body = leads.page(view, clock, await load_leads(), query.get("stage", "")[:20],
+        body = leads.page(view, clock, await leads_once(), query.get("stage", "")[:20],
                           query.get("q", "")[:80], selected, query.get("status", "")[:10],
                           band=query.get("band", "")[:10], waiting=query.get("waiting", "")[:10],
                           tab=query.get("tab", "")[:6], closed=query.get("closed") == "1", unread=notes["leads"])
     elif name == "progress":
-        found = await load_leads()
+        found = await leads_once()
         body = performance.page(await with_progress(view, found), clock, found)
     elif name == "profile":
         body = profile.page(view, clock, email)
@@ -433,7 +448,7 @@ async def past_page(request: Request) -> HTMLResponse:
 
 async def processes_data() -> dict[str, Any]:
     """Every hiring process (app/valr_ui/processes.py), from the leads' touchpoints."""
-    raw = (await load_leads()).get("raw")
+    raw = (await leads_once()).get("raw")
     return processes.timeline(raw, datetime.now(timezone.utc))
 
 

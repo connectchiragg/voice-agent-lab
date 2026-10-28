@@ -32,6 +32,17 @@ function say(text, ok = true) {
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => { toast.hidden = true; }, 5000);
 }
+// Reload (or go) now and show `text` on the next page, instead of waiting for the toast to be read first.
+function reloadWith(text, ok = true, href = null) {
+  try { sessionStorage.setItem("valr-toast", JSON.stringify([text, ok])); } catch {}
+  document.dispatchEvent(new CustomEvent("valr:leaving", {detail: {href}}));
+  if (href) location.assign(href); else location.reload();
+}
+try {
+  const carried = JSON.parse(sessionStorage.getItem("valr-toast") || "null");
+  sessionStorage.removeItem("valr-toast");
+  if (carried) say(carried[0], carried[1]);
+} catch {}
 
 // The interview drawer: a <dialog> per interview; the URL hash keeps it linkable.
 function openDrawer(ref, push = true) {
@@ -93,6 +104,7 @@ document.addEventListener("click", async event => {
   button.disabled = true;
   const words = button.querySelector(".split-label, span:not(.sr-only)") || button;
   if (BUSY[action]) words.textContent = BUSY[action];
+  let reload = false;
   try {
     let result;
     if (action === "sync") {
@@ -105,23 +117,30 @@ document.addEventListener("click", async event => {
       result = await post(`/valr/api/notetakers/${encodeURIComponent(button.dataset.provider)}/sync`);
     } else if (action === "ntdisconnect") {
       result = await post(`/valr/api/notetakers/${encodeURIComponent(button.dataset.provider)}/disconnect`);
-      setTimeout(() => location.reload(), 800);
+      reload = true;
     } else if (action === "reach") {
       result = await post("/valr/api/reach", {mode: button.dataset.mode});
-      setTimeout(() => location.reload(), 600);
+      reload = true;
     } else if (action === "dials") {
       const days = Number(button.dataset.days) || 0;  // Pause for 1 or 7 days; none: until resumed.
       result = await post("/valr/api/dials", {paused: button.dataset.paused === "true", ...(days ? {days} : {})});
-      setTimeout(() => { rememberOpen(); location.reload(); }, 600);
+      rememberOpen();
+      reload = true;
+    }
+    if (reload) {  // The button stays busy until the page comes back.
+      reloadWith(result?.message ?? "Done.");
+      return;
     }
     say(result?.message ?? "Done.");
     scheduleCheck(4000);
   } catch (error) {
     say(error.message, false);
   } finally {
-    button.removeAttribute("aria-busy");
-    button.disabled = false;
-    button.innerHTML = label;
+    if (!reload) {
+      button.removeAttribute("aria-busy");
+      button.disabled = false;
+      button.innerHTML = label;
+    }
   }
 });
 
@@ -163,8 +182,7 @@ document.addEventListener("submit", async event => {
     button.disabled = true;
     try {
       const result = await post(`/valr/api/notetakers/${encodeURIComponent(form.dataset.connect)}/connect`, {api_key: key});
-      say(result.message);
-      setTimeout(() => location.reload(), 900);
+      reloadWith(result.message);
     } catch (error) {
       say(error.message, false);
     } finally {
@@ -250,9 +268,15 @@ function scheduleCheck(delay) {
   clearTimeout(checkTimer);
   checkTimer = setTimeout(check, delay);
 }
-check();
+// Not at load (the page was rendered just now, and /valr/api/state is the heaviest call):
+// the first check comes once the page has settled, then every minute and on coming back.
+scheduleCheck(8000);
 setInterval(check, 60000);
-document.addEventListener("visibilitychange", () => { if (!document.hidden) check(); });
+let hiddenAt = 0;
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) { hiddenAt = Date.now(); return; }
+  if (Date.now() - hiddenAt > 15000) scheduleCheck(1500);  // Not for a quick app switch and back.
+});
 
 // This week's focus (Progress): ticks are remembered on this device.
 for (const box of document.querySelectorAll("input[data-focus]")) {
