@@ -6,7 +6,8 @@
     python scripts/import_recordings.py --purge        # delete the raw-download cache and exit
 
 Keys come from .env (VALR_ENV_FILE overrides): FATHOM_API_KEY, FIREFLIES_API_KEY,
-ANTHROPIC_API_KEY or OPENROUTER_API_KEY (see app/llm_gateway.py). A missing vendor key skips that source. Keys are never printed.
+GROQ_API_KEY, ANTHROPIC_API_KEY or OPENROUTER_API_KEY (see app/llm_gateway.py; LLM_GATEWAY_PROFILE
+picks the backend for the evaluator). A missing vendor key skips that source. Keys are never printed.
 
 Export format (for --from-export): {"source": "...", "meetings": [{"source", "id",
 "title", "date" (ISO 8601), "duration_minutes", "participants": [{"name", "role"}],

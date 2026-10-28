@@ -33,8 +33,9 @@ from pydantic import BaseModel, Field, model_validator
 from app import private_sources
 from app.briefing_quality import concise_speech, useful_fact
 from app.interview_types import Person, SlotEvent, domain_of
-from app.research_agents import (CAPS, SEARCH_FOCUS, SENTENCE, SPEECH_BAD, ClaudeLLM, Ctx, Findings, Meter,
-                                 PartOutcome, anthropic_client, clip,
+from app.llm_gateway import billed_model
+from app.research_agents import (CAPS, SEARCH_FOCUS, SENTENCE, SPEECH_BAD, Ctx, Findings, Meter,
+                                 PartOutcome, anthropic_client, clip, make_llm,
                                  findings_guardrail, first_words, norm_url, read_page, web_search)
 
 SEARCH_FOCUS.update({
@@ -289,8 +290,7 @@ def run_interview_part(part: str, event: SlotEvent, interviewers: list[Person], 
     if ctx_box is not None:
         ctx_box.append(ctx)
     spec = SPECS[part]
-    llm = ClaudeLLM(model=CAPS.researcher_model, max_tokens=RESEARCHER_MAX_TOKENS,
-                    effort=RESEARCHER_EFFORT).bind(ctx, meter)
+    llm = make_llm(CAPS.researcher_model, RESEARCHER_MAX_TOKENS, RESEARCHER_EFFORT).bind(ctx, meter)
     output_model = OUTPUTS.get(part, Findings)
     extra = EXTRA_HOW.get(part, "")
     if part in ("company", "round") and event.company_domain:
@@ -367,8 +367,8 @@ def classify_people(people: list[Person], evidence: str, meter: Meter,
     try:
         response = anthropic_client().messages.create(
             model=CAPS.check_model, max_tokens=400, messages=[{"role": "user", "content": prompt}],
-            extra_body={"output_config": {"effort": "low"}})
-        meter.record("classify", CAPS.check_model, response.usage)
+            extra_body={"output_config": {"effort": "low"}}, json_output=True)
+        meter.record("classify", billed_model(response, CAPS.check_model), response.usage)
         text = "".join(block.text for block in response.content if block.type == "text")
         roles = json.loads(text[text.index("{"):text.rindex("}") + 1]).get("roles", {})
     except Exception:  # noqa: BLE001
@@ -566,8 +566,8 @@ def verify_briefing(attempt: SlotSynthesis, event: SlotEvent, evidence: str,
         + "\n".join(f"{i}. {text}" for i, text in enumerate(items, 1)) + "\n</items>")
     response = anthropic_client().messages.create(
         model=CAPS.check_model, max_tokens=2000, messages=[{"role": "user", "content": prompt}],
-        extra_body={"output_config": {"effort": "low"}})
-    meter.record("briefing_check", CAPS.check_model, response.usage)
+        extra_body={"output_config": {"effort": "low"}}, json_output=True)
+    meter.record("briefing_check", billed_model(response, CAPS.check_model), response.usage)
     text = "".join(b.text for b in response.content if b.type == "text")
     data = json.loads(text[text.index("{"):text.rindex("}") + 1])
     flagged = data.get("unsupported")
@@ -587,7 +587,7 @@ def synthesize_slot(event: SlotEvent, interviewers: list[Person], parts: dict[st
     parts = identity_safe_parts(parts, event.company_domain)
     present = [name for name in ("private", "round", "company") if parts.get(name, {}).get("ok")]
     partial = len(present) < 2
-    llm = ClaudeLLM(model=CAPS.synth_model, max_tokens=WRITER_MAX_TOKENS, effort=WRITER_EFFORT).bind(None, meter)
+    llm = make_llm(CAPS.synth_model, WRITER_MAX_TOKENS, WRITER_EFFORT).bind(None, meter)
     agent = Agent(role="Briefing writer", goal="Turn research into a short spoken interview briefing.",
                   backstory="You write for the ear and never add facts beyond the research.",
                   llm=llm, max_iter=2, max_execution_time=int(seconds), allow_delegation=False,

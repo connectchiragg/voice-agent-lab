@@ -1,7 +1,16 @@
-"""VALR researchers and synthesizer: CrewAI agents on Claude. Research worker only.
+"""VALR researchers and synthesizer: CrewAI agents on Groq's free tier (or Claude). Research worker only.
 
 Imported only by app/research_worker.py (the `worker` image target, Python 3.13 with
 crewai). The voice app never imports it, so the live call path has no Anthropic client.
+
+Model names stay canonical (claude-haiku-5-5 for researchers and checks, claude-sonnet-5-5
+for the synthesizer). With LLM_GATEWAY=groq (the default when GROQ_API_KEY is set),
+`make_llm` builds a `GroqLLM` (CrewAI's OpenAI-compatible provider on Groq, through the
+gateway's rate-limited transport; app/groq_backend.py maps the names to qwen/qwen3.8-27b) and
+web search is a free DuckDuckGo search the model answers from with cited URLs. On the
+Anthropic backends it builds the `ClaudeLLM` below and search is Anthropic's server tool.
+Groq's free tier allows 8,000 tokens a minute, so in groq mode `Caps` defaults to fewer and
+shorter tool results (GROQ_CAPS).
 
 - Three researchers, each a one-agent crew on Claude Haiku 5.5 (effort low):
   `web` (web search + page reading), `reviews` (reviews and recent news, web search),
@@ -39,10 +48,12 @@ os.environ.setdefault("CREWAI_TRACING_ENABLED", "false")
 import httpx  # noqa: E402
 from crewai import Agent, Crew, Process, Task  # noqa: E402
 from crewai.llms.providers.anthropic.completion import AnthropicCompletion  # noqa: E402
+from crewai.llms.providers.openai.completion import OpenAICompletion  # noqa: E402
 from crewai.tools import tool  # noqa: E402
 from pydantic import BaseModel, Field, PrivateAttr, field_validator, model_validator  # noqa: E402
 
 from app import llm_gateway  # noqa: E402
+from app.llm_gateway import billed_model  # noqa: E402
 from app.research_jobs import price  # noqa: E402
 
 logger = logging.getLogger("valr")
@@ -73,7 +84,7 @@ class Caps:
 
     @classmethod
     def from_env(cls) -> "Caps":
-        values = {}
+        values: dict[str, Any] = dict(GROQ_CAPS) if llm_gateway.feature_mode("research") == "groq" else {}
         for item in dataclasses.fields(cls):
             raw = os.getenv(f"VALR_{item.name.upper()}")
             if raw is not None:
@@ -81,6 +92,13 @@ class Caps:
         return cls(**values)
 
 
+# Groq's free tier for qwen3.8-27b: 7,000 input and 1,000 output tokens a minute (8,000 in
+# all), shared by the three researchers; background requests may ask for 750 output tokens.
+# Smaller tool results keep each agent turn near 3,000 input tokens.
+GROQ_CAPS = {"searches_per_researcher": 2, "pages_per_researcher": 2, "page_chars": 2000,
+             "tool_output_chars": 1800, "max_iter": 4, "researcher_max_tokens": 750,
+             "search_max_tokens": 600, "synth_max_tokens": 750, "findings_max_claims": 6,
+             "notes_max": 8}
 CAPS = Caps.from_env()
 # Measured cost of one wrapped web search (tokens plus the $0.01 search), reserved before
 # each search so parallel calls cannot overshoot a budget.
@@ -102,10 +120,11 @@ class Meter:
 
     def record(self, kind: str, model: str, usage: Any) -> None:
         """From an Anthropic `usage` (object or CrewAI's dict, whose input includes cache)."""
-        if isinstance(usage, dict):
+        if isinstance(usage, dict):  # CrewAI's: Anthropic (input/output) or OpenAI-style (prompt/completion).
             read, write = int(usage.get("cached_prompt_tokens", 0)), int(usage.get("cache_creation_tokens", 0))
-            fresh = max(int(usage.get("input_tokens", 0)) - read - write, 0)
-            out, searches = int(usage.get("output_tokens", 0)), 0
+            fresh = max(int(usage.get("input_tokens", usage.get("prompt_tokens", 0)) or 0) - read - write, 0)
+            out = int(usage.get("output_tokens", usage.get("completion_tokens", 0)) or 0)
+            searches = 0
         else:
             read = int(getattr(usage, "cache_read_input_tokens", 0) or 0)
             write = int(getattr(usage, "cache_creation_input_tokens", 0) or 0)
@@ -222,8 +241,8 @@ class ClaudeLLM(AnthropicCompletion):
         return params
 
     def _build_sync_client(self) -> Any:
-        """Through app/llm_gateway.py: OpenRouter (BYOK) or Anthropic direct, per LLM_GATEWAY."""
-        return llm_gateway.shared().client()
+        """Through app/llm_gateway.py (LLM_GATEWAY_RESEARCH, else LLM_GATEWAY)."""
+        return llm_gateway.shared().client(backend=llm_gateway.feature_backend("research"))
 
     def _build_async_client(self) -> Any:
         raise ValueError("VALR runs CrewAI synchronously; the LLM gateway has no async client")
@@ -256,6 +275,77 @@ class ClaudeLLM(AnthropicCompletion):
             self._meter.record("agent", self.model, usage_data)
 
 
+class GroqLLM(OpenAICompletion):
+    """CrewAI's OpenAI-compatible provider on Groq, with the same metering and hard stops as
+    ClaudeLLM. Requests go through app/llm_gateway.py's rate-limited transport (background
+    priority, max_tokens capped to the free tier's share); reasoning is off unless
+    VALR_GROQ_REASONING=1 (then off for effort "low", on and hidden otherwise). On a Groq error
+    with LLM_GATEWAY_FALLBACK=1 the call is repeated once on Claude (`canonical` model)."""
+    effort: str | None = None
+    canonical: str = ""
+    _ctx: Any = PrivateAttr(default=None)
+    _meter: Any = PrivateAttr(default=None)
+
+    def bind(self, ctx: Ctx | None, meter: Meter) -> "GroqLLM":
+        self._ctx, self._meter = ctx, meter
+        return self
+
+    def _guard(self) -> None:
+        if self._ctx is not None and (why := self._ctx.check(hard=True)):
+            raise JobStop(f"{self._ctx.part}: {why}")
+
+    def call(self, *args: Any, **kwargs: Any) -> Any:
+        import openai
+        self._guard()
+        try:
+            return super().call(*args, **kwargs)
+        except (openai.APIStatusError, openai.APIConnectionError) as error:
+            gateway = llm_gateway.shared()
+            status = getattr(error, "status_code", None)
+            if not gateway.fallback or status in (400, 401, 403, 404):
+                raise
+            logger.warning("VALR gateway fallback: Groq failed (%s %s) in the crew; this call goes to %s",
+                           type(error).__name__, status or "", self.canonical)
+            gateway._count("fallback")
+            claude = ClaudeLLM(model=self.canonical, max_tokens=self.max_tokens or 1500,
+                               effort=self.effort).bind(self._ctx, self._meter)
+            return claude.call(*args, **kwargs)
+
+    async def acall(self, *args: Any, **kwargs: Any) -> Any:
+        raise ValueError("VALR runs CrewAI synchronously")
+
+    def _build_sync_client(self) -> Any:
+        return llm_gateway.shared().openai_client("background")
+
+    def _build_async_client(self) -> Any:
+        raise ValueError("VALR runs CrewAI synchronously; the LLM gateway has no async client")
+
+    def _prepare_completion_params(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        params = super()._prepare_completion_params(*args, **kwargs)
+        reasoning = llm_gateway.groq_backend.reasoning_for(self.canonical or "haiku", None, self.effort or "low")
+        extra = {"reasoning_effort": reasoning}
+        if reasoning == "default":
+            extra["reasoning_format"] = "hidden"
+        params["extra_body"] = {**(params.get("extra_body") or {}), **extra}
+        return params
+
+    def _track_token_usage_internal(self, usage_data: dict[str, Any]) -> None:
+        super()._track_token_usage_internal(usage_data)
+        if self._meter is not None:
+            self._meter.record("agent", self.model, usage_data)
+
+
+def make_llm(model: str, max_tokens: int, effort: str) -> Any:
+    """The crew's LLM for a canonical model name, on the research backend
+    (LLM_GATEWAY_RESEARCH, else LLM_GATEWAY)."""
+    if llm_gateway.feature_mode("research") == "groq":
+        served = llm_gateway.groq_backend.groq_model(model)
+        return GroqLLM(model=served, canonical=model, max_tokens=max_tokens, effort=effort,
+                       api_key="via-llm-gateway", base_url=llm_gateway.groq_backend.GROQ_BASE_URL,
+                       custom_openai=True, max_retries=1)
+    return ClaudeLLM(model=model, max_tokens=max_tokens, effort=effort)
+
+
 # Tools.
 
 _anthropic: Any = None
@@ -267,7 +357,8 @@ def anthropic_client() -> Any:
     """Messages client for the inner calls (search, claim check, classify): see app/llm_gateway.py."""
     global _anthropic
     if _anthropic is None:
-        _anthropic = llm_gateway.shared().client(timeout=60)  # As before: 60 s per request.
+        _anthropic = llm_gateway.shared().client(  # As before: 60 s per request.
+            timeout=60, backend=llm_gateway.feature_backend("research"))
     return _anthropic
 
 
@@ -319,7 +410,7 @@ def search_call(ctx: Ctx, query: str, focus: str, model: str) -> str:
         tools=[{"type": "web_search_20250305", "name": "web_search", "max_uses": 1}],
         messages=[{"role": "user", "content": f"Search: {query}"}],
         extra_body={"output_config": {"effort": "low"}})
-    ctx.meter.record("search", model, response.usage)
+    ctx.meter.record("search", billed_model(response, model), response.usage)
     facts, results = [], []
     for block in response.content:
         if block.type == "web_search_tool_result" and isinstance(block.content, list):
@@ -618,8 +709,7 @@ def run_part(part: str, topic: str, seconds: float, budget_usd: float, meter: Me
     if ctx_box is not None:
         ctx_box.append(ctx)  # Lets the activity stop it from outside.
     spec = RESEARCHERS[part]
-    llm = ClaudeLLM(model=CAPS.researcher_model, max_tokens=CAPS.researcher_max_tokens,
-                    effort="low").bind(ctx, meter)
+    llm = make_llm(CAPS.researcher_model, CAPS.researcher_max_tokens, "low").bind(ctx, meter)
     agent = Agent(role=spec["role"], goal=spec["goal"],
                   backstory="You research for a phone assistant and report only what your tools returned.",
                   llm=llm, tools=make_tools(part, ctx), max_iter=CAPS.max_iter,
@@ -702,7 +792,7 @@ def synthesize(topic: str, parts: list[dict[str, Any]], known_urls: set[str], se
     note = ("" if not partial else
             f"Some research did not finish. Begin the spoken answer with \"{APOLOGY_PARTIAL}\" "
             "and do not guess about what is missing.")
-    llm = ClaudeLLM(model=CAPS.synth_model, max_tokens=CAPS.synth_max_tokens, effort="medium").bind(None, meter)
+    llm = make_llm(CAPS.synth_model, CAPS.synth_max_tokens, "medium").bind(None, meter)
     agent = Agent(role="Synthesizer", goal="Turn research into a short spoken answer and cited notes.",
                   backstory="You write for the ear and never add facts beyond the research.",
                   llm=llm, max_iter=2, max_execution_time=int(seconds), allow_delegation=False,
@@ -766,8 +856,8 @@ def check_claims(spoken: str, parts: list[dict[str, Any]], meter: Meter) -> str:
     try:
         response = anthropic_client().messages.create(
             model=CAPS.check_model, max_tokens=2000, messages=[{"role": "user", "content": prompt}],
-            extra_body={"output_config": {"effort": "low"}})
-        meter.record("claim_check", CAPS.check_model, response.usage)
+            extra_body={"output_config": {"effort": "low"}}, json_output=True)
+        meter.record("claim_check", billed_model(response, CAPS.check_model), response.usage)
         text = "".join(block.text for block in response.content if block.type == "text")
         flagged = set(json.loads(text[text.index("{"):text.rindex("}") + 1]).get("unsupported", []))
     except Exception as error:  # noqa: BLE001 - keep the answer if the check cannot run

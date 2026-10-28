@@ -1,6 +1,7 @@
-"""Runs the real lead classifier (Claude Haiku via app/llm_gateway.py) on the synthetic eval set.
+"""Runs the real lead classifier (app/llm_gateway.py: Groq by default, or Claude) on the synthetic eval set.
 
-    python scripts/eval_lead_classifier.py            # needs OPENROUTER_API_KEY or ANTHROPIC_API_KEY
+    python scripts/eval_lead_classifier.py                      # GROQ_API_KEY: qwen/qwen3.8-27b
+    LLM_GATEWAY=anthropic python scripts/eval_lead_classifier.py  # Claude Haiku, to compare
 
 Prints, per email id, the step that decided, keep/drop against the expectation, the stage
 and cue; then accuracy, tokens, cost and latency. The emails are all made up
@@ -25,7 +26,9 @@ from tests.leads_sample import fixture_emails  # noqa: E402
 
 def main() -> None:
     owner, emails = fixture_emails()
-    client = llm_gateway.shared().client(timeout=60)
+    gateway = llm_gateway.shared()
+    print(gateway.describe())
+    client = gateway.client(timeout=60, priority="interactive")
     right, calls, usd, waits, tokens_in, tokens_out = 0, 0, 0.0, [], 0, 0
     stage_right = stage_total = 0
     for email, item in emails:
@@ -37,7 +40,7 @@ def main() -> None:
             waits.append(time.perf_counter() - started)
             tokens_in += decision.usage["input_tokens"]
             tokens_out += decision.usage["output_tokens"]
-            usd += research_jobs.price(lead_classify.MODEL, decision.usage["input_tokens"],
+            usd += research_jobs.price(decision.usage.get("model", lead_classify.MODEL), decision.usage["input_tokens"],
                                        decision.usage["output_tokens"], decision.usage["cache_read"],
                                        decision.usage["cache_write"])
         ok = decision.keep == (item["expect"] == "keep")
@@ -51,7 +54,9 @@ def main() -> None:
     print(f"\naccuracy {right}/{len(emails)}; stage hints {stage_right}/{stage_total}; model calls {calls}; "
           f"tokens in {tokens_in}, out {tokens_out}; ${usd:.5f} total, "
           f"${usd / max(calls, 1):.6f} per model call; latency p50 "
-          f"{statistics.median(waits) if waits else 0:.2f} s, max {max(waits) if waits else 0:.2f} s")
+          f"{statistics.median(waits) if waits else 0:.2f} s, p95 "
+          f"{sorted(waits)[max(int(len(waits) * 0.95 + 0.5) - 1, 0)] if waits else 0:.2f} s, "
+          f"max {max(waits) if waits else 0:.2f} s; gateway {dict(gateway.stats)}")
 
 
 if __name__ == "__main__":

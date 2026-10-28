@@ -325,13 +325,13 @@ class LeadActivities:
         if self._classify is not None:
             return self._classify(email, owners)
         from app import llm_gateway
-        return lead_classify.classify(email, owners, llm_gateway.shared().client(timeout=60))
+        return lead_classify.classify(email, owners, llm_gateway.shared().client(timeout=60, priority="interactive"))
 
     def judge(self, email: Email, decision: Decision, kind: str, ctx: notify_context.Context) -> notify_context.Verdict:
         if self._judge is not None:
             return self._judge(email, decision, kind, ctx)
         from app import llm_gateway
-        return notify_context.judge(email, decision, kind, ctx, llm_gateway.shared().client(timeout=20))
+        return notify_context.judge(email, decision, kind, ctx, llm_gateway.shared().client(timeout=20, priority="interactive"))
 
     async def novelty(self, connection: Any, email: Email, decision: Decision, touch: Touch, new_thread: bool,
                       budget: "Budget", rows: list[dict[str, Any]]) -> notify_context.Verdict | None:
@@ -586,7 +586,7 @@ class LeadActivities:
             if decision.usage:
                 summary.llm_calls += 1
                 row = {"part": "leads", "kind": "classify", "model": lead_classify.MODEL, **decision.usage}
-                usd = research_jobs.price(lead_classify.MODEL, row["input_tokens"], row["output_tokens"],
+                usd = research_jobs.price(row["model"], row["input_tokens"], row["output_tokens"],
                                           row["cache_read"], row["cache_write"])
                 rows.append(row)
             verdict = "deferred" if decision.method == "deferred" else "keep" if decision.keep else "drop"

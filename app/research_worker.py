@@ -2,8 +2,8 @@
 
 Runs ResearchCallbackWorkflow and its activities on task queue `voice-research`, from
 the `worker` image target (Python 3.13 with crewai; the app image stays without it).
-The only process that calls Claude (through app/llm_gateway.py: OpenRouter BYOK or Anthropic
-direct): the live call path never calls Claude.
+The only process that makes background LLM calls (through app/llm_gateway.py: Groq's free
+tier by default, never the voice agent's models; or Claude): the live call path never calls Claude.
 
 Activities:
 

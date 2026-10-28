@@ -79,6 +79,8 @@ PRICES = {
     "claude-opus-5-5": (4.00, 20.00, 5.00, 0.20),
 }
 SEARCH_USD = 0.01
+# Groq's free tier (app/groq_backend.py) and its free web search: $0, tokens still metered.
+FREE_MODELS = frozenset({"qwen/qwen3.8-27b", "openai/gpt-oss-safeguard-20b"})
 
 # The promise ("I'll call you back in about N minutes"): from the p90 of recent jobs'
 # research time, plus dialling and ringing, plus a margin; whole minutes, 2 to 5.
@@ -98,6 +100,8 @@ def caller_hash(caller_key: str) -> str:
 def price(model: str, input_tokens: int, output_tokens: int, cache_read: int = 0,
           cache_write: int = 0, searches: int = 0) -> float:
     """Estimated $ for one request. `input_tokens` excludes cached tokens (as the API reports)."""
+    if model in FREE_MODELS or ("/" in model and not model.startswith("anthropic/")):
+        return 0.0
     p_in, p_out, p_write, p_read = PRICES.get(model, PRICES["claude-sonnet-5-5"])
     tokens = (input_tokens * p_in + output_tokens * p_out + cache_write * p_write
               + cache_read * p_read) / 1e6
