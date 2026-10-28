@@ -141,7 +141,7 @@ async function mountGlobe() {
       const module = await import(globe.dataset.src);
       const view = await module.mount(globe, shown(), {
         onSelect(node) { if (node?.type === "lead") choose(node.id); },
-        maxNodes: 150, labels: 150, reducedMotion,
+        labels: 150, reducedMotion,  // Every lead is drawn (no maxNodes): closed ones come last.
       });
       if (view?.supported !== false) {
         toggle?.addEventListener("change", () => view.update(shown()));

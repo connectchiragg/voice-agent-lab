@@ -168,3 +168,19 @@ test("final stages sit between interviewing and an offer in size", () => {
   assert.ok(r("interviewing") < r("final") && r("final") < r("offer"));
   assert.equal(tipText({ company: "Acme", temperature: 92, stage: "final" }, NOW), "Acme · Hot · Final stages · no touch yet");
 });
+
+test("a real-sized mailbox draws every lead: the cold ones and, with Show closed, the closed ones", () => {
+  // Shaped like production: 208 live leads and 74 closed ones. A 150-node cap used to keep only
+  // the hottest 150, so the coldest live leads and every closed lead were never drawn and
+  // ticking "Show closed" changed nothing.
+  const live = Array.from({ length: 208 }, (_, i) => lead(`live-${i}`, i % 100));
+  const closed = Array.from({ length: 74 }, (_, i) => lead(`closed-${i}`, 5, "closed-lost", { status: "closed" }));
+  const shown = layout({ leads: [...live, ...closed] });
+  assert.equal(shown.hidden, 0);
+  assert.equal(shown.nodes.length, 282);
+  assert.equal(shown.nodes.filter((n) => n.band === "closed").length, 74);
+  assert.equal(layout({ leads: live }).nodes.length, 208);  // Unticked: the live ones, all of them.
+  // The page mounts the globe without a node cap (static/valr-app.js).
+  const app = readFileSync(new URL("../static/valr-app.js", import.meta.url), "utf8");
+  assert.doesNotMatch(app, /maxNodes:\s*\d/);
+});

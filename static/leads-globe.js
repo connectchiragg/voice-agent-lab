@@ -23,8 +23,9 @@
 // ones larger), leads on the far side dimmed rather than hidden, and a sparse, slowly drifting
 // starfield behind. Reduced motion: no rotation, no drift.
 //
-// Options: onSelect({type: "lead", id, lead} | null), maxNodes (default 150), labels (most
-// labels drawn, default 150: every drawn lead), reducedMotion (default: the media query; true = no
+// Options: onSelect({type: "lead", id, lead} | null), maxNodes (default MAX_NODES: every lead a
+// real mailbox has; a cap that bit dropped the coldest and every closed lead, so "Show closed"
+// drew nothing), labels (most labels drawn, default 150: the hottest first), reducedMotion (default: the media query; true = no
 // auto-rotation, no inertia, no animated focus), threeUrl (an ES module build of three.js;
 // default pinned below), now (Date for "3 days ago"; default the current time). Without
 // WebGL it resolves to {supported: false} and draws nothing: the host shows its list. The
@@ -32,6 +33,7 @@
 
 export const THREE_URL = "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js";
 export const RADIUS = 100;
+export const MAX_NODES = 1000;  // Dots are cheap; only labels are capped (placeLabels runs every frame).
 const GOLDEN = Math.PI * (3 - Math.sqrt(5));
 const SPAN = 0.9;  // Latitudes kept within ±64°: no pile-up of labels at the poles.
 
@@ -91,7 +93,7 @@ export function tipText(lead, now = new Date()) {
 }
 
 /** Nodes on a sphere of `radius`: {nodes[{id, pos, r, band, temperature, ref}], hidden}. */
-export function layout(data, { maxNodes = 150, radius = RADIUS } = {}) {
+export function layout(data, { maxNodes = MAX_NODES, radius = RADIUS } = {}) {
   const leads = (data.leads || []).filter((l) => l && l.status !== "expired")
     .map((l) => ({ lead: l, band: bandOf(l) }))
     .sort((a, b) => ORDER[a.band] - ORDER[b.band] || (Number(b.lead.temperature) || 0) - (Number(a.lead.temperature) || 0)
@@ -172,7 +174,7 @@ function cssColor(el, name, fallback) {
 export async function mount(el, data, options = {}) {
   const reduced = options.reducedMotion ?? matchMedia("(prefers-reduced-motion: reduce)").matches;
   const small = el.clientWidth < 640 || innerWidth < 640;
-  const maxNodes = options.maxNodes ?? 150;
+  const maxNodes = options.maxNodes ?? MAX_NODES;
   const maxLabels = options.labels ?? 150;
   if (!webglAvailable()) {
     el.classList.add("globe-unsupported");
