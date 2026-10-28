@@ -288,6 +288,23 @@ def transcript_excerpt(turns: list[dict], limit: int = 1800) -> str:
     return "\n".join(lines)
 
 
+def same_company_rows(rows: list[tuple], company: str, domain: str) -> list[tuple]:
+    """Rows (..., company_domain, company, event_company) of this company: its domain, else (no
+    domain on the recording: a phone call, an older Fathom row) the same company by name
+    (app/company_names.same: "Acme" ~ "Acme Robotics", suffixes ignored). -> the first six columns."""
+    from app import company_names
+    name = company or (company_names.from_domain(domain) if domain else "")
+    out = []
+    for row in rows:
+        head, (row_domain, row_company, row_event_company) = row[:6], row[6:9]
+        if row_domain:
+            if domain and row_domain.lower() == domain.lower():
+                out.append(head)
+        elif name and any(c and company_names.same(c, name) for c in (row_company, row_event_company)):
+            out.append(head)
+    return out
+
+
 async def stored_rounds(connection: Any, event: Any) -> tuple[str, list[str]]:
     """Read previous rounds of this exact company from the live recording store.
 
@@ -299,20 +316,21 @@ async def stored_rounds(connection: Any, event: Any) -> tuple[str, list[str]]:
     if not key or not (event.company_domain or event.company):
         return "", []
     cursor = await connection.execute(
-        "SELECT r.provider, r.external_id, r.title, r.started_at, r.share_url, t.sealed "
+        "SELECT r.provider, r.external_id, r.title, r.started_at, r.share_url, t.sealed, "
+        "r.company_domain, r.company, r.event_company "
         "FROM notetaker_recordings r JOIN recording_transcripts t "
         "ON t.provider = r.provider AND t.external_id = r.external_id "
         "WHERE r.started_at < %s AND (r.event_key IS NULL OR r.event_key <> %s) "
         "AND NOT EXISTS (SELECT 1 FROM notetaker_hidden h "
         "WHERE h.provider = r.provider AND h.external_id = r.external_id) "
         "AND ((%s <> '' AND lower(r.company_domain) = lower(%s)) "
-        "OR ((r.company_domain IS NULL OR r.company_domain = '') AND %s <> '' "
-        "AND (lower(r.company) = lower(%s) OR lower(r.event_company) = lower(%s)))) "
-        "ORDER BY r.started_at DESC LIMIT 3",
-        (event.start_utc, event.key, event.company_domain, event.company_domain,
-         event.company, event.company, event.company))
+        "OR ((r.company_domain IS NULL OR r.company_domain = '') "
+        "AND (coalesce(r.company, '') <> '' OR coalesce(r.event_company, '') <> ''))) "
+        "ORDER BY r.started_at DESC LIMIT 40",
+        (event.start_utc, event.key, event.company_domain, event.company_domain))
     lines, urls = [], []
-    for provider, external_id, title, started, share_url, sealed in await cursor.fetchall():
+    for provider, external_id, title, started, share_url, sealed in same_company_rows(
+            await cursor.fetchall(), event.company, event.company_domain)[:3]:
         try:
             data = json.loads(google_oauth.decrypt(key, sealed))
         except (google_oauth.ReconnectNeeded, ValueError):

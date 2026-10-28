@@ -295,8 +295,8 @@ async def run_queue(connection: Any, fetch: Fetch = fathom_fetch, process: Proce
             except Exception:  # noqa: BLE001 - re-fetch instead
                 meeting = None
         if meeting is None and row["provider"] == "phone":  # Kept by VALR (app/phone_recordings.py).
-            from app import phone_recordings
-            meeting = await phone_recordings.sealed_meeting(connection, row["external_id"])
+            from app.notetakers import history
+            meeting = await history.kept_meeting(connection, row["provider"], row["external_id"])
         if meeting is None:
             meeting = await asyncio.to_thread(fetch, row["provider"], row["external_id"])
         if meeting is None:
@@ -369,7 +369,8 @@ async def run_history(connection: Any, fetch: FetchAsync = provider_fetch, proce
             logger.warning("VALR history fetch failed: %s", type(error).__name__)
             meeting = None
     if meeting is None:
-        label = {"fathom": "Fathom", "fireflies": "Fireflies"}.get(row["provider"], "the notetaker")
+        label = {"fathom": "Fathom", "fireflies": "Fireflies", "phone": "your phone recording"}.get(
+            row["provider"], "the notetaker")
         await set_status(connection, row["provider"], row["external_id"], "failed",
                          detail=f"Couldn't read this recording's transcript from {label}.")
         return "failed"

@@ -625,7 +625,10 @@ def test_stored_rounds_uses_live_transcripts_and_exact_company(monkeypatch):
             assert "lower(r.company_domain) = lower(%s)" in sql
             assert "notetaker_hidden" in sql and "r.started_at < %s" in sql
             assert args[2:4] == ("acme.com", "acme.com")
-            self.rows = [("fathom", "r1", "Earlier technical round", "2026-10-01", "https://fathom.video/share/r1", "sealed")]
+            self.rows = [("fathom", "r1", "Earlier technical round", "2026-10-01", "https://fathom.video/share/r1", "sealed",
+                          "acme.com", "Acme", None),
+                         ("fathom", "r2", "Other company round", "2026-09-01", "https://fathom.video/share/r2", "sealed",
+                          "other.example", "Acme", None)]
             return self
         async def fetchall(self):
             return self.rows
@@ -633,6 +636,32 @@ def test_stored_rounds_uses_live_transcripts_and_exact_company(monkeypatch):
     text, urls = asyncio.run(private_sources.stored_rounds(Connection(), event))
     assert "transcript excerpts" in text and "idempotency key" in text
     assert urls == ["https://fathom.video/share/r1"]
+
+
+def test_stored_rounds_include_a_phone_call_matched_by_company_name(monkeypatch):
+    # A phone call has no domain: only its company (calendar, lead or resolver) names the employer,
+    # often in another form than the calendar's ("Acme Robotics Pvt Ltd" vs "Acme Robotics").
+    import asyncio
+    from app import google_oauth
+    monkeypatch.setenv("VALR_TOKEN_KEY", "test-only")
+    monkeypatch.setattr(google_oauth, "decrypt", lambda key, sealed: json.dumps({"turns": [
+        {"speaker": "Asha", "text": "What is your notice period and expected CTC?"},
+        {"speaker": "Candidate", "text": "Thirty days."}]}))
+
+    class Connection:
+        async def execute(self, sql, args):
+            self.rows = [("phone", "p1", "Phone call with Asha", "2026-10-02", "", "sealed", "", "Acme Robotics Pvt Ltd", None),
+                         ("phone", "p2", "Phone call with Ravi", "2026-10-03", "", "sealed", "", "Acmex Foods", None),
+                         ("phone", "p3", "Phone call", "2026-10-04", "", "sealed", None, None, "Acme Robotics")]
+            return self
+
+        async def fetchall(self):
+            return self.rows
+    event = SimpleNamespace(company="Acme Robotics", company_domain="acme-robotics.example",
+                            start_utc="2026-10-20T12:00:00Z", key="current")
+    text, urls = asyncio.run(private_sources.stored_rounds(Connection(), event))
+    assert urls == ["valr://recording/phone/p1", "valr://recording/phone/p3"]
+    assert "expected CTC" in text
 
 
 def test_fathom_retrieves_questions_from_matching_recording(monkeypatch):

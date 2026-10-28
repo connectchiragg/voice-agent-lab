@@ -722,6 +722,9 @@ class Processor:
         company, how = await self.company(connection, recording, meeting, event, row.get("other_name") or "",
                                           candidate)
         recording.company = company
+        if company:  # The coach's classifier sees only the call; this is who it was with (calendar, lead, resolver).
+            meeting["company_hint"] = company
+            await mark(connection, upload_id, meeting=google_oauth.encrypt(key, json.dumps(meeting)))
         await pipeline.intake(connection, recording, "upload", hook=self.hook or default_hook(connection),
                               match=lambda r: _same(event))
         if how:

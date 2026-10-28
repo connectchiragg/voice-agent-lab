@@ -662,7 +662,7 @@ def build_blocks(events: list[SlotEvent], recorded: dict[str, dict[str, Any]],
             ckey = (slot or {}).get("company_key")
             ran = bool(slot and "interviewers_by_email" in parts and slot.get("status") in READY)
             rows.append({
-                "ref": slot_workflow_id(key), "title": scrub(event.title),
+                "ref": slot_workflow_id(key), "key": key, "title": scrub(event.title),
                 "company": scrub(event.company), "start": iso(parse(event.start_utc)),
                 "end": iso(parse(event.end_utc)),
                 "status": slot_status(event, slot, slot_jobs[0] if slot_jobs else None, state, now),
