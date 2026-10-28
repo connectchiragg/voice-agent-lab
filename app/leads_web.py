@@ -23,12 +23,13 @@ The page and its JSON need the owner's Access login (app/valr_dashboard.owner).
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 import json
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Request, Response
@@ -117,9 +118,38 @@ async def gmail_push(request: Request) -> Response:
 
 # The page and its data.
 
+BUILD_TTL = timedelta(minutes=2)
+_built: dict[str, Any] = {}  # "entry": (fingerprint, built at, leads): one per process.
+
+
+async def fingerprint(connection: Any) -> tuple[Any, ...] | None:
+    """What leads.build reads, in one cheap query: the touchpoints and the owner's corrections."""
+    try:
+        cursor = await connection.execute(
+            "SELECT (SELECT count(*) FROM lead_touchpoints), (SELECT max(updated_at) FROM lead_touchpoints), "
+            "(SELECT count(*) FROM lead_overrides), (SELECT max(id) FROM lead_overrides)")
+        row = await cursor.fetchone()
+    except Exception:  # noqa: BLE001 - then build afresh.
+        return None
+    return tuple(row) if row else None
+
+
 async def current(connection: Any, now: datetime) -> list[leads.Lead]:
+    """Every lead, built from the touchpoints. leads.build is CPU-heavy (over a second for a
+    couple of thousand touches): it runs in a thread, so the event loop isn't blocked (QA B6),
+    and its result is reused while nothing changed, for up to BUILD_TTL (temperatures and
+    expiry move with the clock). Callers only read the leads."""
     await leads_store.setup(connection)
-    return leads.build(await leads_store.touches(connection), now, await leads_store.overrides(connection))
+    key = await fingerprint(connection)
+    hit = _built.get("entry")
+    if key is not None and hit and hit[0] == key and timedelta(0) <= now - hit[1] < BUILD_TTL:
+        return hit[2]
+    touches = await leads_store.touches(connection)
+    overrides = await leads_store.overrides(connection)
+    built = await asyncio.to_thread(leads.build, touches, now, overrides)
+    if key is not None:
+        _built["entry"] = (key, now, built)
+    return built
 
 
 async def collect(pool: Any, now: datetime | None = None) -> dict[str, Any]:
