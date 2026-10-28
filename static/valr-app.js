@@ -166,8 +166,12 @@ async function mountGlobe() {
     }
   }
   try {
+    // The lite globe has no update(): "Show closed" mounts it again with the closed ones.
     const module = await import(globe.dataset.fallback || "/static/valr-globe-lite.js");
-    module.mount(globe, data, {onSelect(lead) { choose(lead?.id); }});
+    const lite = () => module.mount(globe, {...data, leads: (data.leads || []).filter(l => l.status !== "closed" || toggle?.checked)},
+                                    {onSelect(lead) { choose(lead?.id); }});
+    let view = lite();
+    toggle?.addEventListener("change", () => { view?.destroy?.(); view = lite(); });
     globe.dataset.globeKind = "lite";
   } catch {}
 }

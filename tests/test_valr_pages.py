@@ -200,11 +200,18 @@ def test_home_hits_you_with_right_now(client):
     for gone in ("Status", "All good", "Nothing is broken", "Telegram", "To do", "live leads"):
         assert gone not in words, gone
     data = json.loads(page.split('id="leads-data">', 1)[1].split("</script>", 1)[0])
-    assert len(data["leads"]) == len(leads["leads"]) and {s["key"] for s in data["stages"]} >= {"offer", "interviewing"}
+    hidden = leads["closed"] + leads["expired"]
+    assert leads["expired"], "the sample needs an expired lead"
+    # The lite globe: live leads, then closed and inactive ones marked "closed" (drawn with the toggle).
+    assert [r["id"] for r in data["leads"]] == [r["id"] for r in leads["leads"] + hidden]
+    assert {r["id"] for r in data["leads"] if r["status"] == "closed"} == {r["id"] for r in hidden}
+    assert {s["key"] for s in data["stages"]} >= {"offer", "interviewing"}
     raw = json.loads(page.split('id="leads-raw">', 1)[1].split("</script>", 1)[0])
-    # Live and closed (drawn only with "Show closed"); expired left out; no people, no links.
-    assert {lead["id"] for lead in raw["leads"]} == {r["id"] for r in leads["leads"] + leads["closed"]}
-    assert {lead["id"] for lead in raw["leads"] if lead["status"] == "closed"} == {r["id"] for r in leads["closed"]}
+    # Live, closed and expired ("inactive": Chirag ticked "Show closed" and saw none of them), the
+    # last two drawn only with "Show closed"; no people, no links.
+    assert {lead["id"] for lead in raw["leads"]} == {r["id"] for r in leads["leads"] + hidden}
+    assert {lead["id"] for lead in raw["leads"] if lead["status"] == "closed"} == {r["id"] for r in hidden}
+    assert f'Show closed <span class="num">{len(hidden)}</span>' in page
     assert all({"temperature", "band", "stage", "last_touch_at"} <= set(lead) for lead in raw["leads"])
     assert set(raw) == {"leads"}
 
