@@ -105,6 +105,24 @@ export function renderList(doc, box, items, onOpen, origin = "") {
   }
 }
 
+// A bell item's click: navigate at once; the read mark goes with keepalive, so it lands even as
+// the page unloads (awaiting it first sometimes marked the item read without opening it).
+export function opener({mark, show, cleared, go}) {
+  return (item, href) => {
+    if (!item.read) {
+      item.read = true;
+      cleared(item.id);
+      mark(item.id).then(data => { if (!href) show(data.unread); }).catch(() => { /* the next poll says */ });
+    }
+    if (href) go(href);
+  };
+}
+
+// Nothing unread: the Leads tab's dot and the leads' email dots go too (they stayed until a reload).
+export function dropLeadDots(doc, unread) {
+  if (unread === 0) doc.querySelectorAll("[data-lead-dot], [data-unread-lead]").forEach(node => node.remove());
+}
+
 const csrf = () => document.querySelector('meta[name="csrf-token"]')?.content ?? "";
 
 async function api(url, body, keepalive = false) {
@@ -132,24 +150,15 @@ function startBell() {
     const text = badgeCount(unread, 0);
     document.querySelectorAll("[data-notif-count]").forEach(node => { node.textContent = text; });
     bell.classList.toggle("has-unread", Boolean(text));
+    dropLeadDots(document, unread);
   };
   const cleared = id => document.querySelectorAll(`[data-notif-id="${CSS.escape(String(id))}"]`)
     .forEach(node => { node.classList.remove("unread"); node.querySelector(".sr-only")?.remove(); });
-  const open = async (item, href) => {
-    if (href) {  // Go at once; the read mark still lands (keepalive), it doesn't hold up the tap.
-      if (!item.read) api("/valr/api/notifications/read", {ids: [item.id]}, true).catch(() => {});
-      item.read = true;
-      cleared(item.id);
-      document.dispatchEvent(new CustomEvent("valr:leaving", {detail: {href}}));
-      location.href = href;
-      return;
-    }
-    if (!item.read) {
-      item.read = true;
-      cleared(item.id);
-      try { show((await api("/valr/api/notifications/read", {ids: [item.id]})).unread); } catch { /* still open it */ }
-    }
-  };
+  const open = opener({mark: id => api("/valr/api/notifications/read", {ids: [id]}, true), show, cleared,
+                       go: href => {  // Tell the tap layer (valr-tap.js) we are leaving, then go at once.
+                         document.dispatchEvent(new CustomEvent("valr:leaving", {detail: {href}}));
+                         location.href = href;
+                       }});
   // Server-rendered items (the panel before it loads): the same click rule.
   document.addEventListener("click", event => {
     const link = event.target.closest("[data-notif-item]");

@@ -101,7 +101,22 @@ def merge_turns(turns: list[dict]) -> list[dict]:
 
 
 def is_candidate(speaker: str, candidate: str) -> bool:
-    return candidate.lower() in (speaker or "").lower()
+    """Whether this transcript speaker is the candidate. The full name inside the label
+    ("Asha Rao (host)") or the same first name with the rest left out or as initials ("Asha",
+    "Asha R."): notetakers label people by their account's display name, which often isn't the
+    full name in the Profile. With the exact match only, most likely no turn counted as his in
+    13 of the 25 live interviews (each had a transcript, yet its impression coverage was "none"),
+    so Progress's impression figures stayed at the seed's 7. A different surname ("Asha Mehta")
+    is someone else."""
+    label, name = (speaker or "").lower(), (candidate or "").lower().strip()
+    if not name or not label:
+        return False
+    if name in label:
+        return True
+    said, mine = re.findall(r"[^\W\d_]+", label), re.findall(r"[^\W\d_]+", name)
+    if not said or not mine or said[0] != mine[0] or len(mine) < 2:
+        return False
+    return all(any(w == x or (len(w) == 1 and x.startswith(w)) for x in mine[1:]) for w in said[1:])
 
 
 def speaking_metrics(turns: list[dict], candidate: str) -> dict | None:

@@ -87,6 +87,8 @@ from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from app import schema
+
 logger = logging.getLogger("valr")
 
 DEDUPE = timedelta(minutes=10)
@@ -409,7 +411,9 @@ class Store:
         self.c = connection
 
     async def setup(self) -> None:
-        await self.c.execute(SCHEMA)
+        """The table, once per process (app/schema.py); stored items of removed kinds, every time
+        (a plain UPDATE, no DDL lock)."""
+        await schema.once(self.c, "notifications", lambda: self.c.execute(SCHEMA))
         await self.hide_removed()
 
     async def hide_removed(self) -> None:

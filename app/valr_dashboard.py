@@ -128,7 +128,7 @@ async def google_start(request: Request) -> RedirectResponse:
     await owner(request)
     settings = google_oauth.OAuthSettings.from_env()
     if settings is None:
-        raise HTTPException(503, "Google OAuth is not configured (client id, secret, VALR_TOKEN_KEY).")
+        raise HTTPException(503, "Google sign-in isn't set up on the server yet.")
     return RedirectResponse(google_oauth.consent_url(settings, google_oauth.make_state(
         settings.token_key)), status_code=303, headers=NO_CACHE)
 
@@ -183,7 +183,7 @@ async def state(request: Request) -> JSONResponse:
 
 async def state_view() -> dict[str, Any]:
     if research.pool is None:
-        raise HTTPException(503, "Postgres is unavailable.")
+        raise HTTPException(503, "VALR can't reach its data right now. Try again in a minute.")
     return await valr_view.collect(research.pool)
 
 
@@ -243,7 +243,7 @@ async def sync_calendar(request: Request) -> JSONResponse:
     await action_owner(request)
     started = await interviews.sync_now("dashboard")
     if not started:
-        raise HTTPException(503, "Temporal is unavailable: the sync was not started.")
+        raise HTTPException(503, "VALR's background service isn't answering, so the sync didn't start. Try again in a minute.")
     logger.info("VALR calendar sync requested from the dashboard")
     return JSONResponse({"ok": True, "message": "Calendar sync started."}, headers=NO_CACHE)
 
@@ -256,7 +256,7 @@ async def set_dials(request: Request) -> JSONResponse:
     except ValidationError as error:
         raise HTTPException(400, "Expected {\"paused\": true|false}.") from error
     if research.pool is None:
-        raise HTTPException(503, "Postgres is unavailable.")
+        raise HTTPException(503, "VALR can't reach its data right now. Try again in a minute.")
     from datetime import timedelta
     until = datetime.now(timezone.utc) + timedelta(days=body.days) if body.paused and body.days else None
     async with research.pool.connection() as connection:
@@ -290,7 +290,7 @@ async def set_reach(request: Request) -> JSONResponse:
     except ValidationError as error:
         raise HTTPException(400, "Expected {\"mode\": \"heads_up\"|\"call\"}.") from error
     if research.pool is None:
-        raise HTTPException(503, "Postgres is unavailable.")
+        raise HTTPException(503, "VALR can't reach its data right now. Try again in a minute.")
     from app import owner as profile
     if body.mode == "call" and not profile.phone():
         raise HTTPException(400, "Add your phone first: VALR has no number to call.")
@@ -321,7 +321,7 @@ async def set_prep(request: Request) -> JSONResponse:
     except ValidationError as error:
         raise HTTPException(400, "Expected {ref, item, done}.") from error
     if research.pool is None:
-        raise HTTPException(503, "Postgres is unavailable.")
+        raise HTTPException(503, "VALR can't reach its data right now. Try again in a minute.")
     async with research.pool.connection() as connection:
         await interview_store.setup(connection)
         await interview_store.set_prep_check(connection, body.ref, interview_store.prep_item(body.item), body.done)
@@ -335,10 +335,10 @@ async def call_me_now(request: Request) -> JSONResponse:
     with nothing coming up, a general chat. Rings once, no retries."""
     await action_owner(request)
     if research.pool is None:
-        raise HTTPException(503, "Postgres is unavailable.")
+        raise HTTPException(503, "VALR can't reach its data right now. Try again in a minute.")
     client = await callbacks.temporal()
     if client is None:
-        raise HTTPException(503, "Temporal is unavailable.")
+        raise HTTPException(503, "VALR's background service isn't answering. Try again in a minute.")
     from app import call_now
     from app.interview_worker import owner_key, owner_phone
     if not owner_phone():
@@ -368,10 +368,10 @@ async def refresh_slot(request: Request, ref: str) -> JSONResponse:
     if not ref.startswith("slot-") or len(ref) > 40:
         raise HTTPException(404, "Unknown interview.")
     if research.pool is None:
-        raise HTTPException(503, "Postgres is unavailable.")
+        raise HTTPException(503, "VALR can't reach its data right now. Try again in a minute.")
     client = await callbacks.temporal()
     if client is None:
-        raise HTTPException(503, "Temporal is unavailable.")
+        raise HTTPException(503, "VALR's background service isn't answering. Try again in a minute.")
     now = datetime.now(timezone.utc)
     async with research.pool.connection() as connection:
         await calendar_sync.setup(connection)

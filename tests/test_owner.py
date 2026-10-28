@@ -176,3 +176,19 @@ def test_refresh_does_not_import_the_app_research_module(monkeypatch):
     import asyncio
     asyncio.run(owner.refresh())
     assert "app.research" not in sys.modules
+
+
+def test_past_dates_are_on_the_owners_day_not_the_utc_one():
+    """QA B3: an interview at 01:30 IST (20:00 UTC the day before) showed the day before."""
+    from datetime import datetime, timezone
+    from zoneinfo import ZoneInfo
+
+    from app.valr_page import Clock, local_day, short_day
+    clock = Clock("Asia/Kolkata", datetime(2026, 10, 28, 6, tzinfo=timezone.utc))
+    assert clock.short_date("2026-10-27T20:00:00+00:00") == "28 Oct"
+    assert clock.short_date("2026-10-27T18:00:00+00:00") == "27 Oct"  # 23:30 IST.
+    assert clock.short_date("2026-10-05") == "5 Oct"  # A bare date stays.
+    assert short_day("2026-10-27T20:00:00+00:00", ZoneInfo("Asia/Kolkata")) == "28 Oct"
+    assert short_day("2026-10-28T03:00:00+00:00", ZoneInfo("America/Los_Angeles")) == "27 Oct"
+    assert local_day("2026-10-27T20:00:00+00:00", ZoneInfo("Asia/Kolkata")) == "2026-10-28"
+    assert local_day("2026-10-05") == "2026-10-05" and short_day("soon") == "soon"

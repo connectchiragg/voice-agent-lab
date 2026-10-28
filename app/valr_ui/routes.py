@@ -7,8 +7,7 @@ POST-only, owner-only and CSRF-checked in app/valr_dashboard.py.
     /valr/interviews/<slot ref>    one upcoming interview
     /valr/interviews/past          past interviews
     /valr/interviews/past/<id>     one past interview: recording, impression, feedback
-    /valr/interviews/processes     every hiring process on one replayable timeline, and its patterns
-                                   (owner only; its data: GET /valr/api/processes)
+    /valr/interviews/processes     redirects to /valr/interviews (the timeline was removed)
     /valr/leads                    tabs, filters (?tab=&stage=&q=) and list (?lead=<id> opens one and
                                    reads its notifications)
     /valr/progress                 trends, then what they mean (/valr/performance redirects here)
@@ -33,7 +32,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from app import owner, research, valr_dashboard, valr_page
-from app.valr_ui import (attention, contracts, home, interviews, leads, past, performance, processes, profile,
+from app.valr_ui import (attention, contracts, home, interviews, leads, past, performance, profile,
                          settings, shell)
 
 logger = logging.getLogger("uvicorn.error")
@@ -41,9 +40,9 @@ router = APIRouter()
 # The leads branch's loader, "module:function" -> async fn(pool) -> its /valr/api/leads JSON.
 LEADS_SOURCE = "app.leads_web:collect"
 TITLES = {"home": "Home", "interviews": "Interviews", "interview": "Interview", "past": "Past interviews",
-          "past_one": "Past interview", "processes": "Processes", "leads": "Leads", "progress": "Progress",
+          "past_one": "Past interview", "leads": "Leads", "progress": "Progress",
           "settings": "Settings", "profile": "Profile"}
-NAV_OF = {"interview": "interviews", "past": "interviews", "past_one": "interviews", "processes": "interviews",
+NAV_OF = {"interview": "interviews", "past": "interviews", "past_one": "interviews",
           "profile": "settings"}
 NO_NOTES = {"items": [], "unread": 0, "leads": {}}
 
@@ -196,6 +195,19 @@ async def with_progress(view: dict[str, Any], leads_: dict[str, Any] | None = No
 
 
 RECORDINGS_DAYS = 365
+AWAITING_DAYS = 30
+AWAITING_MAX = 6
+
+
+async def awaiting_review(view: dict[str, Any]) -> list[dict[str, Any]]:
+    """Recent recordings (Past interviews has them at once) the coach is still to score, newest
+    first: Progress lists them as "Awaiting review" instead of leaving them out until scored.
+    Calls that will never be scored (not an interview, no transcript) are not listed."""
+    since = (datetime.now(timezone.utc) - timedelta(days=AWAITING_DAYS)).isoformat()
+    ivs = ((await with_recordings(view)).get("performance") or {}).get("interviews") or []
+    pending = [iv for iv in ivs if iv.get("recording_only") and iv.get("review") == "pending"
+               and str(iv.get("date") or "") >= since[:10]]
+    return list(reversed(pending))[:AWAITING_MAX]
 
 
 def is_owner(email: str) -> bool:
@@ -294,7 +306,8 @@ async def with_recordings(view: dict[str, Any]) -> dict[str, Any]:
                              or notetaker_routes.company_of(r.get("company") or "", r.get("event_company") or ""))
              for r in fresh]
     extra += [iv for iv in no_recording if tuple(iv["id"].partition(":")[::2]) not in gone]
-    merged = sorted(scored + extra, key=lambda iv: str(iv.get("date") or "")[:10])
+    zone = owner.zone()  # Sorted by his day, as the list shows it (B3), not the UTC one.
+    merged = sorted(scored + extra, key=lambda iv: valr_page.local_day(str(iv.get("date") or ""), zone))
     return {**view, "performance": {**perf, "interviews": merged}}
 
 
@@ -358,9 +371,9 @@ def e_(text: str) -> str:
 
 
 async def render(request: Request, name: str, **params: str) -> HTMLResponse:
-    # Leads and Processes (recruiters' addresses and subjects), Settings and Profile (the owner's own details):
+    # Leads (recruiters' addresses and subjects), Settings and Profile (the owner's own details):
     # owner only, like GET /valr/api/leads.
-    email = await (valr_dashboard.owner if name in ("leads", "processes", "settings", "profile")
+    email = await (valr_dashboard.owner if name in ("leads", "settings", "profile")
                    else valr_dashboard.viewer)(request)
     _leads_memo.set({})
     try:
@@ -413,9 +426,6 @@ async def render(request: Request, name: str, **params: str) -> HTMLResponse:
             title = "Call recording"
         else:
             body, status = not_found("That interview isn't in your history.", "/valr/interviews/past", "Past interviews"), 404
-    elif name == "processes":
-        past_count = len(((await with_recordings(await with_details(view))).get("performance") or {}).get("interviews") or [])
-        body = processes.page(await processes_data(), interviews.tabs("processes", past_count))
     elif name == "leads":
         body = leads.page(view, clock, await leads_once(), query.get("stage", "")[:20],
                           query.get("q", "")[:80], selected, query.get("status", "")[:10],
@@ -423,7 +433,7 @@ async def render(request: Request, name: str, **params: str) -> HTMLResponse:
                           tab=query.get("tab", "")[:6], closed=query.get("closed") == "1", unread=notes["leads"])
     elif name == "progress":
         found = await leads_once()
-        body = performance.page(await with_progress(view, found), clock, found)
+        body = performance.page(await with_progress(view, found), clock, found, await awaiting_review(view))
     elif name == "profile":
         body = profile.page(view, clock, email)
     else:
@@ -446,23 +456,58 @@ async def past_page(request: Request) -> HTMLResponse:
     return await render(request, "past")
 
 
-async def processes_data() -> dict[str, Any]:
-    """Every hiring process (app/valr_ui/processes.py), from the leads' touchpoints."""
-    raw = (await leads_once()).get("raw")
-    return processes.timeline(raw, datetime.now(timezone.utc))
+VERSION_SQL = (
+    "SELECT (SELECT md5(coalesce(string_agg(concat_ws('|', id, company, stage, status, temperature, last_touch_at, "
+    "next_step), ',' ORDER BY id), '')) FROM leads), "
+    "(SELECT concat_ws('/', count(*), max(id)) FROM lead_overrides), "
+    "(SELECT concat_ws('/', count(*), max(received_at), max(company), max(event_company)) FROM notetaker_recordings), "
+    "(SELECT count(*) FROM notetaker_hidden), "
+    "(SELECT concat_ws('/', count(*), max(updated_at)) FROM post_call_reports), "
+    "(SELECT concat_ws('/', max(id), count(*) FILTER (WHERE read_at IS NULL)) FROM notifications)")
 
 
-@router.get("/valr/interviews/processes", response_class=HTMLResponse)
-async def processes_page(request: Request) -> HTMLResponse:
-    return await render(request, "processes")
+def performance_stamp() -> str:
+    """performance.json's size and change time: the coach rewrites it after each review."""
+    import os
+    from pathlib import Path
+    try:
+        info = Path(os.getenv("VALR_PERFORMANCE_PATH") or "/data/performance.json").expanduser().stat()
+    except OSError:
+        return ""
+    return f"{info.st_mtime_ns}/{info.st_size}"
 
 
-@router.get("/valr/api/processes")
-async def processes_json(request: Request) -> JSONResponse:
-    """The Processes tab's data: processes, patterns and timeline events (titles, companies and
-    kinds only, never an email's text). Owner only."""
-    await valr_dashboard.owner(request)
-    return JSONResponse(await processes_data(), headers=valr_dashboard.NO_CACHE)
+async def data_version() -> str:
+    """A short fingerprint of what Progress, Leads, Past and Home show beyond /valr/api/state:
+    the leads, his corrections, the recordings (and hidden ones), the coach's reviews, the
+    notifications and performance.json. One cheap query; "" when Postgres can't say."""
+    if research.pool is None:
+        return ""
+    try:
+        async with research.pool.connection() as connection:
+            cursor = await connection.execute(VERSION_SQL)
+            row = await cursor.fetchone()
+    except Exception as error:  # noqa: BLE001 - the page just doesn't refresh itself this time.
+        logger.warning("VALR data version unavailable: %s", type(error).__name__)
+        return ""
+    import hashlib
+    text = "|".join(str(x) for x in (row or ())) + "|" + performance_stamp()
+    return hashlib.sha256(text.encode()).hexdigest()[:16]
+
+
+@router.get("/valr/api/version")
+async def version_json(request: Request) -> JSONResponse:
+    """The pages' quiet refresh (static/valr.js) polls this with /valr/api/state and reloads
+    Progress, Leads, Past interviews and Home when it changes (the iPhone app has no reload)."""
+    await valr_dashboard.viewer(request)
+    return JSONResponse({"version": await data_version()}, headers=valr_dashboard.NO_CACHE)
+
+
+@router.get("/valr/interviews/processes")
+async def processes_page(request: Request) -> RedirectResponse:
+    """The Processes timeline was removed; old links and bookmarks land on Interviews."""
+    await valr_dashboard.viewer(request)
+    return RedirectResponse("/valr/interviews", status_code=301)
 
 
 @router.get("/valr/interviews/past/{slug}", response_class=HTMLResponse)

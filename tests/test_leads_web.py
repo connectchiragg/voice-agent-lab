@@ -212,3 +212,46 @@ def test_overrides_from_the_panel(page, monkeypatch):
     assert send(ids["Kite"], {"action": "explode"}).status_code == 400
     assert [(s[1], s[2]) for s in stored] == [("dismiss", ""), ("stage", "offer"), ("merge", ids["Kite"])]
     assert stored[0][3] == ["gmail:n1"] and stored[0][4] == OWNER
+
+
+def test_leads_are_built_off_the_event_loop_and_reused_while_nothing_changed(monkeypatch):
+    """QA B6: leads.build (over a second for a couple of thousand touches) blocked the loop on
+    every Home, Leads, Past and Progress load."""
+    import asyncio
+    import threading
+    from datetime import timedelta
+
+    from app import leads_store
+    state = {"fp": (10, NOW, 0, None)}
+    threads, builds = [], []
+
+    class Cursor:
+        async def fetchone(self):
+            return state["fp"]
+
+    class Connection:
+        async def execute(self, query, params=None):
+            return Cursor()
+
+    async def nothing(*args, **kwargs):
+        return []
+
+    def build(touches, now, overrides=None):
+        threads.append(threading.current_thread() is threading.main_thread())
+        builds.append(now)
+        return [object()]
+    monkeypatch.setattr(leads_store, "setup", nothing)
+    monkeypatch.setattr(leads_store, "touches", nothing)
+    monkeypatch.setattr(leads_store, "overrides", nothing)
+    monkeypatch.setattr(leads, "build", build)
+    monkeypatch.setattr(leads_web, "_built", {})
+
+    async def main():
+        c = Connection()
+        first = await leads_web.current(c, NOW)
+        assert await leads_web.current(c, NOW + timedelta(seconds=30)) is first  # Unchanged: reused.
+        state["fp"] = (11, NOW, 0, None)  # A new touchpoint.
+        await leads_web.current(c, NOW + timedelta(seconds=40))
+        await leads_web.current(c, NOW + timedelta(minutes=5))  # Stale: temperatures move with time.
+    asyncio.run(main())
+    assert len(builds) == 3 and threads == [False, False, False]

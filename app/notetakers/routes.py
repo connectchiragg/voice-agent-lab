@@ -65,7 +65,7 @@ def provider_or_404(provider: str) -> str:
 
 def pool():
     if research.pool is None:
-        raise HTTPException(503, "Postgres is unavailable.")
+        raise HTTPException(503, "VALR can't reach its data right now. Try again in a minute.")
     return research.pool
 
 

@@ -16,7 +16,7 @@ from urllib.parse import quote
 
 from app.company_names import NOT_IDENTIFIED
 from app.valr_page import OUTCOME, Clock, e, score, short_day
-from app.valr_ui import charts, trends
+from app.valr_ui import attention, charts, trends
 from app.valr_ui.shell import empty_state, icon, menu, menu_item, page_head
 from app.valr_view import label
 
@@ -139,10 +139,28 @@ def early_note(perf: dict[str, Any], scored: int) -> str:
     return f'<section class="card early" id="trends-title">{body}</section>'
 
 
-def page(view: dict[str, Any], clock: Clock, leads: dict[str, Any] | None = None) -> str:
+def awaiting(pending: list[dict[str, Any]], clock: Clock) -> str:
+    """Recent recordings the coach hasn't scored yet: listed, never in a chart or an average."""
+    if not pending:
+        return ""
+    from app.valr_ui.interviews import past_name
+    rows = "".join(
+        f'<li><a class="row-link" href="/valr/interviews/past/{e(attention.past_slug(iv))}">'
+        f'<span class="row-when"><span class="num">{e(clock.short_date(iv["date"]) if iv.get("date") else "")}</span></span>'
+        f'<span class="row-main"><span class="row-title">{e(past_name(iv))}</span></span>'
+        f'<span class="row-end"><span class="chip tone-muted">Awaiting review</span></span></a></li>' for iv in pending)
+    return (f'<section class="section awaiting" aria-labelledby="await-title"><div class="section-head">'
+            f'<h2 id="await-title" class="section-title">Awaiting review</h2></div>'
+            f'<p class="muted">Recorded, not scored yet. Each joins the charts once the coach has reviewed it.</p>'
+            f'<ul class="rows card">{rows}</ul></section>')
+
+
+def page(view: dict[str, Any], clock: Clock, leads: dict[str, Any] | None = None,
+         pending: list[dict[str, Any]] | None = None) -> str:
     perf = view["performance"]
+    waiting = awaiting(pending or [], clock)
     if not perf["available"]:
-        return page_head("Progress") + empty_state(
+        return page_head("Progress") + waiting + empty_state(
             "chart", "Your progress appears after your first recorded interview.",
             "Connect a notetaker; VALR reviews each recording and tells you what is improving and what to practise.",
             '<a class="btn primary" href="/valr/settings#notetakers">Connect a notetaker</a>')
@@ -150,10 +168,10 @@ def page(view: dict[str, Any], clock: Clock, leads: dict[str, Any] | None = None
                                                          attrs=' download="valr-progress.csv"')]))
     scored = sum(1 for iv in perf["interviews"] if iv.get("overall") is not None)
     if scored < trends.MIN_POINTS:
-        return head + early_note(perf, scored) + insights(perf)
+        return head + waiting + early_note(perf, scored) + insights(perf)
     labels = {k: label(k) for k in trends.SKILLS}
     t = trends.build(perf["interviews"], labels, leads)
-    return f"""{head}
+    return f"""{head}{waiting}
 <section class="section trends" aria-labelledby="trends-title">
   <h2 id="trends-title" class="sr-only">Trends</h2>
   <div class="tc-grid">{charts.all_charts(t)}</div>

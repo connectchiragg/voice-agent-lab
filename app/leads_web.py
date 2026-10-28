@@ -29,7 +29,7 @@ import binascii
 import json
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Request, Response
@@ -112,15 +112,44 @@ async def gmail_push(request: Request) -> Response:
     if os.getenv("VALR_LEADS", "0") != "1":
         return Response(status_code=204)
     if not await start_sync("push", data["history_id"]):
-        raise HTTPException(503, "Temporal is unavailable.")
+        raise HTTPException(503, "VALR's background service isn't answering. Try again in a minute.")
     return Response(status_code=204)
 
 
 # The page and its data.
 
+BUILD_TTL = timedelta(minutes=2)
+_built: dict[str, Any] = {}  # "entry": (fingerprint, built at, leads): one per process.
+
+
+async def fingerprint(connection: Any) -> tuple[Any, ...] | None:
+    """What leads.build reads, in one cheap query: the touchpoints and the owner's corrections."""
+    try:
+        cursor = await connection.execute(
+            "SELECT (SELECT count(*) FROM lead_touchpoints), (SELECT max(updated_at) FROM lead_touchpoints), "
+            "(SELECT count(*) FROM lead_overrides), (SELECT max(id) FROM lead_overrides)")
+        row = await cursor.fetchone()
+    except Exception:  # noqa: BLE001 - then build afresh.
+        return None
+    return tuple(row) if row else None
+
+
 async def current(connection: Any, now: datetime) -> list[leads.Lead]:
+    """Every lead, built from the touchpoints. leads.build is CPU-heavy (over a second for a
+    couple of thousand touches): it runs in a thread, so the event loop isn't blocked (QA B6),
+    and its result is reused while nothing changed, for up to BUILD_TTL (temperatures and
+    expiry move with the clock). Callers only read the leads."""
     await leads_store.setup(connection)
-    return leads.build(await leads_store.touches(connection), now, await leads_store.overrides(connection))
+    key = await fingerprint(connection)
+    hit = _built.get("entry")
+    if key is not None and hit and hit[0] == key and timedelta(0) <= now - hit[1] < BUILD_TTL:
+        return hit[2]
+    touches = await leads_store.touches(connection)
+    overrides = await leads_store.overrides(connection)
+    built = await asyncio.to_thread(leads.build, touches, now, overrides)
+    if key is not None:
+        _built["entry"] = (key, now, built)
+    return built
 
 
 _schema_ready = False
@@ -160,7 +189,7 @@ def gmail_view(state: dict[str, Any], counts: dict[str, int], now: datetime) -> 
 
 async def view_or_503() -> dict[str, Any]:
     if research.pool is None:
-        raise HTTPException(503, "Postgres is unavailable.")
+        raise HTTPException(503, "VALR can't reach its data right now. Try again in a minute.")
     return await collect(research.pool)
 
 
@@ -214,7 +243,7 @@ async def lead_override(request: Request, lead_id: str) -> JSONResponse:
     except ValidationError as error:
         raise HTTPException(400, "Expected {action: dismiss|stage|merge|rename, stage?, into?, company?}.") from error
     if research.pool is None:
-        raise HTTPException(503, "Postgres is unavailable.")
+        raise HTTPException(503, "VALR can't reach its data right now. Try again in a minute.")
     try:
         async with research.pool.connection() as connection:
             message = await apply_override(connection, lead_id[:40], body, email, datetime.now(timezone.utc))
@@ -230,5 +259,5 @@ async def lead_override(request: Request, lead_id: str) -> JSONResponse:
 async def leads_sync(request: Request) -> JSONResponse:
     await valr_dashboard.action_owner(request)
     if not await start_sync("manual"):
-        raise HTTPException(503, "Temporal is unavailable: the sync was not started.")
+        raise HTTPException(503, "VALR's background service isn't answering, so the sync didn't start. Try again in a minute.")
     return JSONResponse({"ok": True, "message": "Gmail sync started."}, headers=valr_dashboard.NO_CACHE)

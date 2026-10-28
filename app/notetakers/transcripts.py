@@ -22,6 +22,7 @@ import os
 from typing import Any
 
 from app import google_oauth
+from app import schema
 
 logger = logging.getLogger("valr")
 
@@ -45,7 +46,8 @@ def token_key() -> str:
 
 
 async def setup(connection: Any) -> None:
-    await connection.execute(SCHEMA)
+    """The tables, once per process (app/schema.py)."""
+    await schema.once(connection, "notetaker_transcripts", lambda: connection.execute(SCHEMA))
 
 
 def turns_of(meeting: dict | None) -> list[dict[str, Any]]:

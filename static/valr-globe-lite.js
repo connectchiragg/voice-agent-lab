@@ -34,11 +34,17 @@ export function mount(el, data, {onSelect} = {}) {
   const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
   const canvas = document.createElement("canvas");
   canvas.setAttribute("aria-hidden", "true");
+  // Out of flow and sized by the box, never by its own pixels: a canvas in normal flow made the
+  // box taller each layout(), the ResizeObserver fired again, and Home grew ~480 px a second.
+  canvas.className = "globe-canvas";
+  Object.assign(canvas.style, {position: "absolute", inset: "0", width: "100%", height: "100%", display: "block"});
   el.append(canvas);
   const ctx = canvas.getContext("2d");
   const style = getComputedStyle(el);
   const color = name => style.getPropertyValue(name).trim() || "#a9aaf0";
   const stageColor = stage => color(`--st-${stage}`) || color("--signal");
+  // Closed and inactive leads ("Show closed") are grey, like the 3D globe's.
+  const leadColor = lead => (lead.status === "closed" ? color("--band-closed") || "#5e5f6e" : stageColor(lead.stage));
   const ink = color("--bone");
 
   // The planet: a Fibonacci sphere of faint dots.
@@ -54,7 +60,7 @@ export function mount(el, data, {onSelect} = {}) {
   const threads = [];
   const angle = (a, b) => Math.acos(Math.max(-1, Math.min(1, a[0] * b[0] + a[1] * b[1] + a[2] * b[2])));
   for (const n of leads) {
-    if (n.lead.stage === "closed") continue;
+    if (n.lead.stage === "closed" || n.lead.status === "closed") continue;
     let best = null, bestA = 1.3;
     for (const m of leads) {
       if (m === n || m.lead.stage !== n.lead.stage) continue;
@@ -71,6 +77,7 @@ export function mount(el, data, {onSelect} = {}) {
 
   function layout() {
     const box = el.getBoundingClientRect();
+    if (box.width === width && box.height === height && canvas.width) return;  // No feedback loop.
     width = box.width; height = box.height;
     dpr = Math.min(devicePixelRatio || 1, 2);
     canvas.width = Math.round(width * dpr);
@@ -142,7 +149,7 @@ export function mount(el, data, {onSelect} = {}) {
     for (const {n, s} of projected) {
       const [x, y, z] = s;
       const front = z > -0.05;
-      const c = stageColor(n.lead.stage);
+      const c = leadColor(n.lead);
       const size = (["interviewing", "final", "offer"].includes(n.lead.stage) ? 5 : 3.6) * (0.75 + Math.max(z, 0) * 0.4);
       ctx.globalAlpha = front ? 1 : 0.22;
       if (front) {

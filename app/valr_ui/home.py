@@ -27,18 +27,27 @@ def safe_json(data: Any) -> str:
     return json.dumps(data).replace("<", "\\u003c")
 
 
+def inactive(leads: dict[str, Any]) -> list[dict[str, Any]]:
+    """The leads "Show closed" adds: closed, then expired (gone inactive), as on the Leads page."""
+    return (leads.get("closed") or []) + (leads.get("expired") or [])
+
+
 def globe_json(leads: dict[str, Any]) -> str:
-    """The lite globe's data: the normalised leads (stage, company, next step)."""
-    return safe_json({"leads": leads.get("leads") or [], "stages": leads.get("stages") or []})
+    """The lite globe's data: the normalised leads (stage, company, next step); the closed and
+    inactive ones, marked "closed", are drawn only while "Show closed" is ticked."""
+    hidden = [{**r, "status": "closed"} for r in inactive(leads)]
+    return safe_json({"leads": (leads.get("leads") or []) + hidden, "stages": leads.get("stages") or []})
 
 
 def globe_leads(leads: dict[str, Any]) -> list[dict[str, Any]]:
-    """What the 3D globe draws: the live and the closed leads (closed hidden until the toggle),
-    one small record each. Expired leads, people and links stay out."""
+    """What the 3D globe draws: the live leads, then the closed and the expired ("inactive") ones,
+    both as status "closed" (hidden until the toggle, drawn grey), one small record each. People
+    and links stay out. Expired leads used to be left out here, so "Show closed" never showed an
+    inactive lead, although the Leads page's toggle includes them."""
     return [{"id": r["id"], "company": r["company"], "temperature": r["temperature"], "band": r["band"],
              "stage": r["stage_raw"] or r["stage"], "stage_label": r["stage_label"],
-             "last_touch_at": r["last_activity_at"], "status": "closed" if r["bucket"] == "closed" else "active"}
-            for r in (leads.get("leads") or []) + (leads.get("closed") or [])]
+             "last_touch_at": r["last_activity_at"], "status": "active" if r["bucket"] == "live" else "closed"}
+            for r in (leads.get("leads") or []) + inactive(leads)]
 
 
 def raw_json(leads: dict[str, Any]) -> str:
@@ -62,10 +71,10 @@ def band_legend(leads: dict[str, Any], show_closed: bool = False) -> str:
     items = "".join(
         f'<a class="legend-item" href="/valr/leads?tab=all&amp;band={e(b["key"])}" title="{e(b["meaning"])}">{band_sw(b["key"])}'
         f'{e(b["label"])} <span class="num">{b["count"]}</span></a>' for b in leads.get("bands") or [])
-    closed = leads.get("closed_band") or {}
-    toggle = (f'<label class="globe-toggle" title="{e(closed.get("meaning", ""))}"><input type="checkbox" data-globe-closed'
-              f'{" checked" if show_closed else ""}> Show closed <span class="num">{closed["count"]}</span></label>'
-              if closed.get("count") else "")
+    hidden = len(inactive(leads))
+    toggle = (f'<label class="globe-toggle" title="Won, not moving forward, or gone inactive"><input type="checkbox" data-globe-closed'
+              f'{" checked" if show_closed else ""}> Show closed <span class="num">{hidden}</span></label>'
+              if hidden else "")
     size = ('<span class="legend-size" aria-hidden="true"><i></i><i></i><i></i></span>'
             '<span class="legend-note">Bigger dot: further along</span>')
     return (f'<div class="band-legend" aria-label="Lead temperature">{items}</div>'

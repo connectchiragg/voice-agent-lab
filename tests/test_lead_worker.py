@@ -180,6 +180,8 @@ def world(monkeypatch, tmp_path):
             await connection.execute("DROP TABLE IF EXISTS gmail_state, lead_emails, lead_touchpoints, leads, "
                                      "lead_overrides, research_spend, research_jobs, calendar_events, "
                                      "calendar_state, oauth_tokens, notifications, notify_settings")
+        from app import schema
+        schema.forget()  # Dropped: the next setup creates them again (app/schema.py).
     asyncio.run(reset())
     return gmail, activities, connect, key
 

@@ -848,7 +848,8 @@ async def collect(pool: Any, now: datetime | None = None) -> dict[str, Any]:
         "push": push,
     }
     view["dials"] = await dial_counts(now)
-    perf, target = profile_files()
+    # Two JSON files read and merged on every page and every /valr/api/state poll: off the loop (QA B6).
+    perf, target = await asyncio.to_thread(profile_files)
     view["performance"] = performance(perf)
     view["pay_target"] = target
     view["owner_name"] = owner_name()

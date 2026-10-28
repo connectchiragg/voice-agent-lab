@@ -60,7 +60,7 @@ PHOTO_BODY_MAX = 2_900_000  # base64 of 2 MB, plus the JSON around it.
 
 def pool():
     if research.pool is None:
-        raise HTTPException(503, "Postgres is unavailable.")
+        raise HTTPException(503, "VALR can't reach its data right now. Try again in a minute.")
     return research.pool
 
 
@@ -191,7 +191,7 @@ async def logout_all(request: Request) -> JSONResponse:
     await valr_dashboard.action_owner(request)
     backend = store.backend()
     if backend is None:
-        raise HTTPException(503, "Postgres is unavailable.")
+        raise HTTPException(503, "VALR can't reach its data right now. Try again in a minute.")
     ended = await backend.end_all()
     logger.info("VALR signed out of every device (%d sessions)", ended)
     response = JSONResponse({"ok": True, "ended": ended, "next": "/login?signed_out=1",
@@ -272,7 +272,7 @@ async def google_sync(request: Request) -> JSONResponse:
     calendar = await interviews.sync_now("dashboard")
     gmail = await leads_web.start_sync("manual")
     if not calendar and not gmail:
-        raise HTTPException(503, "Temporal is unavailable: nothing was synced. Try again in a minute.")
+        raise HTTPException(503, "VALR's background service isn't answering, so nothing was synced. Try again in a minute.")
     what = " and ".join(w for w, ok in (("calendar", calendar), ("Gmail", gmail)) if ok)
     return JSONResponse({"ok": True, "message": f"Syncing your {what} now."}, headers=NO_CACHE)
 

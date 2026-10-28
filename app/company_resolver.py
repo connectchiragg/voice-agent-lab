@@ -35,6 +35,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable
 
 from app import company_names as names
+from app import schema
 
 logger = logging.getLogger("valr")
 MODEL = "claude-haiku-5-5"
@@ -309,7 +310,8 @@ def per_day() -> int:
 # Storage.
 
 async def setup(connection: Any) -> None:
-    await connection.execute(SCHEMA)
+    """The tables, once per process (app/schema.py)."""
+    await schema.once(connection, "company_resolver", lambda: connection.execute(SCHEMA))
 
 
 async def cached(connection: Any, fingerprint: str) -> Decision | None:

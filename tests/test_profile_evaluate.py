@@ -313,3 +313,19 @@ def test_briefing_prompt_block(tmp_path):
     (tmp_path / "e.json").write_text(json.dumps({"brief_text": "Trend: improving."}))
     block = briefing.prompt_block(tmp_path / "p.json", tmp_path / "e.json")
     assert "## Profile\nSam, Bengaluru." in block and "Trend: improving." in block
+
+
+def test_the_candidate_is_found_under_a_shorter_display_name():
+    """QA K1: impressions stayed at the seed's 7 while interviews went 13 -> 25; the new ones had
+    transcripts but coverage "none" (no turn matched the full name)."""
+    from app.profile import impressions
+    from app.profile.evaluate import is_candidate
+    for label in ("Asha Rao", "Asha Rao (host)", "Asha", "Asha R.", "asha r"):
+        assert is_candidate(label, "Asha Rao"), label
+    for label in ("Asha Mehta", "Ravi", "Ashan", "Speaker 1", ""):
+        assert not is_candidate(label, "Asha Rao"), label
+    assert not is_candidate("Asha", "") and is_candidate("Asha", "Asha")
+    turns = [{"speaker": "Asha" if i % 2 else "Interviewer", "start": i * 20.0,
+              "text": "We should talk about the design trade-offs here in some detail."} for i in range(12)]
+    got = impressions.analyze({"turns": turns, "duration": 300}, None, "m", "Asha Rao")
+    assert got["coverage"] == "transcript" and got["score"] is not None

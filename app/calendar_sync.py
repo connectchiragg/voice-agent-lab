@@ -23,7 +23,7 @@ from typing import Any
 
 import httpx
 
-from app import calendar_ics
+from app import calendar_ics, schema
 from app.interview_types import Person, SlotDiff, SlotEvent, diff
 
 API = "https://www.googleapis.com/calendar/v3"
@@ -205,8 +205,11 @@ def needs_renewal(state: dict[str, Any], now: datetime) -> bool:
 # Postgres.
 
 async def setup(connection: Any) -> None:
-    await connection.execute(SCHEMA)
-    await connection.execute("INSERT INTO calendar_state (id) VALUES (1) ON CONFLICT DO NOTHING")
+    """The tables and the state row, once per process (app/schema.py)."""
+    async def run() -> None:
+        await connection.execute(SCHEMA)
+        await connection.execute("INSERT INTO calendar_state (id) VALUES (1) ON CONFLICT DO NOTHING")
+    await schema.once(connection, "calendar_sync", run)
 
 
 async def load_state(connection: Any) -> dict[str, Any]:

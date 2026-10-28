@@ -77,7 +77,7 @@ def client_ip(request: Request) -> str:
 
 def pool():
     if research.pool is None:
-        raise HTTPException(503, "Postgres is unavailable.")
+        raise HTTPException(503, "VALR can't reach its data right now. Try again in a minute.")
     return research.pool
 
 

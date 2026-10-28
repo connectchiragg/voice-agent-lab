@@ -72,7 +72,7 @@ async def favicon() -> FileResponse:
 
 def pool():
     if research.pool is None:
-        raise HTTPException(503, "Postgres is unavailable.")
+        raise HTTPException(503, "VALR can't reach its data right now. Try again in a minute.")
     return research.pool
 
 
@@ -119,7 +119,7 @@ async def subscribe(request: Request) -> JSONResponse:
     if not webpush.valid_endpoint(body.endpoint):
         raise HTTPException(400, "That push service isn't one VALR sends to.")
     if not webpush.public_key():
-        raise HTTPException(503, "Phone push isn't set up on the server yet (VALR_VAPID_* keys).")
+        raise HTTPException(503, "Phone push isn't set up on the server yet.")
     async with pool().connection() as connection:
         store = webpush.Store(connection)
         await store.setup()
@@ -183,7 +183,7 @@ async def test(request: Request) -> JSONResponse:
     async with pool().connection() as connection:
         sender = await webpush.sender(connection)
         if sender is None:
-            raise HTTPException(503, "Phone push isn't set up on the server yet (VALR_VAPID_* keys).")
+            raise HTTPException(503, "Phone push isn't set up on the server yet.")
         if not await sender.subscribers():
             raise HTTPException(409, "No device is subscribed yet: tap Enable notifications first.")
         result = await sender.send(TEST, only=body.id)

@@ -76,6 +76,11 @@ def linkify(how: str) -> str:
     return e(how)
 
 
+# Typing in the search box hides rows (static/valr-app.js); when none is left, this says so.
+NO_MATCH = ('<tr class="empty-row" data-search-none hidden><td colspan="5" role="status">'
+            'No leads match your search.</td></tr>')
+
+
 def corrections(lead: dict[str, Any], others: list[dict[str, Any]], stages: list[str]) -> str:
     """The owner's corrections, in a sheet (static/valr-app.js posts them with the CSRF token)."""
     options = "".join(f'<option value="{e(s)}"{" selected" if lead["stage_manual"] and lead["stage_raw"] == s else ""}>'
@@ -84,7 +89,9 @@ def corrections(lead: dict[str, Any], others: list[dict[str, Any]], stages: list
                    for o in sorted(others, key=lambda o: o["company"].lower()) if o["id"] != lead["id"])
     merge = (f'<div class="fix-block"><label class="field-label" for="fix-into">Merge into another company</label>'
              f'<input class="input sm" type="search" data-merge-search placeholder="Search companies" aria-label="Search companies to merge into">'
-             f'<div class="field-row"><select class="input" id="fix-into" data-fix-into>{into}</select>'
+             '<p class="field-help" data-merge-none hidden>No company matches.</p>'
+             f'<div class="field-row"><select class="input" id="fix-into" data-fix-into>'
+             f'<option value="" selected>Pick a company</option>{into}</select>'
              '<button class="btn" type="button" data-fix="merge">Merge</button></div></div>' if into else "")
     body = f"""
 <div class="fix-form" data-lead-fix="{e(lead['id'])}" data-company="{e(lead['company'])}">
@@ -240,7 +247,7 @@ def page(view: dict[str, Any], clock: Clock, leads: dict[str, Any], stage: str, 
 <div class="leads-layout{' has-panel' if chosen else ''}">
   <div class="table-card card"><table class="leads-table">
     <thead><tr><th scope="col">Company</th><th scope="col">Temperature</th><th scope="col">Stage</th><th scope="col" class="c-next">Next step</th><th scope="col" class="c-when">Last activity</th></tr></thead>
-    <tbody>{body_rows or f'<tr class="empty-row"><td colspan="5">{e(empty_row)}</td></tr>'}</tbody>
+    <tbody>{body_rows or f'<tr class="empty-row"><td colspan="5">{e(empty_row)}</td></tr>'}{NO_MATCH if body_rows else ''}</tbody>
   </table></div>
   {lead_card(chosen, clock, leads, keep) if chosen else ''}
 </div>"""

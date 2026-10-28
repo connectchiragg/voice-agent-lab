@@ -104,7 +104,7 @@ def lead_id(company: str) -> str:
 def pages(client) -> list[str]:
     return ["/valr", "/valr/interviews", f"/valr/interviews/{ref_of(client)}", "/valr/interviews/past",
             "/valr/interviews/past/fathom-1006", "/valr/interviews/past/fathom-1000",
-            "/valr/interviews/processes", "/valr/leads",
+            "/valr/leads",
             f"/valr/leads?stage=offer&q=x&lead={lead_id('Orbit Labs')}", "/valr/leads?status=expired",
             "/valr/progress", "/valr/settings", "/login"]
 
@@ -121,7 +121,8 @@ def test_every_page_needs_a_verified_access_login(client):
         assert page.status_code == 200, path
         assert page.headers["cache-control"] == "no-store" and page.headers["x-frame-options"] == "DENY"
         assert 'name="csrf-token"' in page.text and 'aria-current="page"' in page.text
-    for old, new in (("/valr/system", "/valr/settings"), ("/valr/performance", "/valr/progress")):
+    for old, new in (("/valr/system", "/valr/settings"), ("/valr/performance", "/valr/progress"),
+                     ("/valr/interviews/processes", "/valr/interviews")):  # The timeline was removed.
         assert client.get(old).status_code == 403
         moved = client.get(old, headers=GOOD, follow_redirects=False)
         assert moved.status_code == 301 and moved.headers["location"] == new
@@ -200,11 +201,18 @@ def test_home_hits_you_with_right_now(client):
     for gone in ("Status", "All good", "Nothing is broken", "Telegram", "To do", "live leads"):
         assert gone not in words, gone
     data = json.loads(page.split('id="leads-data">', 1)[1].split("</script>", 1)[0])
-    assert len(data["leads"]) == len(leads["leads"]) and {s["key"] for s in data["stages"]} >= {"offer", "interviewing"}
+    hidden = leads["closed"] + leads["expired"]
+    assert leads["expired"], "the sample needs an expired lead"
+    # The lite globe: live leads, then closed and inactive ones marked "closed" (drawn with the toggle).
+    assert [r["id"] for r in data["leads"]] == [r["id"] for r in leads["leads"] + hidden]
+    assert {r["id"] for r in data["leads"] if r["status"] == "closed"} == {r["id"] for r in hidden}
+    assert {s["key"] for s in data["stages"]} >= {"offer", "interviewing"}
     raw = json.loads(page.split('id="leads-raw">', 1)[1].split("</script>", 1)[0])
-    # Live and closed (drawn only with "Show closed"); expired left out; no people, no links.
-    assert {lead["id"] for lead in raw["leads"]} == {r["id"] for r in leads["leads"] + leads["closed"]}
-    assert {lead["id"] for lead in raw["leads"] if lead["status"] == "closed"} == {r["id"] for r in leads["closed"]}
+    # Live, closed and expired ("inactive": ticking "Show closed" showed none of them), the
+    # last two drawn only with "Show closed"; no people, no links.
+    assert {lead["id"] for lead in raw["leads"]} == {r["id"] for r in leads["leads"] + hidden}
+    assert {lead["id"] for lead in raw["leads"] if lead["status"] == "closed"} == {r["id"] for r in hidden}
+    assert f'Show closed <span class="num">{len(hidden)}</span>' in page
     assert all({"temperature", "band", "stage", "last_touch_at"} <= set(lead) for lead in raw["leads"])
     assert set(raw) == {"leads"}
 
@@ -373,6 +381,22 @@ def test_lead_corrections_are_on_the_lead_card(client):
     assert 'data-sheet="lead-fix"' in page and 'id="lead-fix"' in page and "data-merge-search" in page  # In ⋯.
     script = (ROOT / "static/valr-app.js").read_text(encoding="utf-8")
     assert "/valr/api/leads/${encodeURIComponent(id)}/override" in script and "X-CSRF-Token" in script
+
+
+def test_merge_needs_a_visible_pick_and_a_confirm(client):
+    """QA B2: a search that matched nothing merged into the first (hidden, preselected) company."""
+    juniper = lead_id("Juniper Robotics")
+    page = client.get(f"/valr/leads?lead={juniper}", headers=GOOD).text
+    select = page.split('data-fix-into>', 1)[1].split("</select>", 1)[0]
+    assert select.startswith('<option value="" selected>Pick a company</option>')  # Nothing picked by default.
+    assert select.count(" selected") == 1 and "data-merge-none hidden" in page  # "No company matches." waits.
+    script = (ROOT / "static/valr-app.js").read_text(encoding="utf-8")
+    merge = script.split('if (body.action === "merge") {', 1)[1].split("body.into = picked.value", 1)[0]
+    assert "picked.hidden" in merge and "!picked?.value" in merge and "confirm(`Merge" in merge
+    search = script.split("[data-merge-search]", 1)[1].split("});", 1)[0]
+    assert 'select.value = q && first ? first.value : ""' in search  # No match: nothing stays picked.
+    # QA B13: after Dismiss the page is /valr/leads, not /valr/leads? .
+    assert "`/valr/leads?${params}" not in script and 'qs ? `?${qs}` : ""' in script
 
 
 def test_settings_reflect_reality(client):
@@ -963,3 +987,102 @@ def test_briefing_prioritizes_company_people_previous_rounds_and_finance():
     assert "last round" in points[2] and "Funding" in points[3]
     assert "invitation" not in " ".join(points)
     assert wording.written("His self-evaluation suggests a shorter answer.") == "Previous interview feedback suggests a shorter answer."
+
+
+def test_the_processes_timeline_is_gone(client):
+    page = client.get("/valr/interviews", headers=GOOD).text
+    assert "/valr/interviews/processes" not in page and ">Processes" not in page
+    assert client.get("/valr/api/processes", headers=GOOD).status_code == 404
+    assert not (ROOT / "static/valr-processes.js").exists() and not (ROOT / "app/valr_ui/processes.py").exists()
+
+
+def test_progress_lists_recent_recordings_awaiting_review(client, monkeypatch):
+    """QA K1: a new recording showed in Past interviews at once but not on Progress until scored."""
+    from datetime import datetime, timedelta, timezone
+    now = datetime.now(timezone.utc)
+
+    def entry(n, review, days_ago=1, company="Tessel"):
+        return {"id": f"phone:{n}", "recording_only": True, "date": (now - timedelta(days=days_ago)).isoformat(),
+                "title": "Call", "company": company, "round": "", "interviewers": [], "provider": "phone",
+                "review": review, "overall": None}
+
+    async def with_recordings(view):
+        perf = view.get("performance") or {}
+        extra = [entry("a1", "pending"), entry("a2", "unavailable", company="Recruiter Co"),
+                 entry("a3", "pending", days_ago=90, company="Old Co")]
+        return {**view, "performance": {**perf, "interviews": (perf.get("interviews") or []) + extra}}
+    before = client.get("/valr/progress", headers=GOOD).text
+    monkeypatch.setattr(routes, "with_recordings", with_recordings)
+    page = html.unescape(client.get("/valr/progress", headers=GOOD).text)
+    assert "Awaiting review" in page and "Tessel" in page and "/valr/interviews/past/phone-a1" in page
+    assert "Recruiter Co" not in page and "Old Co" not in page  # Never scored / too old.
+    # Not in the numbers: the CSV is the same as before.
+    csv_of = lambda text: text.split('href="data:text/csv', 1)[1].split('"', 1)[0]  # noqa: E731
+    assert csv_of(page) == html.unescape(csv_of(before))
+
+
+def test_pages_refresh_themselves_when_their_data_changes(client, monkeypatch, tmp_path):
+    """QA K1: Progress, Leads and Past never refreshed (the quiet refresh only watched the
+    calendar and call state), and the iPhone app has no reload button."""
+    row = ["leads-md5", "2/9", "25/2026-10-28", 1, "25/2026-10-28", "40/3"]
+    queries = []
+
+    class Cursor:
+        async def fetchone(self):
+            return tuple(row)
+
+    class Connection:
+        async def execute(self, query, params=None):
+            queries.append(query)
+            return Cursor()
+
+    class OnePool:
+        def connection(self):
+            class Context:
+                async def __aenter__(self):
+                    return Connection()
+
+                async def __aexit__(self, *exc):
+                    return False
+            return Context()
+    perf = tmp_path / "performance.json"
+    perf.write_text("{}")
+    monkeypatch.setenv("VALR_PERFORMANCE_PATH", str(perf))
+    monkeypatch.setattr(research, "pool", OnePool())
+    assert client.get("/valr/api/version").status_code == 403
+    first = client.get("/valr/api/version", headers=GOOD).json()["version"]
+    assert first and client.get("/valr/api/version", headers=GOOD).json()["version"] == first  # Stable.
+    row[2] = "26/2026-10-28"  # A new recording.
+    second = client.get("/valr/api/version", headers=GOOD).json()["version"]
+    perf.write_text('{"interviews": []}')  # The coach scored one.
+    third = client.get("/valr/api/version", headers=GOOD).json()["version"]
+    assert len({first, second, third}) == 3
+    assert len(queries) == 4 and all(q == routes.VERSION_SQL for q in queries)  # One query per check.
+    script = (ROOT / "static/valr.js").read_text(encoding="utf-8")
+    assert '"/valr/api/version"' in script and "progress|" in script.replace("\\/", "")
+
+
+def test_small_ui_fixes_from_the_qa_pass(client):
+    """QA S4: lead search with no match said nothing (B11); "updated" was always IST (B10); a
+    colour-only link, low-contrast player text and tap targets under 24 px (B12)."""
+    page = client.get("/valr/leads?tab=all", headers=GOOD).text
+    assert "data-search-none hidden" in page and "No leads match your search." in page
+    app_js = (ROOT / "static/valr-app.js").read_text(encoding="utf-8")
+    assert "none.hidden = shown > 0" in app_js
+    valr_js = (ROOT / "static/valr.js").read_text(encoding="utf-8")
+    assert "Asia/Kolkata" not in valr_js and "timeZone: state.zone" in valr_js
+    css = (ROOT / "static/valr-ds.css").read_text(encoding="utf-8")
+    assert ".notif-steps a, .field-help a { text-decoration: underline" in css
+    assert ".player-wait .muted { color: inherit; }" in css
+    coarse = css.split("@media (pointer: coarse) {")[-1]
+    for target in (".globe .globe-label", ".prep-meter", ".leads-table .row-anchor", ".nt-help"):
+        assert target in coarse.split("}")[0], target
+
+
+def test_the_preview_harness_answers_transcripts_and_forgets_phone_overrides():
+    """QA B14: the preview's transcript endpoints 500ed (its fake connection was a bare object)
+    and ?phone= stuck to every later request."""
+    source = (ROOT / "scripts/preview_ui.py").read_text(encoding="utf-8")
+    assert "return object()" not in source and "notetaker_routes.transcript_data = transcript_data" in source
+    middle = source.split('wanted_phone = request.query_params["phone"]', 1)[1].split("async def preview_api", 1)[0]
+    assert "finally:" in middle and "owner.apply(saved_row)" in middle

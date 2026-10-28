@@ -23,6 +23,8 @@ import json
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from app import schema
+
 COMPANY_TTL = timedelta(days=7)
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS slot_context (
@@ -81,7 +83,8 @@ CREATE TABLE IF NOT EXISTS prep_checks (
 
 
 async def setup(connection: Any) -> None:
-    await connection.execute(SCHEMA)
+    """The tables, once per process (app/schema.py)."""
+    await schema.once(connection, "interview_store", lambda: connection.execute(SCHEMA))
 
 
 async def load_slot(connection: Any, key: str) -> dict[str, Any] | None:
