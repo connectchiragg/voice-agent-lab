@@ -19,6 +19,8 @@ async def connect():
     connection = await psycopg.AsyncConnection.connect(os.environ["VALR_TEST_POSTGRES"], autocommit=True)
     await connection.execute("DROP TABLE IF EXISTS notifications, notify_lead_state, notify_settings, "
                              "phone_uploads, phone_audio, phone_upload_token, push_subscriptions")
+    from app import schema
+    schema.forget()  # Dropped: the next setup creates them again (app/schema.py).
     return connection
 
 

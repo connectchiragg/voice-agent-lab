@@ -411,11 +411,10 @@ class Store:
         self.c = connection
 
     async def setup(self) -> None:
-        """The table, once per process (app/schema.py)."""
-        async def run() -> None:
-            await self.c.execute(SCHEMA)
-            await self.hide_removed()
-        await schema.once(self.c, "notifications", run)
+        """The table, once per process (app/schema.py); stored items of removed kinds, every time
+        (a plain UPDATE, no DDL lock)."""
+        await schema.once(self.c, "notifications", lambda: self.c.execute(SCHEMA))
+        await self.hide_removed()
 
     async def hide_removed(self) -> None:
         """Stored items of the REMOVED kinds: read, and never sent anywhere."""

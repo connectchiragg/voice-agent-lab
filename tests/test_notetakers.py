@@ -652,6 +652,8 @@ def test_store_round_trip_on_postgres():
     async def main():
         async with await psycopg.AsyncConnection.connect(os.environ["VALR_TEST_POSTGRES"], autocommit=True) as c:
             await c.execute("DROP TABLE IF EXISTS notetaker_credentials, notetaker_recordings, recording_media")
+            from app import schema
+            schema.forget()  # Dropped: created again (app/schema.py).
             await store.setup(c)
             await store.save_key(c, token_key, "fathom", FAKE_KEY, "")
             cursor = await c.execute("SELECT secret FROM notetaker_credentials")
