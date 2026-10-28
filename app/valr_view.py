@@ -630,12 +630,14 @@ async def dial_counts(now: datetime) -> dict[str, Any]:
     client = await callbacks.temporal()
     if client is None:
         return out
-    for name in budgets:
+
+    async def used(name: str) -> None:
         handle = client.get_workflow_handle(f"{name}-dials-{now.date().isoformat()}")
         try:
             out[name]["used"] = await asyncio.wait_for(handle.query(DialBudgetWorkflow.dials), 2)
         except Exception as error:  # noqa: BLE001 - no workflow yet today: nothing dialled.
             out[name]["used"] = 0 if "not found" in str(error).lower() else None
+    await asyncio.gather(*(used(name) for name in budgets))  # Together: every page waits for this.
     return out
 
 

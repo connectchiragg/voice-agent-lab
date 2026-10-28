@@ -55,6 +55,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from difflib import SequenceMatcher
+from functools import lru_cache
 from typing import Any
 
 from app import company_names
@@ -205,6 +206,7 @@ def is_tool_domain(domain: str) -> bool:
     return any(domain == tool or domain.endswith("." + tool) for tool in TOOL_DOMAINS)
 
 
+@lru_cache(maxsize=4096)  # Pure, and called for every touchpoint on every page load.
 def company_domain(domain: str) -> str:
     """The registrable part of a company's domain; "" for personal, ATS and tool domains."""
     domain = (domain or "").lower().strip(".")
@@ -213,6 +215,7 @@ def company_domain(domain: str) -> str:
     return company_names.registrable(domain)
 
 
+@lru_cache(maxsize=4096)  # Pure, and called for every touchpoint on every page load.
 def domain_company(domain: str) -> str:
     """"careers.acme-robotics.example" -> "Acme Robotics" (app/company_names.from_domain)."""
     return company_names.from_domain(company_domain(domain))
