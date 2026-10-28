@@ -289,6 +289,7 @@ def layout(view: dict[str, Any], email: str, csrf: str, active: str, title: str,
     return f"""{head(title, theme, csrf)}
 <link rel="stylesheet" href="{asset('leads.css')}">
 <link rel="stylesheet" href="{asset('valr-call.css')}">
+<script type="module" src="{asset('valr-tap.js')}"></script>
 <script type="module" src="{asset('valr.js')}"></script>
 <script type="module" src="{asset('valr-call.js')}"></script>
 <script type="module" src="{asset('valr-app.js')}"></script>

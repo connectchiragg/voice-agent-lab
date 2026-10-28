@@ -966,6 +966,22 @@ details.fold:not(.card):not(.inline) { padding: var(--s4) var(--s6); border: 1px
 html { scroll-padding-top: calc(var(--topbar) + 12px); }
 /* No double-tap zoom on controls, so quick repeated taps (seek, menus) stay taps. */
 a, button, summary, label, input, select, textarea, [role="button"] { touch-action: manipulation; }
+/* Pressed: static/valr-tap.js sets .is-pressed at pointerdown, so a tap shows in the same frame
+   (no transition: the usual 120-200 ms fade would hide it), not when the server answers. */
+html { -webkit-tap-highlight-color: transparent; }
+.is-pressed { transition-duration: 0s !important; }
+a.is-pressed, label.is-pressed, summary.is-pressed, [data-pressable].is-pressed { opacity: .6; }
+.btn.is-pressed, .btn:active { opacity: 1; transform: scale(.97); filter: brightness(.9); }
+.icon-btn.is-pressed, .icon-btn:active, .menu-item.is-pressed, .nav a.is-pressed { opacity: 1; background: var(--surface-2); color: var(--text); }
+.tabbar a.is-pressed { opacity: 1; color: var(--accent-text); background: var(--surface-2); }
+.tabbar a.is-pressed .tab-icon { transform: scale(.92); }
+/* Leaving for another page: a bar at the top at once, and the old page dims if it takes a moment. */
+.nav-progress { position: fixed; z-index: 100; top: env(safe-area-inset-top, 0px); left: 0; right: 0; height: 3px;
+  background: var(--accent); transform-origin: 0 50%; transform: scaleX(0); opacity: 0; pointer-events: none; }
+html.is-navigating .nav-progress { opacity: 1; animation: nav-progress 6s cubic-bezier(.08, .8, .2, 1) forwards; }
+html.is-navigating .main { opacity: .6; transition: opacity .2s ease .15s; }
+@keyframes nav-progress { from { transform: scaleX(.1); } to { transform: scaleX(.94); } }
+@media (prefers-reduced-motion: reduce) { html.is-navigating .nav-progress { animation: none; transform: scaleX(.6); } }
 /* 100vh is the tallest viewport on iOS (toolbars hidden), so it overshoots; dvh is the visible one. */
 @supports (height: 100dvh) {
   .solo { min-height: 100dvh; }

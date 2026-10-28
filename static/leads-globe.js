@@ -30,7 +30,7 @@
 // WebGL it resolves to {supported: false} and draws nothing: the host shows its list. The
 // pure helpers (bandOf, bandColor, layout, placeLabels, nodeRadius, tipText) need no browser.
 
-export const THREE_URL = "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js";
+export const THREE_URL = "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.min.js";  // Minified: 0.67 MB, not 1.27.
 export const RADIUS = 100;
 const GOLDEN = Math.PI * (3 - Math.sqrt(5));
 const SPAN = 0.9;  // Latitudes kept within ±64°: no pile-up of labels at the poles.

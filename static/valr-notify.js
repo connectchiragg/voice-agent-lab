@@ -107,9 +107,9 @@ export function renderList(doc, box, items, onOpen, origin = "") {
 
 const csrf = () => document.querySelector('meta[name="csrf-token"]')?.content ?? "";
 
-async function api(url, body) {
+async function api(url, body, keepalive = false) {
   const response = await fetch(url, body === undefined ? {credentials: "same-origin"} : {
-    method: "POST", credentials: "same-origin",
+    method: "POST", credentials: "same-origin", keepalive,
     headers: {"Content-Type": "application/json", "X-CSRF-Token": csrf()}, body: JSON.stringify(body)});
   const data = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(data.detail || `HTTP ${response.status}`);
@@ -136,12 +136,19 @@ function startBell() {
   const cleared = id => document.querySelectorAll(`[data-notif-id="${CSS.escape(String(id))}"]`)
     .forEach(node => { node.classList.remove("unread"); node.querySelector(".sr-only")?.remove(); });
   const open = async (item, href) => {
-    if (!item.read) {
-      try { show((await api("/valr/api/notifications/read", {ids: [item.id]})).unread); } catch { /* still open it */ }
+    if (href) {  // Go at once; the read mark still lands (keepalive), it doesn't hold up the tap.
+      if (!item.read) api("/valr/api/notifications/read", {ids: [item.id]}, true).catch(() => {});
       item.read = true;
       cleared(item.id);
+      document.dispatchEvent(new CustomEvent("valr:leaving", {detail: {href}}));
+      location.href = href;
+      return;
     }
-    if (href) location.href = href;
+    if (!item.read) {
+      item.read = true;
+      cleared(item.id);
+      try { show((await api("/valr/api/notifications/read", {ids: [item.id]})).unread); } catch { /* still open it */ }
+    }
   };
   // Server-rendered items (the panel before it loads): the same click rule.
   document.addEventListener("click", event => {
@@ -164,21 +171,26 @@ function startBell() {
     } catch (error) { box.replaceChildren(el(document, "p", {class: "muted small"}, `Couldn't load: ${error.message}`)); }
   };
   let last = null;
+  let polling = false;
   const poll = async () => {
+    if (polling) return;  // One at a time: a slow answer never stacks up requests behind a tap.
+    polling = true;
     try {
       const unread = (await api("/valr/api/notifications?unread=1")).unread;
       show(unread);
       if (last !== null && unread !== last && bell.open) load();  // Something new while the panel is open.
       last = unread;
-    } catch { /* next time */ }
+    } catch { /* next time */ } finally { polling = false; }
   };
   bell.addEventListener("toggle", () => { if (bell.open) load(); });
   bell.querySelector("[data-notif-all]")?.addEventListener("click", async () => {
     try { show((await api("/valr/api/notifications/read", {all: true})).unread); load(); } catch (error) { toast(error.message); }
   });
-  poll();
+  // No poll on load: the server just rendered the count. The first one comes POLL_MS later,
+  // off the path of the page's first taps.
   setInterval(() => { if (!document.hidden) poll(); }, POLL_MS);
   document.addEventListener("visibilitychange", () => { if (!document.hidden) poll(); });
+  addEventListener("pageshow", event => { if (event.persisted) poll(); });  // Back from the cache: maybe stale.
   navigator.serviceWorker?.addEventListener("message", event => { if (event.data?.type === "valr-push") poll(); });
 }
 
