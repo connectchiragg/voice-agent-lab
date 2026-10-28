@@ -9,7 +9,7 @@ import os
 import psycopg
 import pytest
 
-from app import research_jobs
+from app import research_jobs, schema
 from app.research_jobs import Booking, Limits, p90, price, promise_minutes
 
 
@@ -57,6 +57,7 @@ def with_db(test):
         async with await psycopg.AsyncConnection.connect(os.environ["VALR_TEST_POSTGRES"],
                                                          autocommit=True) as connection:
             await connection.execute("DROP TABLE IF EXISTS research_jobs, research_spend")
+            schema.forget()  # Dropped: the next setup creates them again.
             await research_jobs.setup(connection)
             await test(connection)
     asyncio.run(main())

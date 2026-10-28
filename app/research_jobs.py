@@ -30,6 +30,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+from app import schema
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS research_jobs (
     job_id           text PRIMARY KEY,
@@ -168,7 +170,8 @@ class Booking:
 
 
 async def setup(connection: Any) -> None:
-    await connection.execute(SCHEMA)
+    """The tables, once per process (app/schema.py)."""
+    await schema.once(connection, "research_jobs", lambda: connection.execute(SCHEMA))
 
 
 async def scalar(connection: Any, query: str, params: tuple[Any, ...] = ()) -> Any:

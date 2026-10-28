@@ -44,6 +44,8 @@ from datetime import datetime, timezone
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError, available_timezones
 
+from app import schema
+
 logger = logging.getLogger("valr")
 
 KEY = "owner"
@@ -345,7 +347,7 @@ def etag_of(data: bytes) -> str:
 
 async def setup(connection: Any) -> None:
     """The table and its row; once, the move of caller memory to the stable key."""
-    await connection.execute(SCHEMA)
+    await schema.once(connection, "owner", lambda: connection.execute(SCHEMA))  # Once per process.
     cursor = await connection.execute("SELECT migrated_at FROM owner_profile WHERE id = 1")
     row = await cursor.fetchone()
     if row and row[0] is None:

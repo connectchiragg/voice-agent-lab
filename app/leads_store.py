@@ -18,6 +18,7 @@ from dataclasses import asdict
 from datetime import datetime
 from typing import Any
 
+from app import schema
 from app.leads import Contact, Lead, Overrides, Touch
 
 SCHEMA = """
@@ -96,8 +97,11 @@ STATE_COLUMNS = ("account", "history_id", "watch_expires", "watch_renewed_at", "
 
 
 async def setup(connection: Any) -> None:
-    await connection.execute(SCHEMA)
-    await connection.execute("INSERT INTO gmail_state (id) VALUES (1) ON CONFLICT DO NOTHING")
+    """The tables and the state row, once per process (app/schema.py)."""
+    async def run() -> None:
+        await connection.execute(SCHEMA)
+        await connection.execute("INSERT INTO gmail_state (id) VALUES (1) ON CONFLICT DO NOTHING")
+    await schema.once(connection, "leads_store", run)
 
 
 # The owner's corrections.

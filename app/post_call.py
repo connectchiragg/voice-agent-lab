@@ -47,6 +47,8 @@ import os
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
+from app import schema
+
 logger = logging.getLogger("valr")
 
 SCHEMA = """
@@ -84,7 +86,8 @@ def token_key() -> str:
 
 
 async def setup(connection: Any) -> None:
-    await connection.execute(SCHEMA)
+    """The tables, once per process (app/schema.py)."""
+    await schema.once(connection, "post_call", lambda: connection.execute(SCHEMA))
 
 
 async def enqueue(connection: Any, provider: str, external_id: str, meeting: dict | None = None,

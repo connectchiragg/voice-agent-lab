@@ -25,6 +25,7 @@ from datetime import datetime
 from typing import Any
 
 from app import google_oauth
+from app import schema
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS notetaker_credentials (
@@ -91,7 +92,8 @@ DETAILS = ("company", "company_domain", "interviewers", "invitee_hashes")
 
 
 async def setup(connection: Any) -> None:
-    await connection.execute(SCHEMA)
+    """The tables, once per process (app/schema.py)."""
+    await schema.once(connection, "notetaker_store", lambda: connection.execute(SCHEMA))
 
 
 # Credentials.

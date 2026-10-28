@@ -55,6 +55,7 @@ from typing import Any, AsyncIterator, Callable
 import httpx
 
 from app import google_oauth
+from app import schema
 
 logger = logging.getLogger("valr")
 
@@ -423,7 +424,8 @@ def parse_when(value: str) -> datetime | None:
 # The store.
 
 async def setup(connection: Any) -> None:
-    await connection.execute(SCHEMA)
+    """The tables, once per process (app/schema.py)."""
+    await schema.once(connection, "phone_recordings", lambda: connection.execute(SCHEMA))
 
 
 def new_id() -> str:

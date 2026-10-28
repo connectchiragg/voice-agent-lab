@@ -238,6 +238,21 @@ def prompt_note(conversation_id: str, topic: str) -> str:
         f"<research>\nPrepared answer: {quoted(job['spoken'])}\nNotes:\n{quoted(notes)}\n</research>")
 
 
+async def create_tables(connection: Any) -> None:
+    """Every VALR page's tables, once at startup (app/schema.py), so no request runs DDL."""
+    from app import (calendar_sync, company_resolver, google_oauth, interview_store, leads_store, notifications,
+                     phone_recordings, post_call, webpush)
+    from app.notetakers import store, transcripts
+    steps = [calendar_sync.setup, interview_store.setup, leads_store.setup, store.setup, transcripts.setup,
+             post_call.setup, company_resolver.setup, google_oauth.setup, phone_recordings.setup,
+             lambda c: notifications.Store(c).setup(), lambda c: webpush.Store(c).setup()]
+    for step in steps:
+        try:
+            await step(connection)
+        except Exception as error:  # noqa: BLE001 - that page creates it on first use instead.
+            logger.warning("VALR table setup failed at startup: %s", type(error).__name__)
+
+
 @asynccontextmanager
 async def lifespan(conninfo: Callable[[], str]) -> AsyncIterator[None]:
     """Postgres for VALR bookings and findings; research is unavailable without it."""
@@ -248,6 +263,7 @@ async def lifespan(conninfo: Callable[[], str]) -> AsyncIterator[None]:
         await pool.open(wait=True, timeout=5)
         async with pool.connection() as connection:
             await research_jobs.setup(connection)
+            await create_tables(connection)
             from app import owner  # The owner's profile into the cache (app/owner.py).
             await owner.refresh(connection, force=True)
     except Exception as error:

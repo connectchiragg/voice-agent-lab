@@ -36,6 +36,8 @@ from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlparse
 
+from app import schema
+
 logger = logging.getLogger("valr")
 
 TTL_S = 12 * 60 * 60  # A push older than 12 h is not worth showing; Apple requires a TTL.
@@ -146,7 +148,8 @@ class Store:
         self.c = connection
 
     async def setup(self) -> None:
-        await self.c.execute(SCHEMA)
+        """The table, once per process (app/schema.py)."""
+        await schema.once(self.c, "webpush", lambda: self.c.execute(SCHEMA))
 
     async def save(self, endpoint: str, p256dh: str, auth: str, user_agent: str) -> None:
         await self.c.execute(

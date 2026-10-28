@@ -34,6 +34,8 @@ from urllib.parse import urlencode
 import httpx
 from cryptography.fernet import Fernet, InvalidToken
 
+from app import schema
+
 AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 USERINFO_URL = "https://gmail.googleapis.com/gmail/v1/users/me/profile"
@@ -156,7 +158,8 @@ async def exchange_code(settings: OAuthSettings, code: str,
 
 
 async def setup(connection: Any) -> None:
-    await connection.execute(SCHEMA)
+    """The tables, once per process (app/schema.py)."""
+    await schema.once(connection, "google_oauth", lambda: connection.execute(SCHEMA))
 
 
 async def store(connection: Any, settings: OAuthSettings, account: str, refresh: str,
