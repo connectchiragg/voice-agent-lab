@@ -34,7 +34,7 @@ NO_CACHE = valr_dashboard.NO_CACHE
 
 def pool():
     if research.pool is None:
-        raise HTTPException(503, "Postgres is unavailable.")
+        raise HTTPException(503, "VALR can't reach its data right now. Try again in a minute.")
     return research.pool
 
 
@@ -150,7 +150,7 @@ async def test(request: Request) -> JSONResponse:
     async with pool().connection() as connection:
         sender = await webpush.sender(connection)
         if sender is None:
-            raise HTTPException(503, "Phone notifications aren't set up on the server yet (VALR_VAPID_* keys).")
+            raise HTTPException(503, "Phone notifications aren't set up on the server yet.")
         if not await sender.subscribers():
             raise HTTPException(409, "Phone notifications are off: enable them on your phone first.")
         store = notifications.Store(connection)

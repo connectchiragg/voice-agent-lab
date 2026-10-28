@@ -331,3 +331,16 @@ def test_heads_up_mode_with_phone_notifications_off(client, monkeypatch):
     csrf = token(client)
     headers = {**GOOD, "Content-Type": "application/json", "X-CSRF-Token": csrf}
     assert client.post("/valr/api/telegram/code", content="{}", headers=headers).status_code in (404, 405)
+
+
+def test_owner_facing_errors_never_name_the_infrastructure():
+    """QA B8: "Call my phone" toasted "Temporal is unavailable."."""
+    import re
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1] / "app"
+    leaks = []
+    for path in root.rglob("*.py"):
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if "HTTPException(" in line and re.search(r"Postgres|Temporal|VAPID|VALR_TOKEN_KEY|OAuth is not", line):
+                leaks.append(f"{path.name}: {line.strip()}")
+    assert leaks == []
