@@ -42,8 +42,8 @@ def globe_json(leads: dict[str, Any]) -> str:
 def globe_leads(leads: dict[str, Any]) -> list[dict[str, Any]]:
     """What the 3D globe draws: the live leads, then the closed and the expired ("inactive") ones,
     both as status "closed" (hidden until the toggle, drawn grey), one small record each. People
-    and links stay out. Chirag ticked "Show closed" and saw none of his inactive leads: expired
-    ones used to be left out here although the Leads page's toggle includes them."""
+    and links stay out. Expired leads used to be left out here, so "Show closed" never showed an
+    inactive lead, although the Leads page's toggle includes them."""
     return [{"id": r["id"], "company": r["company"], "temperature": r["temperature"], "band": r["band"],
              "stage": r["stage_raw"] or r["stage"], "stage_label": r["stage_label"],
              "last_touch_at": r["last_activity_at"], "status": "active" if r["bucket"] == "live" else "closed"}
