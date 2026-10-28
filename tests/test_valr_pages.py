@@ -104,7 +104,7 @@ def lead_id(company: str) -> str:
 def pages(client) -> list[str]:
     return ["/valr", "/valr/interviews", f"/valr/interviews/{ref_of(client)}", "/valr/interviews/past",
             "/valr/interviews/past/fathom-1006", "/valr/interviews/past/fathom-1000",
-            "/valr/interviews/processes", "/valr/leads",
+            "/valr/leads",
             f"/valr/leads?stage=offer&q=x&lead={lead_id('Orbit Labs')}", "/valr/leads?status=expired",
             "/valr/progress", "/valr/settings", "/login"]
 
@@ -121,7 +121,8 @@ def test_every_page_needs_a_verified_access_login(client):
         assert page.status_code == 200, path
         assert page.headers["cache-control"] == "no-store" and page.headers["x-frame-options"] == "DENY"
         assert 'name="csrf-token"' in page.text and 'aria-current="page"' in page.text
-    for old, new in (("/valr/system", "/valr/settings"), ("/valr/performance", "/valr/progress")):
+    for old, new in (("/valr/system", "/valr/settings"), ("/valr/performance", "/valr/progress"),
+                     ("/valr/interviews/processes", "/valr/interviews")):  # The timeline was removed.
         assert client.get(old).status_code == 403
         moved = client.get(old, headers=GOOD, follow_redirects=False)
         assert moved.status_code == 301 and moved.headers["location"] == new
@@ -986,3 +987,10 @@ def test_briefing_prioritizes_company_people_previous_rounds_and_finance():
     assert "last round" in points[2] and "Funding" in points[3]
     assert "invitation" not in " ".join(points)
     assert wording.written("His self-evaluation suggests a shorter answer.") == "Previous interview feedback suggests a shorter answer."
+
+
+def test_the_processes_timeline_is_gone(client):
+    page = client.get("/valr/interviews", headers=GOOD).text
+    assert "/valr/interviews/processes" not in page and ">Processes" not in page
+    assert client.get("/valr/api/processes", headers=GOOD).status_code == 404
+    assert not (ROOT / "static/valr-processes.js").exists() and not (ROOT / "app/valr_ui/processes.py").exists()

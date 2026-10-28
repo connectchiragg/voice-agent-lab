@@ -7,8 +7,7 @@ POST-only, owner-only and CSRF-checked in app/valr_dashboard.py.
     /valr/interviews/<slot ref>    one upcoming interview
     /valr/interviews/past          past interviews
     /valr/interviews/past/<id>     one past interview: recording, impression, feedback
-    /valr/interviews/processes     every hiring process on one replayable timeline, and its patterns
-                                   (owner only; its data: GET /valr/api/processes)
+    /valr/interviews/processes     redirects to /valr/interviews (the timeline was removed)
     /valr/leads                    tabs, filters (?tab=&stage=&q=) and list (?lead=<id> opens one and
                                    reads its notifications)
     /valr/progress                 trends, then what they mean (/valr/performance redirects here)
@@ -29,10 +28,10 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import APIRouter, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 
 from app import owner, research, valr_dashboard, valr_page
-from app.valr_ui import (attention, contracts, home, interviews, leads, past, performance, processes, profile,
+from app.valr_ui import (attention, contracts, home, interviews, leads, past, performance, profile,
                          settings, shell)
 
 logger = logging.getLogger("uvicorn.error")
@@ -40,9 +39,9 @@ router = APIRouter()
 # The leads branch's loader, "module:function" -> async fn(pool) -> its /valr/api/leads JSON.
 LEADS_SOURCE = "app.leads_web:collect"
 TITLES = {"home": "Home", "interviews": "Interviews", "interview": "Interview", "past": "Past interviews",
-          "past_one": "Past interview", "processes": "Processes", "leads": "Leads", "progress": "Progress",
+          "past_one": "Past interview", "leads": "Leads", "progress": "Progress",
           "settings": "Settings", "profile": "Profile"}
-NAV_OF = {"interview": "interviews", "past": "interviews", "past_one": "interviews", "processes": "interviews",
+NAV_OF = {"interview": "interviews", "past": "interviews", "past_one": "interviews",
           "profile": "settings"}
 NO_NOTES = {"items": [], "unread": 0, "leads": {}}
 
@@ -345,9 +344,9 @@ def e_(text: str) -> str:
 
 
 async def render(request: Request, name: str, **params: str) -> HTMLResponse:
-    # Leads and Processes (recruiters' addresses and subjects), Settings and Profile (the owner's own details):
+    # Leads (recruiters' addresses and subjects), Settings and Profile (the owner's own details):
     # owner only, like GET /valr/api/leads.
-    email = await (valr_dashboard.owner if name in ("leads", "processes", "settings", "profile")
+    email = await (valr_dashboard.owner if name in ("leads", "settings", "profile")
                    else valr_dashboard.viewer)(request)
     try:
         view = await valr_dashboard.state_view()
@@ -399,9 +398,6 @@ async def render(request: Request, name: str, **params: str) -> HTMLResponse:
             title = "Call recording"
         else:
             body, status = not_found("That interview isn't in your history.", "/valr/interviews/past", "Past interviews"), 404
-    elif name == "processes":
-        past_count = len(((await with_recordings(await with_details(view))).get("performance") or {}).get("interviews") or [])
-        body = processes.page(await processes_data(), interviews.tabs("processes", past_count))
     elif name == "leads":
         body = leads.page(view, clock, await load_leads(), query.get("stage", "")[:20],
                           query.get("q", "")[:80], selected, query.get("status", "")[:10],
@@ -432,23 +428,11 @@ async def past_page(request: Request) -> HTMLResponse:
     return await render(request, "past")
 
 
-async def processes_data() -> dict[str, Any]:
-    """Every hiring process (app/valr_ui/processes.py), from the leads' touchpoints."""
-    raw = (await load_leads()).get("raw")
-    return processes.timeline(raw, datetime.now(timezone.utc))
-
-
-@router.get("/valr/interviews/processes", response_class=HTMLResponse)
-async def processes_page(request: Request) -> HTMLResponse:
-    return await render(request, "processes")
-
-
-@router.get("/valr/api/processes")
-async def processes_json(request: Request) -> JSONResponse:
-    """The Processes tab's data: processes, patterns and timeline events (titles, companies and
-    kinds only, never an email's text). Owner only."""
-    await valr_dashboard.owner(request)
-    return JSONResponse(await processes_data(), headers=valr_dashboard.NO_CACHE)
+@router.get("/valr/interviews/processes")
+async def processes_page(request: Request) -> RedirectResponse:
+    """The Processes timeline was removed; old links and bookmarks land on Interviews."""
+    await valr_dashboard.viewer(request)
+    return RedirectResponse("/valr/interviews", status_code=301)
 
 
 @router.get("/valr/interviews/past/{slug}", response_class=HTMLResponse)
