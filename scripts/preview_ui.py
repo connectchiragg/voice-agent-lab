@@ -53,6 +53,7 @@ def main() -> None:
     import uvicorn
 
     from app import interview_store, interviews, main as app_main, owner, research, valr_dashboard, valr_view, webrtc
+    from app.notetakers import routes as notetaker_routes
     from app.valr_ui import contracts, routes
     from tests.valr_sample import notetakers_view, sample_recording, sample_view
     from tests.valr_sample_extras import sample_leads
@@ -100,13 +101,24 @@ def main() -> None:
                      "push_off": request.query_params.get("push") == "off",
                      "extras": request.query_params.get("extras") != "0",
                      "hidden": request.query_params.get("hidden", "")[:64]})
-        if request.query_params.get("phone") in ("none", "env", "db"):
-            wanted_phone = request.query_params["phone"]
-            owner.apply({**owner._row, "phone_e164": "+919800000001" if wanted_phone == "db" else None,
-                         "phone_removed": wanted_phone == "none"})
-            if wanted_phone == "env":
-                os.environ["VALR_OWNER_PHONE"] = "+919800000002"
-        return await call_next(request)
+        if request.query_params.get("phone") not in ("none", "env", "db"):
+            return await call_next(request)
+        # ?phone= is for this one view: the profile and env are put back afterwards (it used to
+        # stick, and changed the call buttons on every later page).
+        wanted_phone = request.query_params["phone"]
+        saved_row, saved_env = dict(owner._row), os.environ.get("VALR_OWNER_PHONE")
+        owner.apply({**owner._row, "phone_e164": "+919800000001" if wanted_phone == "db" else None,
+                     "phone_removed": wanted_phone == "none"})
+        if wanted_phone == "env":
+            os.environ["VALR_OWNER_PHONE"] = "+919800000002"
+        try:
+            return await call_next(request)
+        finally:
+            owner.apply(saved_row)
+            if saved_env is None:
+                os.environ.pop("VALR_OWNER_PHONE", None)
+            else:
+                os.environ["VALR_OWNER_PHONE"] = saved_env
 
     async def preview_api(request, path):
         """Fake notetaker / recording / reach answers; a pasted key is read and dropped."""
@@ -396,15 +408,47 @@ def main() -> None:
         return {(provider, external_id)} if external_id else set()
     routes.load_hidden = load_hidden
 
+    class Cursor:  # Every query finds nothing (the pages' own data comes from the fakes above).
+        rowcount = 0
+
+        async def fetchone(self):
+            return None
+
+        async def fetchall(self):
+            return []
+
+    class Connection:
+        async def execute(self, query, params=None):
+            return Cursor()
+
+        def transaction(self):
+            class Tx:
+                async def __aenter__(self):
+                    return None
+
+                async def __aexit__(self, *exc):
+                    return False
+            return Tx()
+
     class Pool:
         def connection(self):
             class Context:
                 async def __aenter__(self):
-                    return object()
+                    return Connection()
 
                 async def __aexit__(self, *exc):
                     return False
             return Context()
+
+    async def transcript_data(provider, external_id):
+        """A made-up transcript for every recording (the transcript panel and its download)."""
+        lines = [("Interviewer", "Thanks for joining. Could you walk me through a system you designed?"),
+                 ("Sam Rivera", "Sure. I built a queue that absorbed bursts of ten times the normal load."),
+                 ("Interviewer", "How did you decide where to put the back-pressure?"),
+                 ("Sam Rivera", "At the edge: we measured first, then capped what each client could send.")]
+        return {"title": "Preview interview", "turns": [{"speaker": who, "text": text, "start": 30.0 * i}
+                                                        for i, (who, text) in enumerate(lines)]}
+    notetaker_routes.transcript_data = transcript_data
 
     async def setup(connection):
         return None

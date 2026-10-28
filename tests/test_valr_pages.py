@@ -1077,3 +1077,12 @@ def test_small_ui_fixes_from_the_qa_pass(client):
     coarse = css.split("@media (pointer: coarse) {")[-1]
     for target in (".globe .globe-label", ".prep-meter", ".leads-table .row-anchor", ".nt-help"):
         assert target in coarse.split("}")[0], target
+
+
+def test_the_preview_harness_answers_transcripts_and_forgets_phone_overrides():
+    """QA B14: the preview's transcript endpoints 500ed (its fake connection was a bare object)
+    and ?phone= stuck to every later request."""
+    source = (ROOT / "scripts/preview_ui.py").read_text(encoding="utf-8")
+    assert "return object()" not in source and "notetaker_routes.transcript_data = transcript_data" in source
+    middle = source.split('wanted_phone = request.query_params["phone"]', 1)[1].split("async def preview_api", 1)[0]
+    assert "finally:" in middle and "owner.apply(saved_row)" in middle
