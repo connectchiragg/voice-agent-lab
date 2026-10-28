@@ -994,3 +994,69 @@ def test_the_processes_timeline_is_gone(client):
     assert "/valr/interviews/processes" not in page and ">Processes" not in page
     assert client.get("/valr/api/processes", headers=GOOD).status_code == 404
     assert not (ROOT / "static/valr-processes.js").exists() and not (ROOT / "app/valr_ui/processes.py").exists()
+
+
+def test_progress_lists_recent_recordings_awaiting_review(client, monkeypatch):
+    """QA K1: a new recording showed in Past interviews at once but not on Progress until scored."""
+    from datetime import datetime, timedelta, timezone
+    now = datetime.now(timezone.utc)
+
+    def entry(n, review, days_ago=1, company="Tessel"):
+        return {"id": f"phone:{n}", "recording_only": True, "date": (now - timedelta(days=days_ago)).isoformat(),
+                "title": "Call", "company": company, "round": "", "interviewers": [], "provider": "phone",
+                "review": review, "overall": None}
+
+    async def with_recordings(view):
+        perf = view.get("performance") or {}
+        extra = [entry("a1", "pending"), entry("a2", "unavailable", company="Recruiter Co"),
+                 entry("a3", "pending", days_ago=90, company="Old Co")]
+        return {**view, "performance": {**perf, "interviews": (perf.get("interviews") or []) + extra}}
+    before = client.get("/valr/progress", headers=GOOD).text
+    monkeypatch.setattr(routes, "with_recordings", with_recordings)
+    page = html.unescape(client.get("/valr/progress", headers=GOOD).text)
+    assert "Awaiting review" in page and "Tessel" in page and "/valr/interviews/past/phone-a1" in page
+    assert "Recruiter Co" not in page and "Old Co" not in page  # Never scored / too old.
+    # Not in the numbers: the CSV is the same as before.
+    csv_of = lambda text: text.split('href="data:text/csv', 1)[1].split('"', 1)[0]  # noqa: E731
+    assert csv_of(page) == html.unescape(csv_of(before))
+
+
+def test_pages_refresh_themselves_when_their_data_changes(client, monkeypatch, tmp_path):
+    """QA K1: Progress, Leads and Past never refreshed (the quiet refresh only watched the
+    calendar and call state), and the iPhone app has no reload button."""
+    row = ["leads-md5", "2/9", "25/2026-10-28", 1, "25/2026-10-28", "40/3"]
+    queries = []
+
+    class Cursor:
+        async def fetchone(self):
+            return tuple(row)
+
+    class Connection:
+        async def execute(self, query, params=None):
+            queries.append(query)
+            return Cursor()
+
+    class OnePool:
+        def connection(self):
+            class Context:
+                async def __aenter__(self):
+                    return Connection()
+
+                async def __aexit__(self, *exc):
+                    return False
+            return Context()
+    perf = tmp_path / "performance.json"
+    perf.write_text("{}")
+    monkeypatch.setenv("VALR_PERFORMANCE_PATH", str(perf))
+    monkeypatch.setattr(research, "pool", OnePool())
+    assert client.get("/valr/api/version").status_code == 403
+    first = client.get("/valr/api/version", headers=GOOD).json()["version"]
+    assert first and client.get("/valr/api/version", headers=GOOD).json()["version"] == first  # Stable.
+    row[2] = "26/2026-10-28"  # A new recording.
+    second = client.get("/valr/api/version", headers=GOOD).json()["version"]
+    perf.write_text('{"interviews": []}')  # The coach scored one.
+    third = client.get("/valr/api/version", headers=GOOD).json()["version"]
+    assert len({first, second, third}) == 3
+    assert len(queries) == 4 and all(q == routes.VERSION_SQL for q in queries)  # One query per check.
+    script = (ROOT / "static/valr.js").read_text(encoding="utf-8")
+    assert '"/valr/api/version"' in script and "progress|" in script.replace("\\/", "")

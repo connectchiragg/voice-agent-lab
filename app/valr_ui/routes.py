@@ -28,7 +28,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import APIRouter, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from app import owner, research, valr_dashboard, valr_page
 from app.valr_ui import (attention, contracts, home, interviews, leads, past, performance, profile,
@@ -181,6 +181,19 @@ async def with_progress(view: dict[str, Any], leads_: dict[str, Any] | None = No
 
 
 RECORDINGS_DAYS = 365
+AWAITING_DAYS = 30
+AWAITING_MAX = 6
+
+
+async def awaiting_review(view: dict[str, Any]) -> list[dict[str, Any]]:
+    """Recent recordings (Past interviews has them at once) the coach is still to score, newest
+    first: Progress lists them as "Awaiting review" instead of leaving them out until scored.
+    Calls that will never be scored (not an interview, no transcript) are not listed."""
+    since = (datetime.now(timezone.utc) - timedelta(days=AWAITING_DAYS)).isoformat()
+    ivs = ((await with_recordings(view)).get("performance") or {}).get("interviews") or []
+    pending = [iv for iv in ivs if iv.get("recording_only") and iv.get("review") == "pending"
+               and str(iv.get("date") or "") >= since[:10]]
+    return list(reversed(pending))[:AWAITING_MAX]
 
 
 def is_owner(email: str) -> bool:
@@ -405,7 +418,7 @@ async def render(request: Request, name: str, **params: str) -> HTMLResponse:
                           tab=query.get("tab", "")[:6], closed=query.get("closed") == "1", unread=notes["leads"])
     elif name == "progress":
         found = await load_leads()
-        body = performance.page(await with_progress(view, found), clock, found)
+        body = performance.page(await with_progress(view, found), clock, found, await awaiting_review(view))
     elif name == "profile":
         body = profile.page(view, clock, email)
     else:
@@ -426,6 +439,53 @@ async def interviews_page(request: Request) -> HTMLResponse:
 @router.get("/valr/interviews/past", response_class=HTMLResponse)
 async def past_page(request: Request) -> HTMLResponse:
     return await render(request, "past")
+
+
+VERSION_SQL = (
+    "SELECT (SELECT md5(coalesce(string_agg(concat_ws('|', id, company, stage, status, temperature, last_touch_at, "
+    "next_step), ',' ORDER BY id), '')) FROM leads), "
+    "(SELECT concat_ws('/', count(*), max(id)) FROM lead_overrides), "
+    "(SELECT concat_ws('/', count(*), max(received_at), max(company), max(event_company)) FROM notetaker_recordings), "
+    "(SELECT count(*) FROM notetaker_hidden), "
+    "(SELECT concat_ws('/', count(*), max(updated_at)) FROM post_call_reports), "
+    "(SELECT concat_ws('/', max(id), count(*) FILTER (WHERE read_at IS NULL)) FROM notifications)")
+
+
+def performance_stamp() -> str:
+    """performance.json's size and change time: the coach rewrites it after each review."""
+    import os
+    from pathlib import Path
+    try:
+        info = Path(os.getenv("VALR_PERFORMANCE_PATH") or "/data/performance.json").expanduser().stat()
+    except OSError:
+        return ""
+    return f"{info.st_mtime_ns}/{info.st_size}"
+
+
+async def data_version() -> str:
+    """A short fingerprint of what Progress, Leads, Past and Home show beyond /valr/api/state:
+    the leads, his corrections, the recordings (and hidden ones), the coach's reviews, the
+    notifications and performance.json. One cheap query; "" when Postgres can't say."""
+    if research.pool is None:
+        return ""
+    try:
+        async with research.pool.connection() as connection:
+            cursor = await connection.execute(VERSION_SQL)
+            row = await cursor.fetchone()
+    except Exception as error:  # noqa: BLE001 - the page just doesn't refresh itself this time.
+        logger.warning("VALR data version unavailable: %s", type(error).__name__)
+        return ""
+    import hashlib
+    text = "|".join(str(x) for x in (row or ())) + "|" + performance_stamp()
+    return hashlib.sha256(text.encode()).hexdigest()[:16]
+
+
+@router.get("/valr/api/version")
+async def version_json(request: Request) -> JSONResponse:
+    """The pages' quiet refresh (static/valr.js) polls this with /valr/api/state and reloads
+    Progress, Leads, Past interviews and Home when it changes (the iPhone app has no reload)."""
+    await valr_dashboard.viewer(request)
+    return JSONResponse({"version": await data_version()}, headers=valr_dashboard.NO_CACHE)
 
 
 @router.get("/valr/interviews/processes")

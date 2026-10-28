@@ -229,17 +229,34 @@ function signature(view) {
 let baseline = null;
 let checkTimer = null;
 const updated = document.querySelector("[data-updated]");
+// Home, Progress, Leads and Past interviews also follow /valr/api/version (leads, recordings,
+// reviews, notifications, performance.json): the iPhone app has no reload button.
+const LIVE = /^\/valr(\/progress|\/leads|\/interviews\/past)?\/?$/.test(location.pathname);
+let version = "";
+async function dataVersion() {
+  if (!LIVE) return "";
+  try {
+    const response = await fetch("/valr/api/version", {credentials: "same-origin", cache: "no-store"});
+    return response.ok ? (await response.json()).version || "" : "";
+  } catch { return ""; }
+}
+// Not while he is typing or has a sheet open: the next check reloads instead.
+const busy = () => document.querySelector("dialog[open]:not(.drawer)") || document.activeElement?.matches?.("input, textarea, select");
 async function check() {
   if (document.hidden) return;
   try {
-    const response = await fetch("/valr/api/state", {credentials: "same-origin", cache: "no-store"});
+    const [response, nextVersion] = await Promise.all([
+      fetch("/valr/api/state", {credentials: "same-origin", cache: "no-store"}), dataVersion()]);
     if (!response.ok) return;
     const now = signature(await response.json());
-    if (baseline !== null && now !== baseline) {
+    const changed = (baseline !== null && now !== baseline) || (version && nextVersion && nextVersion !== version);
+    if (changed && !busy()) {
       rememberOpen();
       location.reload();
       return;
     }
+    if (changed) return;
+    if (nextVersion) version = nextVersion;
     baseline = now;
     if (updated) {
       updated.textContent = new Date().toLocaleTimeString("en-US", {hour: "numeric", minute: "2-digit", timeZone: "Asia/Kolkata"});
