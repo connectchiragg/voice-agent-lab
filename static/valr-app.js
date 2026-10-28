@@ -300,9 +300,13 @@ document.querySelector("[data-merge-search]")?.addEventListener("input", event =
 const search = document.querySelector("[data-lead-search]");
 search?.addEventListener("input", () => {
   const q = search.value.trim().toLowerCase();
+  let shown = 0;
   document.querySelectorAll("[data-lead-row]").forEach(row => {
     row.hidden = Boolean(q) && !row.textContent.toLowerCase().includes(q);
+    if (!row.hidden) shown += 1;
   });
+  const none = document.querySelector("[data-search-none]");
+  if (none) none.hidden = shown > 0;
 });
 
 // "Fix company" on an interview (the owner's name for it always wins over the resolver's).

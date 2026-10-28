@@ -1060,3 +1060,20 @@ def test_pages_refresh_themselves_when_their_data_changes(client, monkeypatch, t
     assert len(queries) == 4 and all(q == routes.VERSION_SQL for q in queries)  # One query per check.
     script = (ROOT / "static/valr.js").read_text(encoding="utf-8")
     assert '"/valr/api/version"' in script and "progress|" in script.replace("\\/", "")
+
+
+def test_small_ui_fixes_from_the_qa_pass(client):
+    """QA S4: lead search with no match said nothing (B11); "updated" was always IST (B10); a
+    colour-only link, low-contrast player text and tap targets under 24 px (B12)."""
+    page = client.get("/valr/leads?tab=all", headers=GOOD).text
+    assert "data-search-none hidden" in page and "No leads match your search." in page
+    app_js = (ROOT / "static/valr-app.js").read_text(encoding="utf-8")
+    assert "none.hidden = shown > 0" in app_js
+    valr_js = (ROOT / "static/valr.js").read_text(encoding="utf-8")
+    assert "Asia/Kolkata" not in valr_js and "timeZone: state.zone" in valr_js
+    css = (ROOT / "static/valr-ds.css").read_text(encoding="utf-8")
+    assert ".notif-steps a, .field-help a { text-decoration: underline" in css
+    assert ".player-wait .muted { color: inherit; }" in css
+    coarse = css.split("@media (pointer: coarse) {")[-1]
+    for target in (".globe .globe-label", ".prep-meter", ".leads-table .row-anchor", ".nt-help"):
+        assert target in coarse.split("}")[0], target

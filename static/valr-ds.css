@@ -1008,3 +1008,13 @@ a, button, summary, label, input, select, textarea, [role="button"] { touch-acti
 /* Interview page: what he has already discussed with the company (app/company_context.py). */
 .history-list { display: grid; gap: var(--s2); margin-top: var(--s3); padding-left: 0; list-style: none; font-size: .92em; color: var(--text-muted, var(--text)); overflow-wrap: anywhere; }
 .history-list li { padding-left: 12px; border-left: 2px solid var(--line-strong); }
+
+/* Accessibility (QA B12). A link inside running text is underlined, not told apart by colour
+   alone; the player's waiting text keeps its contrast on the dark box; on touch screens the
+   small links are at least 24 px tall (WCAG 2.2 target size). */
+.notif-steps a, .field-help a { text-decoration: underline; text-underline-offset: 3px; }
+.player-wait .muted { color: inherit; }
+@media (pointer: coarse) {
+  .globe .globe-label, .prep-meter, .leads-table .row-anchor, .nt-help { min-height: 24px; }
+  .nt-help { display: inline-flex; align-items: center; }
+}

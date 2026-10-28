@@ -248,7 +248,8 @@ async function check() {
     const [response, nextVersion] = await Promise.all([
       fetch("/valr/api/state", {credentials: "same-origin", cache: "no-store"}), dataVersion()]);
     if (!response.ok) return;
-    const now = signature(await response.json());
+    const state = await response.json();
+    const now = signature(state);
     const changed = (baseline !== null && now !== baseline) || (version && nextVersion && nextVersion !== version);
     if (changed && !busy()) {
       rememberOpen();
@@ -259,7 +260,8 @@ async function check() {
     if (nextVersion) version = nextVersion;
     baseline = now;
     if (updated) {
-      updated.textContent = new Date().toLocaleTimeString("en-US", {hour: "numeric", minute: "2-digit", timeZone: "Asia/Kolkata"});
+      // In his Profile time zone (the server's "zone"), like every other time on the page.
+      updated.textContent = new Date().toLocaleTimeString("en-US", {hour: "numeric", minute: "2-digit", timeZone: state.zone || undefined});
     }
   } catch {}
 }
