@@ -123,14 +123,20 @@ async def current(connection: Any, now: datetime) -> list[leads.Lead]:
     return leads.build(await leads_store.touches(connection), now, await leads_store.overrides(connection))
 
 
+_schema_ready = False
+
+
 def build_graph(touches: list[leads.Touch], overrides: leads.Overrides, now: datetime) -> dict[str, Any]:
     return leads.graph(leads.build(touches, now, overrides), now)
 
 
 async def collect(pool: Any, now: datetime | None = None) -> dict[str, Any]:
     now = now or datetime.now(timezone.utc)
+    global _schema_ready
     async with pool.connection() as connection:
-        await leads_store.setup(connection)
+        if not _schema_ready:  # Once per process: its ALTER TABLE locks gmail_state on every page otherwise.
+            await leads_store.setup(connection)
+            _schema_ready = True
         touches = await leads_store.touches(connection)
         overrides = await leads_store.overrides(connection)
         state = await leads_store.load_state(connection)
