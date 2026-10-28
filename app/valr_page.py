@@ -79,7 +79,9 @@ class Clock:
         return "–" if not text else f"{e(self.day(text))}, {self.time(text)}"
 
     def short_date(self, text: str) -> str:
-        return datetime.fromisoformat(text).strftime("%d %b").lstrip("0")
+        """"28 Oct", the day in the owner's zone (recordings are stored in UTC: an interview at
+        01:30 IST showed the day before)."""
+        return short_day(text, self.zone)
 
 
 def countdown(text: str | None, short: bool = False) -> str:
@@ -164,11 +166,33 @@ def score(value: float | None) -> str:
     return "–" if value is None else f"{value:.1f}"
 
 
-def short_day(date: str) -> str:
+def local_day(date: str, zone: ZoneInfo | None = None) -> str:
+    """"2026-10-28": the day of `date` in `zone` (default: the owner's); a bare date as it is."""
     try:
-        return datetime.fromisoformat(date).strftime("%d %b").lstrip("0")
+        moment = datetime.fromisoformat(date)
+    except ValueError:
+        return date[:10]
+    if moment.tzinfo is not None:
+        if zone is None:
+            from app import owner
+            zone = owner.zone()
+        moment = moment.astimezone(zone)
+    return moment.date().isoformat()
+
+
+def short_day(date: str, zone: ZoneInfo | None = None) -> str:
+    """"28 Oct". A time with an offset is shown on its day in `zone` (default: the owner's,
+    app/owner.py); a bare date stays as it is."""
+    try:
+        moment = datetime.fromisoformat(date)
     except ValueError:
         return date
+    if moment.tzinfo is not None:
+        if zone is None:
+            from app import owner
+            zone = owner.zone()
+        moment = moment.astimezone(zone)
+    return moment.strftime("%d %b").lstrip("0")
 
 
 def mail_source(url: str) -> str:

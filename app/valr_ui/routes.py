@@ -280,7 +280,8 @@ async def with_recordings(view: dict[str, Any]) -> dict[str, Any]:
                              or notetaker_routes.company_of(r.get("company") or "", r.get("event_company") or ""))
              for r in fresh]
     extra += [iv for iv in no_recording if tuple(iv["id"].partition(":")[::2]) not in gone]
-    merged = sorted(scored + extra, key=lambda iv: str(iv.get("date") or "")[:10])
+    zone = owner.zone()  # Sorted by his day, as the list shows it (B3), not the UTC one.
+    merged = sorted(scored + extra, key=lambda iv: valr_page.local_day(str(iv.get("date") or ""), zone))
     return {**view, "performance": {**perf, "interviews": merged}}
 
 
