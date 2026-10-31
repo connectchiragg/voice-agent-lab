@@ -35,6 +35,10 @@ Three workflows, all run by the research worker:
   call", opening that interview's page. Blocks already waiting take the push at their
   T-30, because both patches are checked there; the old activity name
   (`telegram_heads_up`) is still served, by the push, for a heads-up in flight.
+  Every input carries its workspace (`user`, app/workspaces.py; the owner's when absent, as in
+  workflows started before): activities run in that workspace, and a guest's block only ever
+  sends the heads-up (Telnyx dials are the owner's line). Ids stay the owner's as they were;
+  a guest's slot and block ids are their own (app/interview_types).
   The on-demand variant ("research tomorrow's interviews" on a call) waits for that
   call to end and for the slots' research, then calls back at once; with `dial_at_utc`
   it first waits until then.
@@ -74,6 +78,7 @@ FULL = ("private", "round", "interviewers", "company")
 DIAL_PAUSE_PATCH = "valr-dial-pause"
 HEADS_UP_PATCH = "valr-telegram-heads-up"
 PUSH_HEADS_UP_PATCH = "valr-push-heads-up"  # The heads-up is a push, not a Telegram message.
+OWNER = "owner"  # app/tenant.OWNER (not imported: workflow code stays free of psycopg).
 
 
 @dataclass
@@ -84,6 +89,7 @@ class SlotInput:
     research_due_utc: str
     job_usd: float = 0.40
     part_seconds: int = PART_SECONDS
+    user: str = OWNER  # The workspace (app/workspaces.py); inputs from before it: the owner's.
 
 
 @dataclass
@@ -114,6 +120,7 @@ class PlanInput:
     removed: list[str]
     refresh: bool
     job_usd: float
+    user: str = OWNER  # The workspace (app/workspaces.py); inputs from before it: the owner's.
 
 
 @dataclass
@@ -132,6 +139,7 @@ class InterviewPartInput:
     interviewers: list[Person]
     seconds: float
     budget_usd: float
+    user: str = OWNER  # The workspace (app/workspaces.py); inputs from before it: the owner's.
 
 
 @dataclass
@@ -157,6 +165,7 @@ class SlotSynthInput:
     removed: list[str]
     seconds: float
     budget_usd: float
+    user: str = OWNER  # The workspace (app/workspaces.py); inputs from before it: the owner's.
 
 
 @dataclass
@@ -174,6 +183,7 @@ class SlotFinish:
     duration_s: float
     cap_hits: dict[str, int]
     detail: str
+    user: str = OWNER  # The workspace (app/workspaces.py); inputs from before it: the owner's.
 
 
 @dataclass
@@ -249,7 +259,7 @@ class InterviewSlotWorkflow:
         started = workflow.now()
         plan: PlanResult = await workflow.execute_activity(
             "slot_plan", PlanInput(self.event, slot.owner_key, parts, people, removed, refresh,
-                                   slot.job_usd),
+                                   slot.job_usd, slot.user),
             result_type=PlanResult, start_to_close_timeout=timedelta(seconds=60),
             retry_policy=RetryPolicy(maximum_attempts=3))
         self.status.runs += 1
@@ -267,7 +277,7 @@ class InterviewSlotWorkflow:
         for part in plan.parts:  # Started together, awaited together.
             results.append(workflow.start_activity(
                 "interview_part", InterviewPartInput(plan.job_id, part, self.event, people,
-                                                     part_s, part_usd),
+                                                     part_s, part_usd, slot.user),
                 result_type=InterviewPartResult,
                 schedule_to_close_timeout=timedelta(seconds=part_s + 20),
                 heartbeat_timeout=timedelta(seconds=30),
@@ -283,7 +293,7 @@ class InterviewSlotWorkflow:
         try:
             synth: SlotSynthResult = await workflow.execute_activity(
                 "slot_synthesize", SlotSynthInput(plan.job_id, self.event, outcomes, removed,
-                                                  SYNTH_SECONDS, max(slot.job_usd - usd, 0.03)),
+                                                  SYNTH_SECONDS, max(slot.job_usd - usd, 0.03), slot.user),
                 result_type=SlotSynthResult, start_to_close_timeout=timedelta(seconds=SYNTH_SECONDS + 30),
                 retry_policy=RetryPolicy(maximum_attempts=2))
             status, cap_hits = synth.status, synth.cap_hits
@@ -297,7 +307,7 @@ class InterviewSlotWorkflow:
         try:
             await workflow.execute_activity(
                 "slot_finish", SlotFinish(plan.job_id, status,
-                                          (workflow.now() - started).total_seconds(), cap_hits, detail),
+                                          (workflow.now() - started).total_seconds(), cap_hits, detail, slot.user),
                 start_to_close_timeout=timedelta(seconds=20), retry_policy=RetryPolicy(maximum_attempts=5))
         except ActivityError:
             workflow.logger.warning("VALR slot job %s not saved", plan.job_id)
@@ -382,6 +392,7 @@ class BlockInput:
     call_by_utc: str = ""  # On demand: the promised time; dial by then, ready or not.
     ready_keys: list[str] = field(default_factory=list)  # Wait for these (empty: all).
     dial_at_utc: str = ""  # On demand: not before this.
+    user: str = OWNER  # The workspace (app/workspaces.py); inputs from before it: the owner's.
 
 
 @dataclass
@@ -390,6 +401,7 @@ class HeadsUpInput:
     start_utc: str
     slot_keys: list[str]
     label: str
+    user: str = OWNER  # The workspace (app/workspaces.py); inputs from before it: the owner's.
 
 
 @dataclass
@@ -399,6 +411,7 @@ class BlockRecord:
     slot_keys: list[str]
     label: str
     state: str
+    user: str = OWNER  # The workspace (app/workspaces.py); inputs from before it: the owner's.
 
 
 @dataclass
@@ -450,7 +463,7 @@ class BlockCallWorkflow:
             deadline = (parse(block.call_by_utc) - DIAL_LEAD) if block.call_by_utc \
                 else workflow.now() + READY_WAIT
             while not self.cancelled and workflow.now() < deadline:
-                if await self.ready(block.ready_keys or self.slot_keys):
+                if await self.ready(block.ready_keys or self.slot_keys, block.user):
                     break
                 await self.sleep(min(READY_POLL, max(deadline - workflow.now(), timedelta(seconds=1))))
             first = workflow.now()
@@ -466,7 +479,7 @@ class BlockCallWorkflow:
                 latest = start - MIN_LEFT_TO_CALL
                 self.status.state = "waiting_for_research"
                 while not self.cancelled and workflow.now() < latest:
-                    if await self.ready(self.slot_keys):
+                    if await self.ready(self.slot_keys, block.user):
                         break
                     await self.sleep(min(READY_POLL, max(latest - workflow.now(), timedelta(seconds=1))))
                 if self.cancelled:
@@ -491,16 +504,16 @@ class BlockCallWorkflow:
             if not block.dial and not heads_up:
                 return await self.finish(block, "briefed", "dry run: not dialled")
             # Patched: blocks already running when this shipped replay without the check.
-            if not block.on_demand and workflow.patched(DIAL_PAUSE_PATCH) and await self.paused():
+            if not block.on_demand and workflow.patched(DIAL_PAUSE_PATCH) and await self.paused(block):
                 paused += 1
                 self.status.detail = "automatic calls are paused"
                 continue
-            if heads_up and not await self.auto_dial():
+            if heads_up and not await self.auto_dial(block):
                 result = await self.send_heads_up(block)
                 if result == "sent":
                     return await self.finish(block, "heads_up_sent", "no call unless asked")
                 return await self.finish(block, "heads_up_failed", result)
-            if not block.dial:
+            if not block.dial or block.user != OWNER:  # A guest's block is a heads-up, never a dial.
                 return await self.finish(block, "briefed", "dry run: not dialled")
             attempt = CallAttempt(number, workflow.now().isoformat())
             self.status.attempts.append(attempt)
@@ -520,18 +533,18 @@ class BlockCallWorkflow:
         return await self.finish(block, "unanswered", "no answer" if len(times) == 1
                                  else f"no answer after {len(times)} attempts")
 
-    async def paused(self) -> bool:
+    async def paused(self, block: BlockInput) -> bool:
         try:
             return await workflow.execute_activity(
-                "dials_paused", result_type=bool, start_to_close_timeout=timedelta(seconds=20),
+                "dials_paused", block.user, result_type=bool, start_to_close_timeout=timedelta(seconds=20),
                 retry_policy=RetryPolicy(maximum_attempts=3))
         except ActivityError:
             return False  # Unknown: dial as before; the daily budget still applies.
 
-    async def auto_dial(self) -> bool:
+    async def auto_dial(self, block: BlockInput) -> bool:
         try:
             return await workflow.execute_activity(
-                "briefing_auto_dial", result_type=bool, start_to_close_timeout=timedelta(seconds=20),
+                "briefing_auto_dial", block.user, result_type=bool, start_to_close_timeout=timedelta(seconds=20),
                 retry_policy=RetryPolicy(maximum_attempts=3))
         except ActivityError:
             return False  # Unknown: no automatic call (the owner's default).
@@ -542,7 +555,7 @@ class BlockCallWorkflow:
         try:
             return await workflow.execute_activity(
                 name, HeadsUpInput(block.block_id, block.start_utc,
-                                   list(self.slot_keys), block.label),
+                                   list(self.slot_keys), block.label, block.user),
                 result_type=str, start_to_close_timeout=timedelta(seconds=45),
                 retry_policy=RetryPolicy(maximum_attempts=2))
         except ActivityError as error:
@@ -561,16 +574,16 @@ class BlockCallWorkflow:
             await self.sleep(remaining)
         return not self.cancelled
 
-    async def ready(self, keys: list[str]) -> bool:
+    async def ready(self, keys: list[str], user: str = OWNER) -> bool:
         return await workflow.execute_activity(
-            "slots_ready", list(keys), result_type=bool,
+            "slots_ready", args=[list(keys), user], result_type=bool,
             start_to_close_timeout=timedelta(seconds=20), retry_policy=RetryPolicy(maximum_attempts=3))
 
     async def record(self, block: BlockInput, state: str) -> None:
         try:
             await workflow.execute_activity(
                 "block_record", BlockRecord(block.block_id, block.start_utc, list(self.slot_keys),
-                                            block.label, state),
+                                            block.label, state, block.user),
                 start_to_close_timeout=timedelta(seconds=20), retry_policy=RetryPolicy(maximum_attempts=5))
         except ActivityError:
             workflow.logger.warning("VALR block %s not recorded", block.block_id)
@@ -640,6 +653,7 @@ class BlockCallWorkflow:
 class SyncInput:
     reason: str  # push, sweep, manual, call.
     full: bool = False
+    user: str = OWNER  # The workspace (app/workspaces.py); inputs from before it: the owner's.
 
 
 @dataclass

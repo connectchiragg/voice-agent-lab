@@ -16,6 +16,7 @@ material fields changed, which the worker turns into signals to the slot workflo
 Imports the standard library, httpx and the pure modules only.
 """
 import json
+import re
 import secrets
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
@@ -171,9 +172,13 @@ async def list_events(http: httpx.AsyncClient, access_token: str,
 
 
 async def watch(http: httpx.AsyncClient, access_token: str, address: str,
-                now: datetime) -> dict[str, Any]:
-    """Open a push channel; -> {channel_id, resource_id, channel_token, expires}."""
-    channel_id, token = f"valr-{secrets.token_hex(8)}", secrets.token_urlsafe(24)
+                now: datetime, workspace: str | None = None) -> dict[str, Any]:
+    """Open a push channel; -> {channel_id, resource_id, channel_token, expires}. A guest's
+    channel id names their workspace (`valr-<uid>-<hex>`), so /hooks/gcal knows whose it is
+    (`channel_workspace`); the owner's stays `valr-<hex>`."""
+    guest = workspace and workspace != "owner"
+    channel_id = f"valr-{workspace}-{secrets.token_hex(8)}" if guest else f"valr-{secrets.token_hex(8)}"
+    token = secrets.token_urlsafe(24)
     expires = now + CHANNEL_TTL
     response = await http.post(f"{API}/calendars/{CALENDAR_ID}/events/watch",
                                headers=headers(access_token),
@@ -186,6 +191,16 @@ async def watch(http: httpx.AsyncClient, access_token: str, address: str,
         expires = datetime.fromtimestamp(int(body["expiration"]) / 1000, timezone.utc)
     return {"channel_id": channel_id, "resource_id": str(body.get("resourceId", "")),
             "channel_token": token, "expires": expires}
+
+
+CHANNEL_RE = re.compile(r"valr-(u_[0-9a-f]{20})-[0-9a-f]{16}")
+
+
+def channel_workspace(channel_id: str | None) -> str:
+    """The workspace a push channel belongs to: a guest's from its id, else the owner's
+    (his channels, including those opened before workspaces, are `valr-<hex>`)."""
+    found = CHANNEL_RE.fullmatch(channel_id or "")
+    return found.group(1) if found else "owner"
 
 
 async def stop(http: httpx.AsyncClient, access_token: str, channel_id: str,

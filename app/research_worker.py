@@ -12,6 +12,12 @@ Activities:
 - `research_synthesize`: the spoken answer and notes, plus the claim check.
 - `research_finish`: saves the result and the job's duration to `research_jobs`.
 
+Every workspace (app/workspaces.py) is served: the Temporal workflows carry their workspace and
+their activities run in it; the notifications dispatch, the profile refresh and the Gmail check
+pass over the workspaces, each in its own scope; and `schedules_loop` gives each workspace with
+Google connected its calendar sweep and Gmail schedules. The topic-research activities, the
+post-call reports and phone recordings are the owner's alone (his phone line, his files).
+
 Background tasks: the post-call report loop (app/post_call.py; VALR_POST_CALL=0 turns it
 off): queued recordings -> scores, interviewer cues and a review in the bell; the notifications
 dispatch (app/notifications.py: phone pushes, quiet hours, the 09:00 digest push); and phone
@@ -31,6 +37,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
 import psycopg
 from dotenv import load_dotenv
@@ -40,7 +47,7 @@ from temporalio.worker import Worker
 
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
-from app import research_jobs  # noqa: E402, tenant
+from app import research_jobs, tenant, workspaces  # noqa: E402
 from app.callback_workflow import workflow_runner  # noqa: E402
 from app.research_workflow import (TASK_QUEUE, FinishInput, PartInput, PartResult,  # noqa: E402
                                    ResearchCallbackWorkflow, SynthInput, SynthResult)
@@ -83,6 +90,11 @@ async def heartbeat_while(work: asyncio.Future) -> None:
 
 @activity.defn(name="research_part")
 async def research_part(task: PartInput) -> PartResult:
+    with workspaces.scope(tenant.OWNER):  # Topic research is booked on the owner's phone line.
+        return await run_part(task)
+
+
+async def run_part(task: PartInput) -> PartResult:
     from app import research_agents  # Heavy: loaded on first use, not at worker start.
     if await month_over_cap():
         logger.warning("VALR researcher %s skipped: the monthly cap is reached", task.part)
@@ -113,6 +125,11 @@ async def research_part(task: PartInput) -> PartResult:
 
 @activity.defn(name="research_synthesize")
 async def research_synthesize(task: SynthInput) -> SynthResult:
+    with workspaces.scope(tenant.OWNER):
+        return await synthesize(task)
+
+
+async def synthesize(task: SynthInput) -> SynthResult:
     from app import research_agents
     parts = [{"part": p.part, "ok": p.ok, "findings": json.loads(p.findings) if p.findings else None,
               "evidence": p.evidence} for p in task.parts]
@@ -133,6 +150,11 @@ async def research_synthesize(task: SynthInput) -> SynthResult:
 
 @activity.defn(name="research_finish")
 async def research_finish(task: FinishInput) -> None:
+    with workspaces.scope(tenant.OWNER):
+        await finish(task)
+
+
+async def finish(task: FinishInput) -> None:
     async with await connect() as connection:
         await research_jobs.finish(connection, task.job_id, task.status, task.duration_s,
                                    task.spoken, json.loads(task.notes or "[]"),
@@ -184,32 +206,87 @@ SWEEP_SCHEDULE = "valr-calendar-sweep"
 SYNC_WORKFLOW = "valr-calendar-sync"
 
 
-async def ensure_sweep(client: Client) -> None:
-    """The 6-hourly safety sweep of the calendar (also renews the push channel)."""
-    from temporalio.client import (Schedule, ScheduleActionStartWorkflow, ScheduleAlreadyRunningError,
-                                   ScheduleIntervalSpec, ScheduleOverlapPolicy, SchedulePolicy,
-                                   ScheduleSpec)
+def sweep_schedule(user: str = tenant.OWNER) -> tuple[str, Any]:
+    """A workspace's 6-hourly calendar sweep: (schedule id, action). The owner's ids are
+    `valr-calendar-sweep` and `valr-calendar-sweep-run` as always; a guest's end in `-<uid>`."""
+    from temporalio.client import ScheduleActionStartWorkflow
     from app.interview_workflow import CalendarSyncWorkflow, SyncInput
+    return workspaces.scoped_id(SWEEP_SCHEDULE, user), ScheduleActionStartWorkflow(
+        CalendarSyncWorkflow.run, SyncInput("sweep", user=user),
+        id=workspaces.scoped_id(f"{SWEEP_SCHEDULE}-run", user), task_queue=TASK_QUEUE)
+
+
+async def ensure_sweep(client: Client, user: str = tenant.OWNER) -> None:
+    """A workspace's 6-hourly safety sweep of the calendar (also renews the push channel)."""
+    from temporalio.client import (Schedule, ScheduleAlreadyRunningError, ScheduleIntervalSpec,
+                                   ScheduleOverlapPolicy, SchedulePolicy, ScheduleSpec)
     hours = float(os.getenv("VALR_CALENDAR_SWEEP_HOURS", "6"))
+    name, action = sweep_schedule(user)
     schedule = Schedule(
-        action=ScheduleActionStartWorkflow(CalendarSyncWorkflow.run, SyncInput("sweep"),
-                                           id="valr-calendar-sweep-run", task_queue=TASK_QUEUE),
-        spec=ScheduleSpec(intervals=[ScheduleIntervalSpec(every=timedelta(hours=hours))]),
+        action=action, spec=ScheduleSpec(intervals=[ScheduleIntervalSpec(every=timedelta(hours=hours))]),
         policy=SchedulePolicy(overlap=ScheduleOverlapPolicy.SKIP))
     try:
-        await client.create_schedule(SWEEP_SCHEDULE, schedule, trigger_immediately=True)
-        logger.info("VALR calendar sweep scheduled every %g h", hours)
+        await client.create_schedule(name, schedule, trigger_immediately=True)
+        logger.info("VALR calendar sweep %s scheduled every %g h", name, hours)
     except ScheduleAlreadyRunningError:
         pass
 
 
-async def start_sync(client: Client, reason: str, full: bool = False):
-    """Sync now (signal-with-start: a sync already running makes one more pass)."""
+async def start_sync(client: Client, reason: str, full: bool = False, user: str | None = None):
+    """Sync a workspace's calendar now (default: the current one; signal-with-start: a sync
+    already running makes one more pass)."""
     from temporalio.common import WorkflowIDConflictPolicy
-    from app.interview_workflow import CalendarSyncWorkflow, SyncInput
+    from app.interview_workflow import CalendarSyncWorkflow
+    from app.interviews import sync_request
+    request, workflow_id = sync_request(reason, full, user)
     return await client.start_workflow(
-        CalendarSyncWorkflow.run, SyncInput(reason, full), id=SYNC_WORKFLOW, task_queue=TASK_QUEUE,
+        CalendarSyncWorkflow.run, request, id=workflow_id, task_queue=TASK_QUEUE,
         start_signal="poke", id_conflict_policy=WorkflowIDConflictPolicy.USE_EXISTING)
+
+
+SCHEDULES_EVERY_S = 300.0  # A newly connected workspace gets its schedules within five minutes.
+
+
+async def ensure_schedules(client: Client, done: set[str]) -> list[str]:
+    """Every workspace with Google connected (the owner always) gets its calendar sweep and, with
+    VALR_LEADS=1, its Gmail poll and watch renewal; `done` remembers whom this process already
+    served. -> the workspaces newly served. A workspace that disconnects keeps its schedules:
+    their runs find no token and stop at once (Delete my data removes them)."""
+    from app import lead_worker
+    briefings = os.getenv("VALR_BRIEFINGS", "1") == "1"
+    added = []
+    for user in await workspaces.connected(connect):
+        if user in done:
+            continue
+        try:
+            if briefings and (not workspaces.owner(user) or os.getenv("VALR_CALENDAR_ICS_URL")
+                              or os.getenv("GOOGLE_OAUTH_CLIENT_ID")):
+                await ensure_sweep(client, user)
+            await lead_worker.ensure_lead_schedules(client, user)
+        except Exception as error:  # noqa: BLE001 - tried again next time; the others go on
+            logger.warning("VALR schedules for workspace %s not ensured: %s", user, type(error).__name__)
+            continue
+        done.add(user)
+        added.append(user)
+    return added
+
+
+async def schedules_loop(client: Client, stop: asyncio.Event | None = None,
+                         every: float = SCHEDULES_EVERY_S) -> None:
+    """The research worker's background task: `ensure_schedules` at start, then every `every` s."""
+    stop = stop or asyncio.Event()
+    done: set[str] = set()
+    if os.getenv("VALR_BRIEFINGS", "1") != "1":
+        logger.info("VALR interview briefings are off (VALR_BRIEFINGS=0)")
+    while not stop.is_set():
+        try:
+            await ensure_schedules(client, done)
+        except Exception as error:  # noqa: BLE001 - keep the worker alive
+            logger.warning("VALR schedules loop: %s", type(error).__name__)
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=every)
+        except asyncio.TimeoutError:
+            pass
 
 
 async def temporal_client() -> Client:
@@ -330,6 +407,8 @@ async def reschedule_briefings() -> None:
 
 
 async def main() -> None:
+    # No workspace by default (app/tenant.py fails closed): each activity and loop chooses its own.
+    tenant.current.set(None)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     for noisy in ("httpx", "crewai", "LiteLLM", "opentelemetry"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
@@ -339,7 +418,7 @@ async def main() -> None:
     llm_gateway.shared()  # Logs the gateway it uses.
     from app.interview_worker import InterviewActivities
     from app.interview_workflow import BlockCallWorkflow, CalendarSyncWorkflow, InterviewSlotWorkflow
-    from app.lead_worker import LeadActivities, ensure_lead_schedules
+    from app.lead_worker import LeadActivities
     from app.lead_workflow import GmailSyncWorkflow, GmailWatchWorkflow
     address = os.getenv("TEMPORAL_ADDRESS", "localhost:7233")
     namespace = os.getenv("TEMPORAL_NAMESPACE", "default")
@@ -357,24 +436,25 @@ async def main() -> None:
     logger.info("VALR research worker on %s, namespace %s, task queue %s; topic research limits %s; interview "
                 "limits %s", address, namespace, TASK_QUEUE, asdict(research_jobs.Limits.from_env()),
                 asdict(research_jobs.Limits.interview_from_env()))
-    if os.getenv("VALR_BRIEFINGS", "1") == "1" and (os.getenv("VALR_CALENDAR_ICS_URL")
-                                                     or os.getenv("GOOGLE_OAUTH_CLIENT_ID")):
-        await ensure_sweep(client)
-    else:
-        logger.info("VALR interview briefings are off (VALR_BRIEFINGS=0 or no calendar source)")
-    await ensure_lead_schedules(client)
     from app import post_call
     from app import notifications, phone_recordings
-    reports = asyncio.create_task(post_call.loop(connect)) if post_call.enabled() else None
-    # The bell's pushes (held items when quiet hours end, the digest) and phone recordings.
-    from app import owner  # The owner's profile (name, zone, phone), re-read every minute.
-    background = [asyncio.create_task(notifications.loop(connect)), asyncio.create_task(owner.keep_fresh())]
+    # Every workspace's calendar sweep and Gmail schedules, as each connects Google.
+    background = [asyncio.create_task(schedules_loop(client))]
+    # The bell's pushes (held items when quiet hours end, the digest) and every workspace's
+    # profile (name, zone), re-read every minute: each workspace in its own scope.
+    from app import owner
+    background += [asyncio.create_task(notifications.loop(connect)),
+                   asyncio.create_task(owner.keep_fresh(connect=connect))]
     from app import lead_worker
     if lead_worker.enabled():  # A Gmail push that never came: caught within ~a minute.
         background.append(asyncio.create_task(lead_worker.check_loop(
             connect, lambda reason: lead_worker.start_sync(client, reason))))
-    if phone_recordings.enabled():
-        background.append(asyncio.create_task(phone_recordings.loop(connect)))
+    # The owner's alone (README, "Workspaces"): post-call scorecards write his performance files,
+    # and phone recordings come from his iPhone.
+    with tenant.as_user(tenant.OWNER):
+        reports = asyncio.create_task(post_call.loop(connect)) if post_call.enabled() else None
+        if phone_recordings.enabled():
+            background.append(asyncio.create_task(phone_recordings.loop(connect)))
     try:
         await worker.run()
     finally:

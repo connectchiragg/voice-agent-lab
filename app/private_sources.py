@@ -144,7 +144,8 @@ def matches(text: str, terms: list[str]) -> bool:
 
 
 def fathom_search(http: httpx.Client, terms: list[str], key: str | None = None) -> tuple[str, list[str]]:
-    key = (key or os.getenv("FATHOM_API_KEY", "")).strip()
+    from app import workspaces
+    key = (key or (os.getenv("FATHOM_API_KEY", "") if workspaces.is_owner() else "")).strip()
     if not key:
         return "Fathom: not configured.", []
     response = http.get(FATHOM_MEETINGS, params={"include_summary": "true", "limit": 50},
@@ -228,7 +229,11 @@ def history_path() -> Path:
 
 
 def history(company: str, terms: list[str], path: Path | None = None) -> tuple[str, list[str]]:
-    """Earlier recorded rounds with this company, from the derived evaluation file."""
+    """Earlier recorded rounds with this company, from the derived evaluation file (the owner's:
+    nothing for a guest)."""
+    from app import workspaces
+    if path is None and not workspaces.is_owner():
+        return "", []
     paths = [path] if path else [history_path()]
     if path is None:
         from app.profile.config import settings

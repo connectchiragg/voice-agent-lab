@@ -17,6 +17,10 @@
 - `GmailWatchWorkflow`: renews users.watch (activity `gmail_watch`). The Schedule
   `valr-gmail-watch` runs it once a day; Google ends a watch after 7 days.
 
+Workspaces (app/workspaces.py): every input carries its workspace (`user`; the owner's when
+absent, as in runs started before), and so do the activities it starts. The owner keeps the ids
+above; a guest's are suffixed with their workspace id (`valr-gmail-sync-u_...`).
+
 Workflow code reads time only through workflow.now() and does all I/O in activities.
 """
 from dataclasses import dataclass, field
@@ -29,6 +33,7 @@ TASK_QUEUE = "voice-research"
 SYNC_WORKFLOW_ID = "valr-gmail-sync"
 POLL_SCHEDULE = "valr-gmail-poll"
 WATCH_SCHEDULE = "valr-gmail-watch"
+OWNER = "owner"  # app/tenant.OWNER (not imported: workflow code stays free of psycopg).
 BACKFILL_RESUME_PATCH = "gmail-backfill-resume"
 PAUSED = "paused-ratelimit"
 NO_SETTLE_PATCH = "gmail-no-settle"
@@ -41,6 +46,7 @@ MORE_AFTER = timedelta(seconds=30)  # After a run that hit the per-run cap.
 class GmailSyncInput:
     reason: str  # push | poll | manual | resume
     history_id: int = 0  # From the push, when there is one (skip if already processed).
+    user: str = OWNER  # The workspace (app/workspaces.py); inputs from before it: the owner's.
 
 
 @dataclass
@@ -98,14 +104,15 @@ class GmailSyncWorkflow:
             if summary.mode == PAUSED and workflow.patched(BACKFILL_RESUME_PATCH):
                 break  # Rate limited: no pass right away, the resume below waits first.
         await workflow.execute_activity(
-            "leads_refresh", request.reason, result_type=RefreshSummary,
+            "leads_refresh", args=[request.reason, request.user], result_type=RefreshSummary,
             start_to_close_timeout=timedelta(minutes=3),
             retry_policy=RetryPolicy(maximum_attempts=3, initial_interval=timedelta(seconds=10)))
         if summary.more and workflow.patched(BACKFILL_RESUME_PATCH):
             await workflow.sleep(RESUME_AFTER if summary.mode == PAUSED else MORE_AFTER)
-            workflow.continue_as_new(GmailSyncInput("resume"))
+            workflow.continue_as_new(GmailSyncInput("resume", user=request.user))
         if self.pokes and workflow.patched(POKE_AFTER_REFRESH_PATCH):
-            workflow.continue_as_new(GmailSyncInput("push"))  # Mail that came during the rebuild.
+            # Mail that came during the rebuild.
+            workflow.continue_as_new(GmailSyncInput("push", user=request.user))
         return summary
 
     @workflow.signal
@@ -116,8 +123,8 @@ class GmailSyncWorkflow:
 @workflow.defn
 class GmailWatchWorkflow:
     @workflow.run
-    async def run(self, reason: str) -> WatchSummary:
+    async def run(self, reason: str, user: str = OWNER) -> WatchSummary:
         return await workflow.execute_activity(
-            "gmail_watch", reason, result_type=WatchSummary,
+            "gmail_watch", args=[reason, user], result_type=WatchSummary,
             start_to_close_timeout=timedelta(minutes=1),
             retry_policy=RetryPolicy(maximum_attempts=5, initial_interval=timedelta(minutes=1)))

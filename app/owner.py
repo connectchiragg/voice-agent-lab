@@ -436,11 +436,22 @@ async def refresh(connection: Any = None, force: bool = False) -> None:
         logger.warning("VALR owner profile unavailable: %s", type(error).__name__)
 
 
-async def keep_fresh(stop: asyncio.Event | None = None, every: float = FRESH_S) -> None:
-    """A worker's background task: reload the owner's profile every minute."""
+async def keep_fresh(stop: asyncio.Event | None = None, every: float = FRESH_S, connect: Any = None) -> None:
+    """A worker's background task: reload the profile every minute. With `connect`, every
+    workspace's (app/workspaces.each, each in its own scope: its name and zone for its bell,
+    digest and briefings); without, the current one's."""
+    from app import workspaces
     stop = stop or asyncio.Event()
+
+    async def one(user: str) -> None:
+        async with await connect() as connection:
+            await refresh(connection, force=True)
+            await workspaces.prepare(connection, force=True)
     while not stop.is_set():
-        await refresh(force=True)
+        if connect is None:
+            await refresh(force=True)
+        else:
+            await workspaces.each(one, label="profile refresh", connect=connect, budget_s=max(every / 2, 10.0))
         try:
             await asyncio.wait_for(stop.wait(), timeout=every)
         except asyncio.TimeoutError:

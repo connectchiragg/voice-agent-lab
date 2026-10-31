@@ -64,7 +64,7 @@ import psycopg
 from temporalio import activity
 
 from app import (company_names, company_resolver, gmail_api, google_oauth, lead_classify, leads, leads_store,
-                 notify_context, research_jobs, tenant)
+                 notify_context, research_jobs, tenant, workspaces)
 from app.lead_classify import Decision, Email
 from app.lead_workflow import GmailSyncInput, GmailSyncSummary, RefreshSummary, WatchSummary
 from app.leads import Contact, Touch
@@ -375,17 +375,20 @@ class LeadActivities:
 
     @activity.defn(name="gmail_sync")
     async def gmail_sync(self, request: GmailSyncInput) -> GmailSyncSummary:
-        async with await connect() as connection:
-            await leads_store.setup(connection)
-            await research_jobs.setup(connection)
-            await connection.execute("SELECT pg_advisory_lock(%s)", (SYNC_LOCK,))
-            try:
-                return await self.sync(connection, request, datetime.now(timezone.utc))
-            except Exception as error:
-                await leads_store.save_state(connection, last_error=type(error).__name__)
-                raise
-            finally:
-                await connection.execute("SELECT pg_advisory_unlock(%s)", (SYNC_LOCK,))
+        with workspaces.scope(request.user):
+            async with await connect() as connection:
+                await leads_store.setup(connection)
+                await research_jobs.setup(connection)
+                await workspaces.prepare(connection)
+                lock = workspaces.lock_key(SYNC_LOCK)  # One pass at a time per workspace.
+                await connection.execute("SELECT pg_advisory_lock(%s)", (lock,))
+                try:
+                    return await self.sync(connection, request, datetime.now(timezone.utc))
+                except Exception as error:
+                    await leads_store.save_state(connection, last_error=type(error).__name__)
+                    raise
+                finally:
+                    await connection.execute("SELECT pg_advisory_unlock(%s)", (lock,))
 
     async def sync(self, connection: Any, request: GmailSyncInput, now: datetime) -> GmailSyncSummary:
         from app.interview_worker import gmail_access
@@ -645,7 +648,11 @@ class LeadActivities:
         return True
 
     @activity.defn(name="gmail_watch")
-    async def gmail_watch(self, reason: str) -> WatchSummary:
+    async def gmail_watch(self, reason: str, user: str = tenant.OWNER) -> WatchSummary:
+        with workspaces.scope(user):
+            return await self.watch(reason)
+
+    async def watch(self, reason: str) -> WatchSummary:
         from app.interview_worker import gmail_access
         name = topic()
         if not name:
@@ -669,11 +676,16 @@ class LeadActivities:
     # Leads.
 
     @activity.defn(name="leads_refresh")
-    async def leads_refresh(self, reason: str) -> RefreshSummary:
+    async def leads_refresh(self, reason: str, user: str = tenant.OWNER) -> RefreshSummary:
+        with workspaces.scope(user):
+            return await self.refresh(reason)
+
+    async def refresh(self, reason: str) -> RefreshSummary:
         now = datetime.now(timezone.utc)
         summary = RefreshSummary()
         async with await connect() as connection:
             await leads_store.setup(connection)
+            await workspaces.prepare(connection)
             fathom = await self.fathom_touches(now)
             sources = {"calendar": await self.calendar_touches(connection, now),
                        "recording": fathom + await stored_recording_touches(connection, now, {t.id for t in fathom}),
@@ -714,7 +726,9 @@ class LeadActivities:
         return calendar_to_touches(events, owner_emails(), known)
 
     async def fathom_touches(self, now: datetime) -> list[Touch]:
-        key = os.getenv("FATHOM_API_KEY", "").strip()
+        """The owner's Fathom by the server's FATHOM_API_KEY (a guest's recordings come from
+        their stored notetaker key, `stored_recording_touches`)."""
+        key = os.getenv("FATHOM_API_KEY", "").strip() if workspaces.is_owner() else ""
         if not key:
             return []
         try:
@@ -862,6 +876,9 @@ def stored_to_touches(rows: list[dict[str, Any]], skip: set[str] = frozenset()) 
 
 
 def read_performance() -> dict[str, Any] | None:
+    """The owner's scored interviews (a server file): None for a guest."""
+    if not workspaces.is_owner():
+        return None
     path = Path(os.getenv("VALR_PERFORMANCE_PATH") or "/data/performance.json").expanduser()
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -1282,9 +1299,15 @@ class GmailCheck:
         return "waiting" if new else "idle"
 
 
+CHECK_BUDGET_S = 20.0  # One workspace's tick at most (a history.list and a query).
+
+
 async def check_loop(connect: Callable[[], Any], start: Callable[[str], Any], stop: Any = None,
                      check: GmailCheck | None = None) -> None:
-    """The research worker's background task: a GmailCheck tick every check_every() seconds."""
+    """The research worker's background task: every check_every() seconds, a GmailCheck tick for
+    each workspace with Google connected (app/workspaces.each: each in its own scope, so
+    `start(reason)` starts that workspace's sync; one failing never stops the others). `check`:
+    a test's single check, ticked in the current scope."""
     every = check_every()
     if not every:
         logger.info("VALR leads: the fast Gmail check is off (VALR_GMAIL_CHECK_S=0)")
@@ -1293,10 +1316,17 @@ async def check_loop(connect: Callable[[], Any], start: Callable[[str], Any], st
         logger.error("VALR leads: VALR_GMAIL_TOPIC is not set: no Gmail push, so the notification SLA "
                      "(new email in the app within 10 s) cannot be met; checking Gmail every %g s instead", every)
     stop = stop or asyncio.Event()
-    check = check or GmailCheck(connect, start)
+    checks: dict[str, GmailCheck] = {}  # One per workspace: its token and the mail it waits for.
+
+    async def tick(user: str) -> str:
+        return await checks.setdefault(user, GmailCheck(connect, start)).tick()
     while not stop.is_set():
         try:
-            await check.tick()
+            if check is not None:
+                await check.tick()
+            else:
+                await workspaces.each(tick, label="Gmail check", only=await workspaces.connected(connect),
+                                      budget_s=CHECK_BUDGET_S)
         except Exception as error:  # noqa: BLE001 - keep the worker alive
             logger.warning("VALR leads: Gmail check failed (%s)", type(error).__name__)
         try:
@@ -1305,38 +1335,62 @@ async def check_loop(connect: Callable[[], Any], start: Callable[[str], Any], st
             pass
 
 
-async def start_sync(client: Any, reason: str) -> None:
-    """Start (or poke) the Gmail sync workflow from the worker, like the push webhook does."""
+def sync_request(reason: str, history_id: int = 0, user: str | None = None) -> tuple[GmailSyncInput, str]:
+    """The Gmail sync's input and workflow id for a workspace (default: the current one): the
+    owner's id is `valr-gmail-sync` as always, a guest's `valr-gmail-sync-<uid>`."""
+    from app.lead_workflow import SYNC_WORKFLOW_ID
+    user = user or tenant.get() or tenant.OWNER
+    return GmailSyncInput(reason, history_id, user=user), workspaces.scoped_id(SYNC_WORKFLOW_ID, user)
+
+
+async def start_sync(client: Any, reason: str, user: str | None = None) -> None:
+    """Start (or poke) a workspace's Gmail sync workflow from the worker, like the push webhook
+    does (default: the current workspace)."""
     from temporalio.common import WorkflowIDConflictPolicy
-    from app.lead_workflow import SYNC_WORKFLOW_ID, TASK_QUEUE, GmailSyncWorkflow
-    await client.start_workflow(GmailSyncWorkflow.run, GmailSyncInput(reason), id=SYNC_WORKFLOW_ID,
+    from app.lead_workflow import TASK_QUEUE, GmailSyncWorkflow
+    request, workflow_id = sync_request(reason, user=user)
+    await client.start_workflow(GmailSyncWorkflow.run, request, id=workflow_id,
                                 task_queue=TASK_QUEUE, start_signal="poke",
                                 id_conflict_policy=WorkflowIDConflictPolicy.USE_EXISTING)
 
 
 # Schedules (the research worker calls this at start) and a small CLI.
 
-async def ensure_lead_schedules(client: Any) -> None:
-    """With VALR_LEADS=1: the 30-minute safety poll (its first run backfills) and the daily
-    watch renewal, both started at once. Without it: nothing (existing schedules stay)."""
-    from temporalio.client import (Schedule, ScheduleActionStartWorkflow, ScheduleAlreadyRunningError,
-                                   ScheduleIntervalSpec, ScheduleOverlapPolicy, SchedulePolicy, ScheduleSpec)
-    from app.lead_workflow import (POLL_SCHEDULE, TASK_QUEUE, WATCH_SCHEDULE, GmailSyncWorkflow,
-                                   GmailWatchWorkflow)
+def lead_schedules(user: str = tenant.OWNER) -> list[tuple[str, Any, timedelta]]:
+    """A workspace's (schedule id, action, interval): the 30-minute safety poll and, with
+    VALR_GMAIL_TOPIC, the daily watch renewal. The owner's ids are `valr-gmail-poll` and
+    `valr-gmail-watch` as always; a guest's end in `-<uid>` and their runs carry `user`."""
+    from temporalio.client import ScheduleActionStartWorkflow
+    from app.lead_workflow import POLL_SCHEDULE, TASK_QUEUE, WATCH_SCHEDULE, GmailSyncWorkflow, GmailWatchWorkflow
+    minutes = float(os.getenv("VALR_LEADS_POLL_MINUTES", "30"))
+    poll = GmailSyncInput("poll", user=user)
+    plans: list[tuple[str, Any, timedelta]] = [(
+        workspaces.scoped_id(POLL_SCHEDULE, user),
+        ScheduleActionStartWorkflow(GmailSyncWorkflow.run, poll, id=workspaces.scoped_id(f"{POLL_SCHEDULE}-run", user),
+                                    task_queue=TASK_QUEUE),
+        timedelta(minutes=minutes))]
+    if topic():
+        # The owner's keeps its one argument, as created before workspaces.
+        watch = ["schedule"] if workspaces.owner(user) else ["schedule", user]
+        plans.append((workspaces.scoped_id(WATCH_SCHEDULE, user),
+                      ScheduleActionStartWorkflow(GmailWatchWorkflow.run, args=watch,
+                                                  id=workspaces.scoped_id(f"{WATCH_SCHEDULE}-run", user),
+                                                  task_queue=TASK_QUEUE),
+                      timedelta(hours=24)))
+    return plans
+
+
+async def ensure_lead_schedules(client: Any, user: str = tenant.OWNER) -> None:
+    """With VALR_LEADS=1: a workspace's 30-minute safety poll (its first run backfills) and
+    daily watch renewal, both started at once. Without it: nothing (existing schedules stay)."""
+    from temporalio.client import (Schedule, ScheduleAlreadyRunningError, ScheduleIntervalSpec,
+                                   ScheduleOverlapPolicy, SchedulePolicy, ScheduleSpec)
     if not enabled():
         logger.info("VALR leads are off (VALR_LEADS=0)")
         return
-    minutes = float(os.getenv("VALR_LEADS_POLL_MINUTES", "30"))
-    plans = [(POLL_SCHEDULE, ScheduleActionStartWorkflow(GmailSyncWorkflow.run, GmailSyncInput("poll"),
-                                                         id=f"{POLL_SCHEDULE}-run", task_queue=TASK_QUEUE),
-              timedelta(minutes=minutes))]
-    if topic():
-        plans.append((WATCH_SCHEDULE, ScheduleActionStartWorkflow(GmailWatchWorkflow.run, "schedule",
-                                                                  id=f"{WATCH_SCHEDULE}-run", task_queue=TASK_QUEUE),
-                      timedelta(hours=24)))
-    else:
+    if not topic() and workspaces.owner(user):
         logger.warning("VALR leads: VALR_GMAIL_TOPIC is not set; no push, polling only")
-    for name, action, every in plans:
+    for name, action, every in lead_schedules(user):
         try:
             await client.create_schedule(name, Schedule(
                 action=action, spec=ScheduleSpec(intervals=[ScheduleIntervalSpec(every=every)]),

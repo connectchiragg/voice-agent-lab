@@ -858,11 +858,15 @@ async def lead_for_person(connection: Any, name: str, start: str | None) -> str:
 
 
 def candidate_name() -> str:
+    """How "you" appear in transcripts: the owner's profile settings (server env), else the
+    workspace's Profile; a guest never gets the owner's configured name."""
+    from app import owner, workspaces
+    if not workspaces.is_owner():
+        return owner.recording_name()
     try:
         from app.profile.config import settings
         return settings().candidate_name
     except Exception:  # noqa: BLE001
-        from app import owner
         return owner.recording_name()
 
 

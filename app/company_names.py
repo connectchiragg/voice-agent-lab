@@ -189,6 +189,9 @@ class Resolution:
 def owner_words(env: dict[str, str] | None = None) -> frozenset[str]:
     """Every part of the owner's names and address local parts, lower case."""
     live = env is None
+    if live:
+        from app import workspaces
+        env = os.environ if workspaces.is_owner() else {}  # A guest's workspace: their Profile names only.
     env = os.environ if env is None else env
     raw = " ".join(env.get(k, "") for k in ("VALR_OWNER_NAME", "VALR_CANDIDATE_NAME"))
     if live:  # The names edited on the Profile page too (app/owner.py).

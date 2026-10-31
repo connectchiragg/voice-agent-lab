@@ -38,7 +38,8 @@ from temporalio.client import Client
 from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
 from temporalio.service import RPCError
 
-from app import calendar_sync, google_oauth, interview_store, interview_types, owner, research_jobs, tenant
+from app import (calendar_sync, google_oauth, interview_store, interview_types, owner, research_jobs, tenant,
+                 workspaces)
 from app.interview_types import (Person, SlotEvent, attendee_role, company_key, group_blocks,
                                  people, slot_workflow_id)
 from app.interview_workflow import (TASK_QUEUE, BlockCallWorkflow, BlockInput, BlockRecord,
@@ -55,8 +56,9 @@ HEARTBEAT_S = 5
 
 
 def owner_emails() -> set[str]:
-    return {e.strip().lower() for e in os.getenv("VALR_OWNER_EMAILS", "").split(",") if e.strip()} \
-        | ({os.getenv("VALR_GMAIL_ACCOUNT", "").strip().lower()} - {""})
+    """The current workspace's own addresses ("you" on an invite): the owner's configured ones,
+    or a guest's sign-in and Google account (app/workspaces.emails)."""
+    return workspaces.emails()
 
 
 def owner_phone() -> str:
@@ -65,8 +67,9 @@ def owner_phone() -> str:
 
 
 def owner_key() -> str:
-    """The stable owner key: caller memory, limits and workflows survive a new number."""
-    return owner.KEY
+    """The workspace's stable key: "owner" (caller memory, limits and workflows survive a new
+    number), or a guest's `email:<address>` (app/workspaces.caller_key)."""
+    return workspaces.caller_key()
 
 
 def zone() -> ZoneInfo:
@@ -177,14 +180,17 @@ class InterviewActivities:
 
     @activity.defn(name="calendar_sync")
     async def calendar_sync(self, request: SyncInput) -> SyncSummary:
-        async with await connect() as connection:
-            await calendar_sync.setup(connection)
-            await interview_store.setup(connection)
-            await connection.execute("SELECT pg_advisory_lock(%s)", (SYNC_LOCK,))
-            try:
-                return await self.sync(connection, request, datetime.now(timezone.utc))
-            finally:
-                await connection.execute("SELECT pg_advisory_unlock(%s)", (SYNC_LOCK,))
+        with workspaces.scope(request.user):
+            async with await connect() as connection:
+                await calendar_sync.setup(connection)
+                await interview_store.setup(connection)
+                await workspaces.prepare(connection)
+                lock = workspaces.lock_key(SYNC_LOCK)  # One sync at a time per workspace.
+                await connection.execute("SELECT pg_advisory_lock(%s)", (lock,))
+                try:
+                    return await self.sync(connection, request, datetime.now(timezone.utc))
+                finally:
+                    await connection.execute("SELECT pg_advisory_unlock(%s)", (lock,))
 
     async def sync(self, connection: Any, request: SyncInput, now: datetime) -> SyncSummary:
         summary = SyncSummary()
@@ -207,7 +213,7 @@ class InterviewActivities:
             events, cancelled = calendar_sync.from_google_items(items)
             summary.source = "google"
         else:
-            url = os.getenv("VALR_CALENDAR_ICS_URL", "").strip()
+            url = os.getenv("VALR_CALENDAR_ICS_URL", "").strip() if workspaces.is_owner() else ""
             if not url:
                 summary.error = f"no calendar source (Google {status}, no ICS URL)"
                 return summary
@@ -303,17 +309,20 @@ class InterviewActivities:
             return 0
         limits = research_jobs.Limits.interview_from_env()
         await self.client.start_workflow(
-            InterviewSlotWorkflow.run, SlotInput(event, owner_key(), block_id, due, limits.job_usd),
+            InterviewSlotWorkflow.run, SlotInput(event, owner_key(), block_id, due, limits.job_usd,
+                                                 user=tenant.get() or tenant.OWNER),
             id=workflow_id, task_queue=TASK_QUEUE,
             id_reuse_policy=WorkflowIDReusePolicy.ALLOW_DUPLICATE,
             id_conflict_policy=WorkflowIDConflictPolicy.USE_EXISTING)
         return 1
 
     async def start_block(self, block: Any, label: str) -> int:
+        mine = workspaces.is_owner()  # A guest's block sends the heads-up only: no phone, no dial.
         request = BlockInput(block.block_id, block.start_utc, block.slot_keys, owner_key(),
-                             owner_phone(), label,
+                             owner_phone() if mine else "", label,
                              dials_per_day=int(os.getenv("VALR_BRIEFING_DIALS_PER_DAY", 12)),
-                             dial=os.getenv("VALR_BRIEFING_DIAL", "1") == "1")
+                             dial=mine and os.getenv("VALR_BRIEFING_DIAL", "1") == "1",
+                             user=tenant.get() or tenant.OWNER)
         try:
             await self.client.start_workflow(
                 BlockCallWorkflow.run, request, id=block.block_id, task_queue=TASK_QUEUE,
@@ -332,7 +341,7 @@ class InterviewActivities:
         if not calendar_sync.needs_renewal(state, now):
             return "ok"
         try:
-            channel = await calendar_sync.watch(self.http, token, address, now)
+            channel = await calendar_sync.watch(self.http, token, address, now, workspace=tenant.get())
         except httpx.HTTPError as error:
             status = getattr(getattr(error, "response", None), "status_code", "")
             logger.warning("VALR calendar watch failed: %s %s", type(error).__name__, status)
@@ -352,10 +361,15 @@ class InterviewActivities:
 
     @activity.defn(name="slot_plan")
     async def slot_plan(self, plan: PlanInput) -> PlanResult:
+        with workspaces.scope(plan.user):
+            return await self.plan(plan)
+
+    async def plan(self, plan: PlanInput) -> PlanResult:
         event = plan.event
         parts = [p for p in plan.parts if p != "resynth"]
         hits: list[str] = []
         async with await connect() as connection:
+            await workspaces.prepare(connection)
             await research_jobs.setup(connection)
             await interview_store.setup(connection)
             existing = await interview_store.load_slot(connection, event.key)
@@ -386,6 +400,10 @@ class InterviewActivities:
 
     @activity.defn(name="interview_part")
     async def interview_part(self, task: InterviewPartInput) -> InterviewPartResult:
+        with workspaces.scope(task.user):
+            return await self.part(task)
+
+    async def part(self, task: InterviewPartInput) -> InterviewPartResult:
         from app import interview_agents, research_agents  # Heavy: loaded on first use.
         from app.research_worker import heartbeat_while, save_spend
         event = task.event
@@ -394,6 +412,7 @@ class InterviewActivities:
         interviewers = list(task.interviewers)
         skipped = 0
         async with await connect() as connection:
+            await workspaces.prepare(connection)
             await research_jobs.mark_started(connection, task.job_id)
             if task.part == "private":
                 private.gmail_token, private.gmail_status = await gmail_access(connection, self.http)
@@ -460,10 +479,15 @@ class InterviewActivities:
 
     @activity.defn(name="slot_synthesize")
     async def slot_synthesize(self, task: SlotSynthInput) -> SlotSynthResult:
+        with workspaces.scope(task.user):
+            return await self.synthesize(task)
+
+    async def synthesize(self, task: SlotSynthInput) -> SlotSynthResult:
         from app import interview_agents, research_agents
         from app.research_worker import heartbeat_while, save_spend
         event = task.event
         async with await connect() as connection:
+            await workspaces.prepare(connection)
             await interview_store.setup(connection)
             stored = await interview_store.load_slot(connection, event.key)
             parts = merge_parts((stored or {}).get("parts") or {}, task.parts, task.removed)
@@ -516,36 +540,44 @@ class InterviewActivities:
 
     @activity.defn(name="slot_finish")
     async def slot_finish(self, task: SlotFinish) -> None:
-        async with await connect() as connection:
-            await research_jobs.finish(connection, task.job_id, task.status, task.duration_s, "",
-                                       [], [], task.cap_hits, task.detail)
+        with workspaces.scope(task.user):
+            async with await connect() as connection:
+                await research_jobs.finish(connection, task.job_id, task.status, task.duration_s, "",
+                                           [], [], task.cap_hits, task.detail)
 
     @activity.defn(name="slots_ready")
-    async def slots_ready(self, keys: list[str]) -> bool:
-        async with await connect() as connection:
-            await interview_store.setup(connection)
-            return await interview_store.ready(connection, keys)
+    async def slots_ready(self, keys: list[str], user: str = tenant.OWNER) -> bool:
+        with workspaces.scope(user):
+            async with await connect() as connection:
+                await interview_store.setup(connection)
+                return await interview_store.ready(connection, keys)
 
     @activity.defn(name="block_record")
     async def block_record(self, record: BlockRecord) -> None:
-        async with await connect() as connection:
-            await interview_store.setup(connection)
-            await interview_store.record_block(connection, record.block_id, record.start_utc,
-                                               record.slot_keys, record.label, record.state)
-
-    @activity.defn(name="dials_paused")
-    async def dials_paused(self) -> bool:
-        async with await connect() as connection:
-            await interview_store.setup(connection)
-            return (await interview_store.flag(connection, interview_store.DIALS_PAUSED))["enabled"]
-
-    @activity.defn(name="briefing_auto_dial")
-    async def briefing_auto_dial(self) -> bool:
-        """The owner's Settings choice (heads-up vs automatic call), else VALR_AUTO_DIAL."""
-        try:
+        with workspaces.scope(record.user):
             async with await connect() as connection:
                 await interview_store.setup(connection)
-                return await interview_store.auto_dial(connection)
+                await interview_store.record_block(connection, record.block_id, record.start_utc,
+                                                   record.slot_keys, record.label, record.state)
+
+    @activity.defn(name="dials_paused")
+    async def dials_paused(self, user: str = tenant.OWNER) -> bool:
+        with workspaces.scope(user):
+            async with await connect() as connection:
+                await interview_store.setup(connection)
+                return (await interview_store.flag(connection, interview_store.DIALS_PAUSED))["enabled"]
+
+    @activity.defn(name="briefing_auto_dial")
+    async def briefing_auto_dial(self, user: str = tenant.OWNER) -> bool:
+        """The owner's Settings choice (heads-up vs automatic call), else VALR_AUTO_DIAL. Never
+        for a guest: the Telnyx line is the owner's, so a guest always gets the heads-up."""
+        if not workspaces.owner(user):
+            return False
+        try:
+            with workspaces.scope(user):
+                async with await connect() as connection:
+                    await interview_store.setup(connection)
+                    return await interview_store.auto_dial(connection)
         except Exception as error:  # noqa: BLE001 - the database is down: the server default.
             activity.logger.warning("Auto-dial choice unavailable: %s", type(error).__name__)
             return interview_store.default_auto_dial()
@@ -553,6 +585,10 @@ class InterviewActivities:
     @activity.defn(name="push_heads_up")
     async def push_heads_up(self, request: HeadsUpInput) -> str:
         """The block's heads-up: 'sent', 'no_device' (it is in the bell only) or why not."""
+        with workspaces.scope(request.user):
+            return await self.heads_up(request)
+
+    async def heads_up(self, request: HeadsUpInput) -> str:
         from app import notifications
         async with await connect() as connection:
             await interview_store.setup(connection)
@@ -593,9 +629,11 @@ def heads_up_note(block_id: str, events: list[SlotEvent], now: datetime) -> dict
     minutes = max(round((datetime.fromisoformat(first.start_utc) - now).total_seconds() / 60), 0)
     more = f" (+{len(events) - 1} more)" if len(events) > 1 else ""
     title = f"{who} {noun if who.lower() != noun else ''}".strip() + f" in {minutes} min{more}"
+    calls = workspaces.is_owner()  # A guest's opens the written briefing: calls are the owner's line.
     return {"source_id": f"heads_up:{block_id}", "kind": "briefing", "title": title[:60],
-            "body": "Tap for your briefing call.", "company": (first.company or "")[:120],
-            "link": f"/valr/interviews/{slot_workflow_id(first.key)}?call=ready", "gmail_url": "",
+            "body": "Tap for your briefing call." if calls else "Tap for your briefing.",
+            "company": (first.company or "")[:120],
+            "link": f"/valr/interviews/{slot_workflow_id(first.key)}" + ("?call=ready" if calls else ""), "gmail_url": "",
             "thread_id": None, "action": "", "interview_at": datetime.fromisoformat(first.start_utc)}
 
 
@@ -658,6 +696,9 @@ async def company_history(connection: Any, event: SlotEvent) -> tuple[str, str]:
 
 
 def history_available() -> bool:
+    """The owner's derived history files exist (a guest has none: they are the owner's)."""
+    if not workspaces.is_owner():
+        return False
     from app.private_sources import history_path
     from app.profile.config import settings
     return history_path().exists() or settings().performance_path.exists()
@@ -683,11 +724,16 @@ async def notetaker_keys(connection: Any) -> tuple[str | None, str | None]:
         return (await notetakers.api_key(connection, "fathom"), await notetakers.api_key(connection, "granola"))
     except Exception as error:  # noqa: BLE001 - a store problem must not stop R1's other sources.
         logger.warning("VALR notetaker keys unavailable: %s", type(error).__name__)
+        if not workspaces.is_owner():
+            return None, None  # The environment's keys are the owner's.
         return (os.getenv("FATHOM_API_KEY", "").strip() or None, os.getenv("GRANOLA_API_KEY", "").strip() or None)
 
 
 def owner_context() -> tuple[str, str]:
-    """The profile brief with pay REDACTED (it goes to Claude) and the evaluation brief."""
+    """The profile brief with pay REDACTED (it goes to Claude) and the evaluation brief: the
+    owner's files only ("", "" for a guest)."""
+    if not workspaces.is_owner():
+        return "", ""
     try:
         from app.profile.config import settings as profile_settings
         from app.profile.profile import load_profile, redacted_summary

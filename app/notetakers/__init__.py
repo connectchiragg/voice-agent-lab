@@ -62,6 +62,10 @@ def token_key() -> str:
 
 
 def env_key(provider: str) -> str:
+    """The server's key for a provider (FATHOM_API_KEY...): the owner's, never a guest's."""
+    from app import workspaces
+    if not workspaces.is_owner():
+        return ""
     return os.getenv(ENV_KEYS.get(provider, ""), "").strip() if provider in ENV_KEYS else ""
 
 

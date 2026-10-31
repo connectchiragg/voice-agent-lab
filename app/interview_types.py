@@ -75,8 +75,20 @@ class SlotDiff:
     removed: list[str] = field(default_factory=list)  # Emails.
 
 
+def workspace() -> str | None:
+    """The current guest workspace, or None for the owner (app/tenant.py, imported lazily:
+    workflow code imports this module, never this function)."""
+    from app import tenant
+    user = tenant.get()
+    return None if user in (None, "", tenant.OWNER) else user
+
+
 def slot_workflow_id(key: str) -> str:
-    return "slot-" + hashlib.sha256(key.encode()).hexdigest()[:20]
+    """The event's slot workflow (and its page's ref): `slot-<20 hex>`. The owner's is the hash
+    of the key, as always; a guest's hashes their workspace in too, so two workspaces invited to
+    the same event (the same Google event id) never share a workflow."""
+    user = workspace()
+    return "slot-" + hashlib.sha256((f"{user}:{key}" if user else key).encode()).hexdigest()[:20]
 
 
 def domain_of(email: str) -> str:
@@ -166,10 +178,12 @@ class BlockPlan:
 
 
 def block_id_for(start_utc: str) -> str:
-    """Derived from the block's start only: the same block keeps its id on every sync."""
+    """Derived from the block's start (and a guest's workspace) only: the same block keeps its
+    id on every sync. The owner's: `briefing-<UTC start>`; a guest's: `...-<uid>`."""
     from datetime import datetime, timezone
     moment = datetime.fromisoformat(start_utc).astimezone(timezone.utc)
-    return f"briefing-{moment:%Y%m%dT%H%MZ}"
+    user = workspace()
+    return f"briefing-{moment:%Y%m%dT%H%MZ}" + (f"-{user}" if user else "")
 
 
 def group_blocks(events: list[SlotEvent]) -> list[BlockPlan]:

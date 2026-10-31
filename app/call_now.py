@@ -27,11 +27,14 @@ TALK_LABEL = "a quick chat"
 
 async def start_slot_research(client: Any, event: SlotEvent, owner_key: str, block_id: str,
                               refresh: bool, research_s: int, job_usd: float, **rpc: Any) -> None:
-    """Make sure the slot's workflow runs, and ask it to research now within `research_s`."""
+    """Make sure the slot's workflow runs, and ask it to research now within `research_s`.
+    In the current workspace (app/workspaces.py): its slot id and input are that workspace's."""
+    from app import tenant
     workflow_id = slot_workflow_id(event.key)
     now = datetime.now(timezone.utc).isoformat()
     await client.start_workflow(
-        InterviewSlotWorkflow.run, SlotInput(event, owner_key, block_id, now, job_usd),
+        InterviewSlotWorkflow.run, SlotInput(event, owner_key, block_id, now, job_usd,
+                                             user=tenant.get() or tenant.OWNER),
         id=workflow_id, task_queue=TASK_QUEUE,
         id_reuse_policy=WorkflowIDReusePolicy.ALLOW_DUPLICATE,
         id_conflict_policy=WorkflowIDConflictPolicy.USE_EXISTING, **rpc)

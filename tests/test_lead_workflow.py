@@ -24,12 +24,12 @@ def test_pokes_make_one_more_pass_and_the_refresh_runs_once():
         return GmailSyncSummary(mode="history", fetched=1)
 
     @activity.defn(name="leads_refresh")
-    async def leads_refresh(reason: str) -> RefreshSummary:
+    async def leads_refresh(reason: str, user: str = "owner") -> RefreshSummary:
         calls.append(("refresh", reason))
         return RefreshSummary(leads=1)
 
     @activity.defn(name="gmail_watch")
-    async def gmail_watch(reason: str) -> WatchSummary:
+    async def gmail_watch(reason: str, user: str = "owner") -> WatchSummary:
         calls.append(("watch", reason))
         return WatchSummary(expires="2026-10-23T00:00:00+00:00")
 
@@ -66,7 +66,7 @@ def test_a_rate_limited_or_capped_pass_resumes_after_a_wait_until_done():
         return results[sum(1 for c in calls if c[0] == "sync") - 1]
 
     @activity.defn(name="leads_refresh")
-    async def leads_refresh(reason: str) -> RefreshSummary:
+    async def leads_refresh(reason: str, user: str = "owner") -> RefreshSummary:
         calls.append(("refresh", reason))
         return RefreshSummary()
 
@@ -123,7 +123,7 @@ def test_a_workflow_started_before_the_patch_replays_on_the_new_code():
         return GmailSyncSummary(mode="paused-ratelimit", more=True)  # The new activity, the old workflow.
 
     @activity.defn(name="leads_refresh")
-    async def leads_refresh(reason: str) -> RefreshSummary:
+    async def leads_refresh(reason: str, user: str = "owner") -> RefreshSummary:
         return RefreshSummary()
 
     async def main():
@@ -149,7 +149,7 @@ def test_a_push_during_the_lead_rebuild_makes_another_pass_at_once():
         return GmailSyncSummary(mode="history", fetched=1)
 
     @activity.defn(name="leads_refresh")
-    async def leads_refresh(reason: str) -> RefreshSummary:
+    async def leads_refresh(reason: str, user: str = "owner") -> RefreshSummary:
         calls.append(("refresh", reason))
         if len(calls) == 2:
             in_refresh.set()

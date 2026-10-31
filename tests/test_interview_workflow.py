@@ -68,7 +68,7 @@ class Fakes:
             return None
 
         @activity.defn(name="slots_ready")
-        async def slots_ready(keys: list[str]) -> bool:
+        async def slots_ready(keys: list[str], user: str = "owner") -> bool:
             return self.is_ready
 
         @activity.defn(name="block_record")
@@ -76,11 +76,11 @@ class Fakes:
             self.records.append(record)
 
         @activity.defn(name="dials_paused")
-        async def dials_paused() -> bool:
+        async def dials_paused(user: str = "owner") -> bool:
             return self.paused
 
         @activity.defn(name="briefing_auto_dial")
-        async def briefing_auto_dial() -> bool:
+        async def briefing_auto_dial(user: str = "owner") -> bool:
             return self.auto_dial
 
         @activity.defn(name="push_heads_up")

@@ -412,6 +412,10 @@ def view(ctx: Context, now: datetime | None = None, budget_tokens: int = TOKEN_B
 # Loading (Postgres; every source optional).
 
 def performance_reviews(path: Path | None = None) -> list[dict[str, Any]]:
+    """The scored interviews in the owner's performance files (none for a guest's workspace)."""
+    from app import workspaces
+    if path is None and not workspaces.is_owner():
+        return []
     paths = [path] if path else []
     if not paths:
         env = os.getenv("VALR_PERFORMANCE_PATH", "").strip()

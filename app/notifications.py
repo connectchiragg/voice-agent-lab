@@ -554,11 +554,14 @@ class Store:
             tuple(values.values()))
 
     async def try_lock(self) -> bool:
-        cursor = await self.c.execute("SELECT pg_try_advisory_lock(%s)", (LOCK,))
+        """One dispatch at a time per workspace (app/workspaces.lock_key: the owner's key as before)."""
+        from app import workspaces
+        cursor = await self.c.execute("SELECT pg_try_advisory_lock(%s)", (workspaces.lock_key(LOCK),))
         return bool((await cursor.fetchone())[0])
 
     async def unlock(self) -> None:
-        await self.c.execute("SELECT pg_advisory_unlock(%s)", (LOCK,))
+        from app import workspaces
+        await self.c.execute("SELECT pg_advisory_unlock(%s)", (workspaces.lock_key(LOCK),))
 
 
 # Creating notifications.
@@ -1096,38 +1099,48 @@ async def notify_now(connection: Any, note: dict[str, Any], now: datetime | None
 
 
 async def loop(connect: Any, stop: Any = None) -> None:
-    """The research worker's background task: a dispatch every VALR_NOTIFY_LOOP_S (60) seconds,
-    so held items leave when quiet hours end and the digest goes at its time; once an hour, the latency figures of
-    the last 24 hours are logged ("VALR notification SLA ...")."""
+    """The research worker's background task: every VALR_NOTIFY_LOOP_S (60) seconds, a dispatch
+    for each workspace (app/workspaces.each: each in its own scope, with its own quiet hours,
+    digest and devices; one failing never stops the others), so held items leave when quiet hours
+    end and each digest goes at its time; once an hour, the owner's latency figures of the last 24
+    hours are logged ("VALR notification SLA ...")."""
     import asyncio
+    from app import workspaces
     stop = stop or asyncio.Event()
     every = float(os.getenv("VALR_NOTIFY_LOOP_S", "60"))
-    reported: datetime | None = None
+    reported: list[datetime | None] = [None]
+
+    async def one(user: str) -> None:
+        async with await connect() as connection:
+            await run_dispatch(connection)
+            now = datetime.now(timezone.utc)
+            if workspaces.owner(user) and (reported[0] is None or now - reported[0] >= timedelta(hours=1)):
+                reported[0] = now
+                await log_latency(Store(connection), now)
     while not stop.is_set():
         try:
-            async with await connect() as connection:
-                await run_dispatch(connection)
-                now = datetime.now(timezone.utc)
-                if reported is None or now - reported >= timedelta(hours=1):
-                    reported = now
-                    report = await latency_report(Store(connection), now)
-                    if report["count"]:
-                        logger.info("VALR notification SLA (24 h): %d emails, p50 %s s, p95 %s s, max %s s "
-                                    "(target p95 <= %g s: %s); push p50 %s s, p95 %s s", report["count"],
-                                    report["p50_s"], report["p95_s"], report["max_s"], SLA_P95_S,
-                                    "met" if report["met"] else "MISSED", report["push_p50_s"], report["push_p95_s"])
-                    calls = report["phone"]
-                    if calls["count"]:
-                        logger.info("VALR notification SLA (24 h): %d calls, upload -> bell p50 %s s, p95 %s s "
-                                    "(target <= %g s: %s); -> ready p50 %s s, p95 %s s", calls["count"],
-                                    calls["bell_p50_s"], calls["bell_p95_s"], PHONE_SLA_S,
-                                    "met" if calls["met"] else "MISSED", calls["ready_p50_s"], calls["ready_p95_s"])
+            await workspaces.each(one, label="notifications", connect=connect, budget_s=max(every, 30.0))
         except Exception as error:  # noqa: BLE001 - keep the worker alive
             logger.warning("VALR notifications loop: %s", type(error).__name__)
         try:
             await asyncio.wait_for(stop.wait(), timeout=every)
         except asyncio.TimeoutError:
             pass
+
+
+async def log_latency(store: Any, now: datetime) -> None:
+    report = await latency_report(store, now)
+    if report["count"]:
+        logger.info("VALR notification SLA (24 h): %d emails, p50 %s s, p95 %s s, max %s s "
+                    "(target p95 <= %g s: %s); push p50 %s s, p95 %s s", report["count"],
+                    report["p50_s"], report["p95_s"], report["max_s"], SLA_P95_S,
+                    "met" if report["met"] else "MISSED", report["push_p50_s"], report["push_p95_s"])
+    calls = report["phone"]
+    if calls["count"]:
+        logger.info("VALR notification SLA (24 h): %d calls, upload -> bell p50 %s s, p95 %s s "
+                    "(target <= %g s: %s); -> ready p50 %s s, p95 %s s", calls["count"],
+                    calls["bell_p50_s"], calls["bell_p95_s"], PHONE_SLA_S,
+                    "met" if calls["met"] else "MISSED", calls["ready_p50_s"], calls["ready_p95_s"])
 
 
 # The API's view.

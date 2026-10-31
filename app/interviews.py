@@ -814,14 +814,27 @@ async def start_slot_now(client: Any, event: SlotEvent, owner: str, block_id: st
                               Limits.interview_from_env().job_usd, rpc_timeout=callbacks.RPC_TIMEOUT)
 
 
+SYNC_WORKFLOW = "valr-calendar-sync"
+
+
+def sync_request(reason: str, full: bool = False, user: str | None = None) -> tuple[SyncInput, str]:
+    """A workspace's calendar sync (default: the current one): its input and workflow id, the
+    owner's `valr-calendar-sync` as always, a guest's `valr-calendar-sync-<uid>`."""
+    from app import tenant, workspaces
+    user = user or tenant.get() or tenant.OWNER
+    return SyncInput(reason, full, user=user), workspaces.scoped_id(SYNC_WORKFLOW, user)
+
+
 async def sync_now(reason: str) -> bool:
-    """Start a calendar sync (signal-with-start); False if Temporal is unavailable."""
+    """Start the current workspace's calendar sync (signal-with-start); False if Temporal is
+    unavailable."""
     client = await callbacks.temporal()
     if client is None:
         return False
+    request, workflow_id = sync_request(reason)
     try:
         await client.start_workflow(
-            CalendarSyncWorkflow.run, SyncInput(reason), id="valr-calendar-sync",
+            CalendarSyncWorkflow.run, request, id=workflow_id,
             task_queue=TASK_QUEUE, start_signal="poke", rpc_timeout=callbacks.RPC_TIMEOUT,
             id_conflict_policy=WorkflowIDConflictPolicy.USE_EXISTING)
     except RPCError as error:

@@ -220,10 +220,12 @@ async def refusal(connection: Any, caller_key: str, limits: Limits,
 async def reserve(connection: Any, booking: Booking, limits: Limits) -> str | None:
     """Check the limits and record the job in one transaction; returns a refusal or None.
 
-    The advisory lock serializes bookings, so two calls cannot both take the last slot.
+    The advisory lock serializes bookings, so two calls cannot both take the last slot. It is
+    per workspace (app/workspaces.lock_key), like the jobs and spend it counts (row-level security).
     """
+    from app import workspaces
     async with connection.transaction():
-        await connection.execute("SELECT pg_advisory_xact_lock(%s)", (LOCK_KEY,))
+        await connection.execute("SELECT pg_advisory_xact_lock(%s)", (workspaces.lock_key(LOCK_KEY),))
         reason = await refusal(connection, booking.caller_key, limits, booking.kind)
         if reason is not None:
             return reason
