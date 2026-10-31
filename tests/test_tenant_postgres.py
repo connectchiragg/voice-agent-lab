@@ -160,3 +160,134 @@ def test_the_migration_keeps_the_owners_existing_rows(database):
         finally:
             await pool.close()
     asyncio.run(main())
+
+
+# The workers serve every workspace (app/workspaces.py), on the real tables.
+
+async def register(pool, users: dict[str, str]) -> None:
+    """valr_users (global, no row-level security) as app/auth/store.py creates it."""
+    from app.auth import store as auth_store
+    with tenant.as_user(tenant.OWNER):
+        async with pool.connection() as connection:
+            await schema.once(connection, "valr_auth", lambda: connection.execute(auth_store.SCHEMA))
+            for user, email in users.items():
+                await connection.execute("INSERT INTO valr_users (id, email) VALUES (%s, %s)", (user, email))
+
+
+def test_the_notifications_loop_serves_each_workspace_its_own_items_on_real_postgres(database, monkeypatch):
+    """One pass of the research worker's notifications loop: each workspace's pending item goes to
+    that workspace's devices only, under its own scope, and is marked sent in its own rows."""
+    from datetime import datetime, timezone
+
+    from app import notifications, webpush, workspaces
+    sent: list[tuple[str | None, str]] = []
+    stop = asyncio.Event()
+
+    class Sender:
+        async def subscribers(self):
+            return 1
+
+        async def send(self, message, now=None, only=None):
+            sent.append((tenant.get(), message["url"]))
+            if len(sent) >= 2:
+                stop.set()
+            return webpush.Result(delivered=1)
+
+    async def sender(connection):
+        return Sender()
+
+    async def connect():
+        return await tenant.connect(database, autocommit=True)
+    monkeypatch.setattr(webpush, "sender", sender)
+    monkeypatch.setenv("VALR_NOTIFY_LOOP_S", "0.05")
+
+    async def main():
+        pool = await build(database)
+        try:
+            await register(pool, {tenant.OWNER: "owner@example.com", GUEST: "guest@elsewhere.example"})
+            now = datetime.now(timezone.utc)
+            for user in (tenant.OWNER, GUEST):
+                with tenant.as_user(user):
+                    async with pool.connection() as connection:
+                        store = notifications.Store(connection)
+                        await store.setup()
+                        await notifications.add(store, {
+                            "source_id": f"test:{user}", "kind": "offer", "title": f"Offer for {user}", "body": "b",
+                            "company": "", "link": f"/valr/leads?for={user}", "gmail_url": "", "thread_id": None, "action": ""}, now)
+            with tenant.as_user(None):  # The worker's own scope: none (fail closed).
+                await asyncio.wait_for(notifications.loop(connect, stop), 20)
+            assert sorted(sent) == sorted([(user, f"/valr/leads?for={user}") for user in (tenant.OWNER, GUEST)])
+            for user in (tenant.OWNER, GUEST):
+                with tenant.as_user(user):
+                    async with pool.connection() as connection:
+                        cursor = await connection.execute("SELECT source_id, push_state FROM notifications")
+                        assert await cursor.fetchall() == [(f"test:{user}", "sent")]
+            assert await workspaces.users(connect) == [tenant.OWNER, GUEST]
+        finally:
+            await pool.close()
+    asyncio.run(main())
+
+
+def test_only_workspaces_with_google_connected_get_background_gmail_and_calendar_work(database):
+    from app import workspaces
+    third = "u_" + "1" * 20
+
+    async def connect():
+        return await tenant.connect(database, autocommit=True)
+
+    async def main():
+        pool = await build(database)
+        try:
+            await register(pool, {GUEST: "guest@elsewhere.example", third: "third@elsewhere.example"})
+            with tenant.as_user(GUEST):
+                async with pool.connection() as connection:
+                    await connection.execute(
+                        "INSERT INTO oauth_tokens (provider, account, refresh_token, scope, status) "
+                        "VALUES ('google_gmail', 'guest@elsewhere.example', 'sealed', 's', 'connected')")
+                    await workspaces.prepare(connection)
+                    assert workspaces.emails() == {"guest@elsewhere.example"}  # Theirs, read in their scope.
+            assert await workspaces.connected(connect) == [tenant.OWNER, GUEST]  # Not the third: nothing connected.
+            with tenant.as_user(third):
+                async with pool.connection() as connection:
+                    await workspaces.prepare(connection)
+                    assert workspaces.emails() == {"third@elsewhere.example"}
+                    cursor = await connection.execute("SELECT count(*) FROM oauth_tokens")
+                    assert (await cursor.fetchone())[0] == 0  # The guest's token is invisible here.
+        finally:
+            await pool.close()
+            workspaces.forget()
+    asyncio.run(main())
+
+
+def test_a_guests_view_holds_none_of_the_owners_files_or_settings_on_real_postgres(database, monkeypatch, tmp_path):
+    """valr_view.collect (every page's data) as a guest, with the owner's server files and settings
+    in place: none of them reaches the guest's view."""
+    import json
+    from app import valr_view
+    perf = tmp_path / "performance.json"
+    perf.write_text(json.dumps({"schema_version": 3, "interviews": [
+        {"interview_id": "fathom:1", "date": "2026-10-01", "company": "Secretco", "overall_score": 7}]}))
+    monkeypatch.setenv("VALR_PERFORMANCE_PATH", str(perf))
+    monkeypatch.setenv("VALR_PERFORMANCE_FALLBACK", str(perf))
+    monkeypatch.setenv("VALR_OWNER_NAME", "Ownername Example")
+    monkeypatch.setenv("VALR_CANDIDATE_NAME", "Ownername Example")
+    monkeypatch.setenv("VALR_OWNER_PHONE", "+15550100042")
+    monkeypatch.setenv("VALR_PUBLIC_NUMBER", "+15550100077")
+    monkeypatch.setenv("FATHOM_API_KEY", "owner-fathom-key")
+    with tenant.as_user(tenant.OWNER):
+        assert "Secretco" in json.dumps(valr_view.profile_files()[0])  # The owner's view would have it.
+
+    async def main():
+        pool = await build(database)
+        try:
+            with tenant.as_user(GUEST):
+                view = await valr_view.collect(pool)
+        finally:
+            await pool.close()
+        return view
+    view = asyncio.run(main())
+    text = json.dumps(view, default=str)
+    for secret in ("Secretco", "Ownername", "0100042", "0100077", "owner-fathom-key"):
+        assert secret not in text, secret
+    assert view["guest"] and not view["setup"]["phone_on_file"] and view["dials"] == {}
+    assert not view["connections"]["fathom"]["configured"]  # The server's Fathom key is the owner's.

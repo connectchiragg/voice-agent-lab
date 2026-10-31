@@ -34,7 +34,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Resp
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from app import (access, auth, calendar_sync, callbacks, google_oauth, interview_store, interviews,
-                 research, valr_view)
+                 research, tenant, valr_view)
 from app.interview_types import group_blocks, slot_workflow_id
 
 logger = logging.getLogger("uvicorn.error")
@@ -106,14 +106,20 @@ def owner_emails() -> set[str]:
             if email.strip()} | auth.owner_emails()
 
 
-async def owner(request: Request) -> str:
-    """The signed-in email, and (with VALR_ADMIN_EMAILS or VALR_OWNER_EMAILS set) one of
-    them; else 403."""
-    email = await viewer(request)
+async def owner(request: Request, only_owner: bool = False) -> str:
+    """The signed-in email of whoever acts in their own workspace (app/tenant.py); else 403.
+
+    Any VALR session the gate admitted qualifies: the owner's alone routes (his phone line, Mac
+    app, admin) are the gate's decision (app/auth/gate.owner_only), and every other action only
+    reaches the caller's own rows. A Cloudflare Access login, or any login when `only_owner`
+    (the browser call), must be one of VALR_ADMIN_EMAILS or VALR_OWNER_EMAILS when either is set."""
+    who = await auth.identify(request)
+    if who is None:
+        raise HTTPException(403, "Sign in to VALR first.")
     allowed = owner_emails()
-    if allowed and email.lower() not in allowed:
+    if (only_owner or who.via == "access") and allowed and who.email.lower() not in allowed:
         raise HTTPException(403, "Only the owner can do this.")
-    return email
+    return who.email
 
 
 def e(value: object) -> str:
@@ -123,14 +129,25 @@ def e(value: object) -> str:
 NO_CACHE = {"Cache-Control": "no-store", "X-Frame-Options": "DENY", "Referrer-Policy": "no-referrer"}
 
 
+async def signed_in(request: Request) -> auth.Identity:
+    """Whoever is signed in on this browser (the gate's identity), or 403."""
+    who = await auth.identify(request)
+    if who is None:
+        raise HTTPException(403, "Sign in to VALR first.")
+    await owner(request)  # An Access login must still be an admitted one.
+    return who
+
+
 @router.get("/oauth/google/start")
 async def google_start(request: Request) -> RedirectResponse:
-    await owner(request)
+    """Connect Google (Gmail + Calendar, read-only) for the signed-in user's own workspace."""
+    who = await signed_in(request)
     settings = google_oauth.OAuthSettings.from_env()
     if settings is None:
         raise HTTPException(503, "Google sign-in isn't set up on the server yet.")
+    hint = google_oauth.expected_account(settings, who.user, who.email) or None
     return RedirectResponse(google_oauth.consent_url(settings, google_oauth.make_state(
-        settings.token_key)), status_code=303, headers=NO_CACHE)
+        settings.token_key, user=who.user), hint), status_code=303, headers=NO_CACHE)
 
 
 def back_to_settings(error: str = "") -> RedirectResponse:
@@ -144,13 +161,15 @@ async def google_callback(request: Request, code: str = "", state: str = "",
                           error: str = "") -> Response:
     if auth.is_login_state(state):  # Signing in to VALR (app/auth), not the Gmail grant.
         return await auth.finish_login(code, state, error)
-    await owner(request)
+    who = await signed_in(request)
     settings = google_oauth.OAuthSettings.from_env()
     if settings is None or research.pool is None:
         return back_to_settings("unavailable")
     if error or not code:
         return back_to_settings("cancelled" if error == "access_denied" else "failed")
-    if not google_oauth.check_state(settings.token_key, state):
+    # The grant goes to the workspace the state names, and only when that is the workspace of
+    # whoever is signed in here: a state started elsewhere can never attach a token to it.
+    if google_oauth.state_user(settings.token_key, state) != who.user:
         return back_to_settings("expired")
     try:
         async with httpx.AsyncClient(timeout=10) as http:
@@ -158,13 +177,28 @@ async def google_callback(request: Request, code: str = "", state: str = "",
     except (ValueError, httpx.HTTPError) as failure:
         logger.warning("Gmail consent failed: %s", type(failure).__name__)
         return back_to_settings("failed")
-    if settings.account and account != settings.account:
+    expected = google_oauth.expected_account(settings, who.user, who.email)
+    if expected and account != expected:
         return back_to_settings("account")
-    async with research.pool.connection() as connection:
-        await google_oauth.setup(connection)
-        await google_oauth.store(connection, settings, account, refresh, scope)
-    logger.info("Gmail connected for VALR (read-only)")
+    with tenant.as_user(who.user):  # A public route: the gate set no workspace.
+        async with research.pool.connection() as connection:
+            await google_oauth.setup(connection)
+            await google_oauth.store(connection, settings, account, refresh, scope)
+        await first_sync()
+    logger.info("Gmail connected for VALR workspace %s (read-only)", who.user)
     return back_to_settings()
+
+
+async def first_sync() -> None:
+    """Right after a connect: the workspace's calendar and Gmail sync now, not at the worker's
+    next schedule pass (best effort: the schedules follow within minutes either way)."""
+    from app import leads_web
+    try:
+        await interviews.sync_now("connected")
+        if os.getenv("VALR_LEADS", "0") == "1":
+            await leads_web.start_sync("manual")
+    except Exception as error:  # noqa: BLE001 - the connect itself succeeded
+        logger.warning("VALR first sync not started: %s", type(error).__name__)
 
 
 @router.get("/valr", response_class=HTMLResponse)
@@ -215,9 +249,9 @@ def csrf_ok(email: str, token: str | None, now: float | None = None) -> bool:
     return 0 <= age <= CSRF_TTL_S and hmac.compare_digest(mac, expected)
 
 
-async def action_owner(request: Request) -> str:
-    """Owner's Access login, a same-origin JSON request and a valid CSRF token; else 403."""
-    email = await owner(request)
+async def action_owner(request: Request, only_owner: bool = False) -> str:
+    """A signed-in user (`owner`), a same-origin JSON request and a valid CSRF token; else 403."""
+    email = await owner(request, only_owner)
     site = request.headers.get("sec-fetch-site")
     origin = request.headers.get("origin")
     host = request.headers.get("host", "")

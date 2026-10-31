@@ -28,7 +28,7 @@ GOOGLE_ERRORS = {
     "cancelled": "You cancelled on Google's screen, so nothing changed.",
     "failed": "Google didn't confirm the connection. Try again.",
     "expired": "That link expired. Start again with Connect.",
-    "account": "That was a different Google account. Pick the one VALR is set up for.",
+    "account": "That was a different Google account. Pick the one you use with VALR.",
     "unavailable": "Google sign-in isn't available on this server right now.",
 }
 
@@ -85,8 +85,18 @@ def steps(view: dict[str, Any]) -> list[tuple[str, str, str, str]]:
     talk = ('<a class="btn sm" href="/call">Talk in browser</a>'
             + ('<button class="btn sm primary" type="button" data-action="callnow">Call my phone</button>'
                if s["phone_on_file"] else ""))
+    google_step = ("Connect Google", g_state, "So VALR can see your interview invites and job emails. Read-only.",
+                   g_action)
+    if view.get("guest"):  # No phone line, phone number or calls in a guest's workspace.
+        return [google_step,
+                ("Connect a notetaker", n_state, "Fathom or Fireflies: VALR reviews each recorded interview and "
+                 "plays it back here.", "" if n_state == "done" else (notetaker_ui.summary_buttons(takers) or
+                                                                     '<a class="btn sm" href="#notetakers">Notetakers</a>')),
+                ("Turn on phone notifications", "done" if devices else "todo",
+                 "Heads-ups before interviews and alerts reach your lock screen.",
+                 "" if devices else '<a class="btn sm" href="#phone-push">Set up</a>')]
     return [
-        ("Connect Google", g_state, "So VALR can see your interview invites and job emails. Read-only.", g_action),
+        google_step,
         ("Connect a notetaker", n_state, "Fathom or Fireflies: VALR reviews each recorded interview and plays it back here.",
          "" if n_state == "done" else (notetaker_ui.summary_buttons(takers) or '<a class="btn sm" href="#notetakers">Notetakers</a>')),
         ("Add your phone", "done" if s["phone_on_file"] else "todo",
@@ -227,6 +237,33 @@ def pause_label(view: dict[str, Any], clock: Clock) -> str:
         return "Paused"
     moment = clock.local(until)
     return f"Paused until {moment:%a} {moment.day} {moment:%b}"
+
+
+def guest_reach_row(view: dict[str, Any], clock: Clock) -> str:
+    """A guest's reminders: the heads-up only (calls are the owner's phone line), and Pause."""
+    paused = (view.get("dials_paused") or {}).get("enabled")
+    push = (view.get("connections") or {}).get("push") or {}
+    warn = ""
+    if push.get("configured") and not push.get("devices"):
+        warn = ('<p class="field-help warn">Phone notifications are off, so heads-ups only reach the bell. '
+                '<a href="#phone-push">Enable them</a>.</p>')
+    if paused:
+        action = ('<button class="btn sm" type="button" data-action="dials" data-paused="false" aria-pressed="true">'
+                  'Resume</button>')
+    else:
+        options = "".join(f'<button class="menu-item" role="menuitem" type="button" data-action="dials" data-paused="true"'
+                          f' data-days="{days}"><span>{e(label)}</span></button>'
+                          for days, label in (("1", "For 1 day"), ("7", "For 1 week"), ("", "Until I resume")))
+        action = (f'<details class="menu pause-menu" data-menu><summary class="btn sm">{icon("pause", 14)}Pause…</summary>'
+                  f'<div class="menu-pop align-end" role="menu">{options}</div></details>')
+    return row("calls", "Before each interview", "clock", chip(pause_label(view, clock), "warn") if paused else "",
+               '<p class="muted">A notification on your phone 30 minutes before each interview, with its '
+               f'briefing one tap away.</p>{warn}', action)
+
+
+def owner_only_row(anchor: str, title: str, glyph: str, text: str) -> str:
+    """A guest's empty state for a feature that runs on the owner's own phone line or devices."""
+    return row(anchor, title, glyph, chip("Not available", "muted"), f'<p class="muted">{e(text)}</p>')
 
 
 def reach_row(view: dict[str, Any], clock: Clock) -> str:
@@ -404,6 +441,21 @@ def account_row(email: str) -> str:
                + '>Sign out of all devices</button>')
 
 
+def calls_section(view: dict[str, Any], clock: Clock) -> str:
+    if view.get("guest"):
+        return section("calls", "Reminders", guest_reach_row(view, clock))
+    return section("calls", "Calls & reminders", phone_row(view) + reach_row(view, clock) + number_row(view))
+
+
+def recordings_section(view: dict[str, Any]) -> str:
+    if view.get("guest"):
+        return section("rec", "Call recordings", owner_only_row(
+            "phone-recordings", "Phone call recordings", "mic",
+            "Phone call uploads aren't available in your workspace. Recordings from a connected notetaker "
+            "still appear in Past interviews."))
+    return section("rec", "Call recordings", phone_recordings_row(str(view.get("_host") or "")))
+
+
 def page(view: dict[str, Any], clock: Clock, items: list[dict[str, Any]]) -> str:
     email = str(view.get("_email") or "")
     connected = (view.get("_query") or {}).get("connected") == "google"
@@ -412,8 +464,8 @@ def page(view: dict[str, Any], clock: Clock, items: list[dict[str, Any]]) -> str
 {setup(view)}
 {section("profile", "Profile", profile_row(view))}
 {section("conn", "Connections", google_row(view, clock) + notetaker_row(view, clock))}
-{section("calls", "Calls & reminders", phone_row(view) + reach_row(view, clock) + number_row(view))}
+{calls_section(view, clock)}
 {section("notify", "Notifications", alerts_row(view) + pwa.card())}
-{section("rec", "Call recordings", phone_recordings_row(str(view.get("_host") or "")))}
+{recordings_section(view)}
 {section("data", "Data & account", data_row(view) + account_row(email))}
 <script type="module" src="{asset('valr-settings.js')}"></script>"""

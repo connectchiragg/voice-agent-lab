@@ -304,7 +304,7 @@ def layout(view: dict[str, Any], email: str, csrf: str, active: str, title: str,
     <nav class="nav" aria-label="Main">{nav}</nav>
     <div class="topbar-tools">
       {bell}
-      {call_button()}
+      {"" if view.get("guest") else call_button()}
       <button class="icon-btn theme-btn" type="button" data-theme-toggle aria-label="Switch between light and dark">{icon('sun', 18)}{icon('moon', 18)}</button>
       {account_menu(email)}
     </div>

@@ -62,6 +62,7 @@ def google_items(view: dict[str, Any]) -> list[dict[str, Any]]:
 
 def block_items(view: dict[str, Any], now: datetime) -> list[dict[str, Any]]:
     out = []
+    call_now = None if view.get("guest") else CALL_NOW  # Calls are the owner's phone line.
     for block in view.get("blocks") or []:
         start = parse(block.get("start"))
         upcoming = bool(start and start > now)
@@ -74,12 +75,12 @@ def block_items(view: dict[str, Any], now: datetime) -> list[dict[str, Any]]:
                             f"The heads-up for {name} didn't reach your phone",
                             "Phone notifications are off, so it's only in the bell." if off else
                             "The push service didn't take it.",
-                            CALL_NOW if upcoming else {"label": "Check phone notifications",
-                                                       "href": "/valr/settings#phone-push"}))
+                            call_now if upcoming and call_now else {"label": "Check phone notifications",
+                                                                    "href": "/valr/settings#phone-push"}))
         elif state in ("unanswered", "missed"):
             out.append(item(f"missed-{block['id']}", "warn", f"You missed the briefing call for {name}",
                             "VALR doesn't call twice." + (" You can still get it now." if upcoming else ""),
-                            CALL_NOW if upcoming else None))
+                            call_now if upcoming else None))
         elif state == "refused":
             out.append(item(f"refused-{block['id']}", "bad", f"No briefing call for {name}: daily call limit",
                             "VALR stopped calling for today.", {"label": "See limits", "href": "/valr/settings#data"}))
@@ -128,7 +129,7 @@ def items(view: dict[str, Any]) -> list[dict[str, Any]]:
         out.append(item("push", "warn", "Phone notifications are off",
                         "Heads-ups and alerts only reach the bell until you enable them on your phone.",
                         {"label": "Enable", "href": "/valr/settings#phone-push"}))
-    if not (view.get("setup") or {}).get("phone_on_file", True):
+    if not view.get("guest") and not (view.get("setup") or {}).get("phone_on_file", True):
         calls = view.get("mode") == "call"
         out.append(item("phone", "bad" if calls else "info", "No phone number on file",
                         "VALR has nowhere to call you." if calls else "Add it so VALR can call you when you ask.",

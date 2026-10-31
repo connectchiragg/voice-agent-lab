@@ -167,8 +167,8 @@ async def granola_import(request: Request) -> JSONResponse:
 async def recording(request: Request, ref: str = "", id: str = "") -> JSONResponse:
     """The recording of a past interview: by its slot ref (calendar match) or `provider:id`."""
     await valr_dashboard.viewer(request)
-    from app.profile.config import settings
-    owner_names = {settings().candidate_name}
+    from app.phone_recordings import candidate_name
+    owner_names = {candidate_name()}  # The owner's configured name, or a guest's Profile name.
     async with pool().connection() as connection, notetakers.http_client() as http:
         found = None
         if id:

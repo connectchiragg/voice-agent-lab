@@ -49,9 +49,10 @@ OWNER_PREFIXES = ("/valr",)  # /valr, /valr/api/*, /valr/interviews/..., /valr/c
 BEARER_PATHS = frozenset({"/valr/context"})
 API_PREFIXES = ("/valr/api/", "/webrtc/", "/valr/context")
 SAFE_METHODS = ("GET", "HEAD", "OPTIONS")
-# Public routes that act for the owner: his Telnyx line, his Google push channels, his notetaker
-# webhooks and the iPhone Shortcut (each checks its own signature or secret).
-OWNER_HOOKS = frozenset({"/hooks/gcal", "/hooks/gmail", "/hooks/fathom", "/hooks/granola",
+# Public routes that act for the owner: his Telnyx line, his notetaker webhooks and the iPhone
+# Shortcut (each checks its own signature or secret). The Google pushes (/hooks/gmail,
+# /hooks/gcal) and the Google consent's return (/oauth/google/callback) find their own workspace.
+OWNER_HOOKS = frozenset({"/hooks/fathom", "/hooks/granola",
                          "/hooks/recording-upload", "/telnyx/webhook", "/ws/telnyx"})
 # The owner's alone, whoever else signs in: his phone line, Mac app, server and admin surfaces.
 # Every other signed-in route serves the caller's own workspace (app/tenant.py).

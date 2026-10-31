@@ -31,6 +31,8 @@ Data & account
   audio, no keys or tokens.
 - `POST /valr/api/data/delete` {confirm: "DELETE"}: revoke Google, then wipe every VALR table
   (sessions included) and the generated scorecards; the résumé profile files stay. Signs out.
+  A guest's wipe is their workspace only: their rows, their sessions, their conversations'
+  checkpoints, their workspace entry and Temporal schedules; the server files are the owner's.
 
 Nothing here logs a name, a number, an email or a photo.
 """
@@ -340,7 +342,7 @@ async def export(request: Request) -> Response:
         archive.writestr("README.txt", "Your VALR data, one JSON file per kind. No audio, keys or tokens.\n")
         for name, items in rows.items():
             archive.writestr(f"{name}.json", json.dumps(items, indent=1, default=str, ensure_ascii=False))
-        for path in scorecard_files():
+        for path in (scorecard_files() if tenant.is_owner() else []):  # The owner's server files.
             try:
                 archive.writestr(f"scorecards/{path.name}", path.read_bytes())
             except OSError:
@@ -349,6 +351,47 @@ async def export(request: Request) -> Response:
     logger.info("VALR data exported (%d kinds)", len(rows))
     return Response(buffer.getvalue(), media_type="application/zip",
                     headers={**NO_CACHE, "Content-Disposition": f'attachment; filename="valr-data-{stamp}.zip"'})
+
+
+async def guest_threads(connection: Any) -> list[str]:
+    """A guest's conversations: the call ids of their workspace's call summaries (row-level
+    security: theirs only; on a browser call their caller key is `email:<address>`)."""
+    try:
+        cursor = await connection.execute("SELECT call_id FROM call_summaries")
+        return [str(row[0]) for row in await cursor.fetchall()]
+    except Exception as error:  # noqa: BLE001 - no memory tables yet
+        logger.warning("VALR delete: conversations not listed (%s)", type(error).__name__)
+        return []
+
+
+async def delete_guest_threads(connection: Any, threads: list[str], tables: list[str]) -> None:
+    """Their LangGraph checkpoints: shared tables (no owner_id), so by thread id; in another
+    database, through the agent's own checkpointer (app/agent.delete_thread)."""
+    if not threads:
+        return
+    from app.memory import CHECKPOINT_TABLES
+    if all(table in tables for table in CHECKPOINT_TABLES):
+        for table in CHECKPOINT_TABLES:  # Names from memory.CHECKPOINT_TABLES.
+            await connection.execute(f"DELETE FROM {table} WHERE thread_id = ANY(%s)", (threads,))
+        return
+    try:
+        from app import agent
+        for thread in threads:
+            await agent.delete_thread(thread)
+    except Exception as error:  # noqa: BLE001 - the rest of the wipe goes ahead
+        logger.warning("VALR delete: conversations not deleted (%s)", type(error).__name__)
+
+
+async def drop_guest_schedules() -> None:
+    """A guest's Temporal schedules (calendar sweep, Gmail poll and watch), best effort: with
+    the token gone their runs would stop at once anyway (app/workspaces.schedule_ids)."""
+    from app import callbacks, workspaces
+    try:
+        client = await callbacks.temporal()
+        if client is not None:
+            await workspaces.drop_schedules(client)
+    except Exception as error:  # noqa: BLE001
+        logger.warning("VALR delete: schedules not removed (%s)", type(error).__name__)
 
 
 class DeleteRequest(BaseModel):
@@ -371,6 +414,7 @@ async def delete_data(request: Request) -> JSONResponse:
         tables = await existing(connection, DELETE_TABLES)
         mine = [table for table in tables if table in tenant.TABLES]
         shared = [table for table in tables if table not in tenant.TABLES]
+        threads = await guest_threads(connection) if not tenant.is_owner() and "call_summaries" in tables else []
         async with connection.transaction():
             # Per-user tables: DELETE, which row-level security limits to this workspace
             # (TRUNCATE would ignore it and wipe everyone's). Names from the lists above.
@@ -381,6 +425,10 @@ async def delete_data(request: Request) -> JSONResponse:
             else:
                 await connection.execute("DELETE FROM valr_sessions WHERE lower(email) = %s",
                                          ((core.signed_in_email() or "").lower(),))
+                await delete_guest_threads(connection, threads, tables)
+                await connection.execute("DELETE FROM valr_users WHERE id = %s", (tenant.get(),))
+    if not tenant.is_owner():
+        await drop_guest_schedules()
     kept = []
     for path in (scorecard_files() if tenant.is_owner() else []):
         try:

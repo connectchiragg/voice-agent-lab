@@ -4,9 +4,12 @@
   log in). A notification carries no event data, only "something changed": the request
   must name our current channel (X-Goog-Channel-ID), its secret token
   (X-Goog-Channel-Token, compared in constant time) and its resource
-  (X-Goog-Resource-ID), all stored by the worker when it opened the channel. Then a
-  calendar sync is started (signal-with-start: a burst of notifications makes one more
-  pass). The first `sync` message of a new channel is only acknowledged.
+  (X-Goog-Resource-ID), all stored by the worker when it opened the channel. Each workspace has
+  its own channel (app/workspaces.py): a guest's channel id names their workspace
+  (calendar_sync.channel_workspace), whose stored channel it must then match; any other id is
+  the owner's. Then that workspace's calendar sync is started (signal-with-start: a burst of
+  notifications makes one more pass). The first `sync` message of a new channel is only
+  acknowledged.
 - `POST /valr/context` (behind Access): a Mac-side job (not built yet) may push
   per-interview email context: JSON {event_key?, company?, subject?, summary?, excerpt?,
   notes?}, at most 8 KB. Allowed with the owner's Access login, or with
@@ -20,7 +23,7 @@ import os
 
 from fastapi import APIRouter, HTTPException, Request
 
-from app import calendar_sync, google_oauth, interview_store, interviews, research, valr_dashboard
+from app import calendar_sync, google_oauth, interview_store, interviews, research, tenant, valr_dashboard
 
 logger = logging.getLogger("uvicorn.error")
 router = APIRouter()
@@ -36,17 +39,18 @@ async def gcal(request: Request) -> dict[str, bool]:
     if research.pool is None:
         raise HTTPException(503, "Unavailable.")
     channel = request.headers.get("x-goog-channel-id")
-    async with research.pool.connection() as connection:
-        await calendar_sync.setup(connection)
-        state = await calendar_sync.load_state(connection)
-    if not (same(channel, state.get("channel_id"))
-            and same(request.headers.get("x-goog-channel-token"), state.get("channel_token"))
-            and same(request.headers.get("x-goog-resource-id"), state.get("resource_id"))):
-        logger.warning("Calendar notification refused: unknown channel or token")
-        raise HTTPException(403, "Unknown channel.")
-    kind = request.headers.get("x-goog-resource-state", "")
-    if kind != "sync":
-        await interviews.sync_now("push")
+    with tenant.as_user(calendar_sync.channel_workspace(channel)):  # A public route: no workspace yet.
+        async with research.pool.connection() as connection:
+            await calendar_sync.setup(connection)
+            state = await calendar_sync.load_state(connection)
+        if not (same(channel, state.get("channel_id"))
+                and same(request.headers.get("x-goog-channel-token"), state.get("channel_token"))
+                and same(request.headers.get("x-goog-resource-id"), state.get("resource_id"))):
+            logger.warning("Calendar notification refused: unknown channel or token")
+            raise HTTPException(403, "Unknown channel.")
+        kind = request.headers.get("x-goog-resource-state", "")
+        if kind != "sync":
+            await interviews.sync_now("push")
     return {"ok": True}
 
 

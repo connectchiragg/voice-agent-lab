@@ -467,9 +467,13 @@ VERSION_SQL = (
 
 
 def performance_stamp() -> str:
-    """performance.json's size and change time: the coach rewrites it after each review."""
+    """performance.json's size and change time: the coach rewrites it after each review (the
+    owner's file: "" for a guest)."""
     import os
     from pathlib import Path
+    from app import workspaces
+    if not workspaces.is_owner():
+        return ""
     try:
         info = Path(os.getenv("VALR_PERFORMANCE_PATH") or "/data/performance.json").expanduser().stat()
     except OSError:

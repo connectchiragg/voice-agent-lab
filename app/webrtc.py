@@ -479,7 +479,7 @@ async def ice_servers(request: Request) -> dict[str, object]:
 async def owner_action(request: Request) -> str:
     """The owner, same-origin JSON and the page's CSRF token (app/valr_dashboard.py)."""
     from app import valr_dashboard  # Loaded late: it imports much of the app.
-    return await valr_dashboard.action_owner(request)
+    return await valr_dashboard.action_owner(request, only_owner=True)
 
 
 @router.post("/offer")

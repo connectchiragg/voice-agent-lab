@@ -4,9 +4,12 @@
   request must carry Pub/Sub's OIDC token for our audience (VALR_GMAIL_PUSH_AUDIENCE, default
   https://valr.haciensus.com/hooks/gmail) and push service account (VALR_GMAIL_PUSH_SA),
   verified with Google's keys (app/google_oidc.py); with VALR_GMAIL_SUBSCRIPTION set, the
-  body must name that subscription; the decoded data must be for VALR_GMAIL_ACCOUNT. Then a
-  Gmail sync starts (signal-with-start, id `valr-gmail-sync`). 204 on success; 403 on a bad
-  token; 503 when Temporal is down, so Pub/Sub retries (exponential backoff, 1 day).
+  body must name that subscription. Every workspace's Gmail watch publishes to the same topic, so
+  the push's emailAddress picks the workspace (`push_workspace`: the owner's VALR_GMAIL_ACCOUNT,
+  or the workspace whose connected Google account it is); an unknown address is acknowledged and
+  ignored. Then that workspace's Gmail sync starts (signal-with-start, id `valr-gmail-sync`, a
+  guest's `valr-gmail-sync-<uid>`). 204 on success; 403 on a bad token; 503 when Temporal is
+  down, so Pub/Sub retries (exponential backoff, 1 day).
 - `GET /valr/leads` is the app's Leads page (app/valr_ui/leads.py, with static/leads-globe.js);
   it reads `collect` below and posts the corrections and "Check Gmail now" to the routes here.
 - `GET /valr/api/leads`: {leads, contacts, links, stages, generated_at, gmail}: every lead
@@ -38,7 +41,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from temporalio.common import WorkflowIDConflictPolicy
 from temporalio.service import RPCError
 
-from app import callbacks, google_oidc, leads, leads_store, research, valr_dashboard
+from app import callbacks, google_oidc, leads, leads_store, research, tenant, valr_dashboard, workspaces
 from app.lead_workflow import SYNC_WORKFLOW_ID, TASK_QUEUE, GmailSyncInput, GmailSyncWorkflow
 
 logger = logging.getLogger("uvicorn.error")
@@ -75,19 +78,51 @@ def push_data(body: bytes) -> dict[str, Any]:
 
 
 async def start_sync(reason: str, history_id: int = 0) -> bool:
-    """Start (or poke) the Gmail sync; False when Temporal is unavailable."""
+    """Start (or poke) the current workspace's Gmail sync; False when Temporal is unavailable."""
     client = await callbacks.temporal()
     if client is None:
         return False
+    user = tenant.get() or tenant.OWNER
     try:
         await client.start_workflow(
-            GmailSyncWorkflow.run, GmailSyncInput(reason, history_id), id=SYNC_WORKFLOW_ID,
+            GmailSyncWorkflow.run, GmailSyncInput(reason, history_id, user=user),
+            id=workspaces.scoped_id(SYNC_WORKFLOW_ID, user),
             task_queue=TASK_QUEUE, start_signal="poke", rpc_timeout=callbacks.RPC_TIMEOUT,
             id_conflict_policy=WorkflowIDConflictPolicy.USE_EXISTING)
     except RPCError as error:
         logger.warning("VALR Gmail sync not started: %s", error.status.name)
         return False
     return True
+
+
+async def push_workspace(email: str) -> str | None:
+    """The workspace a Gmail push is for: the owner's when it is VALR_GMAIL_ACCOUNT; else the
+    workspace (the owner's or a guest's, `tenant.user_id` of the address) whose connected Google
+    account it is. None for an address no workspace has connected."""
+    from app.auth import core
+    email = email.strip().lower()
+    account = os.getenv("VALR_GMAIL_ACCOUNT", "").strip().lower()
+    if account and email == account:
+        return tenant.OWNER
+    if not email or research.pool is None:
+        return None
+    candidates = [tenant.user_id(email, core.owner_emails())]
+    if not account:  # The owner's connected account may be any address (none configured).
+        candidates.append(tenant.OWNER)
+    for user in dict.fromkeys(candidates):
+        with tenant.as_user(user):
+            try:
+                async with research.pool.connection() as connection:
+                    cursor = await connection.execute(
+                        "SELECT account FROM oauth_tokens WHERE provider = %s AND status = 'connected'",
+                        (workspaces.GOOGLE,))
+                    row = await cursor.fetchone()
+            except Exception as error:  # noqa: BLE001 - e.g. no oauth_tokens table yet
+                logger.warning("Gmail push: workspace lookup failed (%s)", type(error).__name__)
+                return None
+        if row and str(row[0]).lower() == email:
+            return user
+    return None
 
 
 @router.post("/hooks/gmail")
@@ -105,13 +140,18 @@ async def gmail_push(request: Request) -> Response:
         logger.warning("Gmail push ignored: %s", error)
         return Response(status_code=204)  # Malformed: acknowledge, a retry would not help.
     subscription = os.getenv("VALR_GMAIL_SUBSCRIPTION", "").strip()
-    account = os.getenv("VALR_GMAIL_ACCOUNT", "").strip().lower()
-    if (subscription and data["subscription"] != subscription) or (account and data["email"] != account):
-        logger.warning("Gmail push ignored: another subscription or account")  # Acked: no retry, no alert.
+    if subscription and data["subscription"] != subscription:
+        logger.warning("Gmail push ignored: another subscription")  # Acked: no retry, no alert.
         return Response(status_code=204)
     if os.getenv("VALR_LEADS", "0") != "1":
         return Response(status_code=204)
-    if not await start_sync("push", data["history_id"]):
+    user = await push_workspace(data["email"])
+    if user is None:
+        logger.warning("Gmail push ignored: an account no workspace has connected")  # Acked.
+        return Response(status_code=204)
+    with tenant.as_user(user):
+        started = await start_sync("push", data["history_id"])
+    if not started:
         raise HTTPException(503, "VALR's background service isn't answering. Try again in a minute.")
     return Response(status_code=204)
 
@@ -119,7 +159,7 @@ async def gmail_push(request: Request) -> Response:
 # The page and its data.
 
 BUILD_TTL = timedelta(minutes=2)
-_built: dict[str, Any] = {}  # "entry": (fingerprint, built at, leads): one per process.
+_built: dict[str, Any] = {}  # workspace -> (fingerprint, built at, leads): one per workspace and process.
 
 
 async def fingerprint(connection: Any) -> tuple[Any, ...] | None:
@@ -141,14 +181,15 @@ async def current(connection: Any, now: datetime) -> list[leads.Lead]:
     expiry move with the clock). Callers only read the leads."""
     await leads_store.setup(connection)
     key = await fingerprint(connection)
-    hit = _built.get("entry")
+    entry = tenant.get() or tenant.OWNER  # Never another workspace's leads, even with equal counts.
+    hit = _built.get(entry)
     if key is not None and hit and hit[0] == key and timedelta(0) <= now - hit[1] < BUILD_TTL:
         return hit[2]
     touches = await leads_store.touches(connection)
     overrides = await leads_store.overrides(connection)
     built = await asyncio.to_thread(leads.build, touches, now, overrides)
     if key is not None:
-        _built["entry"] = (key, now, built)
+        _built[entry] = (key, now, built)
     return built
 
 

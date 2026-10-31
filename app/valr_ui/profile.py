@@ -124,6 +124,6 @@ def page(view: dict[str, Any], clock: Clock, email: str) -> str:
     return f"""{page_head("Profile", crumb="/valr/settings|Settings")}
 <div class="pf-grid">
   <div class="pf-col">{photo_card()}{details_card()}</div>
-  <div class="pf-col">{phone_card()}{account_card(email)}</div>
+  <div class="pf-col">{"" if view.get("guest") else phone_card()}{account_card(email)}</div>
 </div>
 <script type="module" src="{asset('valr-settings.js')}"></script>"""

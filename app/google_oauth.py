@@ -1,14 +1,15 @@
 """Read-only Gmail access for VALR's private-context researcher (R1), by Google OAuth.
 
-One-time consent, behind Cloudflare Access on the VALR host:
+One-time consent per workspace (app/workspaces.py: the owner and every guest connect their own):
 
-1. The owner opens `/oauth/google/start` (valr.haciensus.com). The app checks the
-   Access JWT (and, with VALR_ADMIN_EMAILS set, that it is one of them) and redirects to
-   Google's consent screen for `gmail.readonly` and `calendar.readonly` only, offline access, with a signed,
-   expiring `state`.
-2. Google redirects to `/oauth/google/callback` (GOOGLE_OAUTH_REDIRECT_URI). The code
-   is exchanged for tokens; only the refresh token is kept, encrypted (Fernet, key
-   VALR_TOKEN_KEY) in Postgres table `oauth_tokens`. The page says which account
+1. A signed-in user opens `/oauth/google/start` (valr.haciensus.com) and is redirected to
+   Google's consent screen for `gmail.readonly` and `calendar.readonly` only, offline access,
+   with a signed, expiring `state` that names their workspace (`make_state(..., user=)`).
+2. Google redirects to `/oauth/google/callback` (GOOGLE_OAUTH_REDIRECT_URI). The state must be
+   valid and name the workspace of whoever is signed in on that browser (so nobody can attach
+   their token to another workspace); the account must be the expected one (`expected_account`).
+   The code is exchanged for tokens; only the refresh token is kept, encrypted (Fernet, key
+   VALR_TOKEN_KEY) in that workspace's row of `oauth_tokens`. The page says which account
    was connected; no token is ever shown or logged.
 3. The research worker decrypts it, gets a short-lived access token and searches mail
    (app/private_sources.py). Google invalidates refresh tokens of apps in "Testing"
@@ -17,8 +18,9 @@ One-time consent, behind Cloudflare Access on the VALR host:
 
 Settings: GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET, GOOGLE_OAUTH_REDIRECT_URI
 (default https://valr.haciensus.com/oauth/google/callback), VALR_TOKEN_KEY (a Fernet key),
-VALR_GMAIL_ACCOUNT (the expected account, e.g. owner@example.com; another
-account is refused). Imports only the standard library, httpx and cryptography.
+VALR_GMAIL_ACCOUNT (the owner's expected account, e.g. owner@example.com; another account is
+refused; a guest's expected account is the address they signed in with). Imports only the
+standard library, httpx and cryptography.
 """
 import base64
 import hashlib
@@ -108,8 +110,9 @@ def _state_key(token_key: str) -> bytes:
     return hashlib.sha256(b"valr-oauth-state:" + token_key.encode()).digest()
 
 
-def make_state(token_key: str, now: float | None = None) -> str:
-    body = json.dumps({"n": secrets.token_urlsafe(12),
+def make_state(token_key: str, now: float | None = None, user: str = "owner") -> str:
+    """A signed, expiring state naming the workspace the grant is for."""
+    body = json.dumps({"n": secrets.token_urlsafe(12), "u": user,
                        "exp": int((now or time.time()) + STATE_TTL_S)}).encode()
     mac = hmac.new(_state_key(token_key), body, hashlib.sha256).digest()
     return base64.urlsafe_b64encode(body).decode().rstrip("=") + "." + \
@@ -117,22 +120,39 @@ def make_state(token_key: str, now: float | None = None) -> str:
 
 
 def check_state(token_key: str, state: str, now: float | None = None) -> bool:
+    return state_user(token_key, state, now) is not None
+
+
+def state_user(token_key: str, state: str, now: float | None = None) -> str | None:
+    """The workspace a valid, unexpired state names (a state from before workspaces: the
+    owner's); None when it is forged, altered or expired."""
     try:
         body_b64, mac_b64 = state.split(".")
         body = base64.urlsafe_b64decode(body_b64 + "=" * (-len(body_b64) % 4))
         mac = base64.urlsafe_b64decode(mac_b64 + "=" * (-len(mac_b64) % 4))
         expected = hmac.new(_state_key(token_key), body, hashlib.sha256).digest()
-        return hmac.compare_digest(mac, expected) and json.loads(body)["exp"] >= (now or time.time())
-    except (ValueError, KeyError, TypeError):
-        return False
+        data = json.loads(body)
+        if not hmac.compare_digest(mac, expected) or data["exp"] < (now or time.time()):
+            return None
+        return str(data.get("u") or "owner")
+    except (ValueError, KeyError, TypeError, AttributeError):
+        return None
 
 
-def consent_url(settings: OAuthSettings, state: str) -> str:
+def expected_account(settings: "OAuthSettings", user: str, email: str) -> str:
+    """The Google account a workspace may connect: the owner's VALR_GMAIL_ACCOUNT (any, when
+    unset, as before); a guest's own sign-in address, so a guest can only connect themselves."""
+    return settings.account if user == "owner" else email.strip().lower()
+
+
+def consent_url(settings: OAuthSettings, state: str, hint: str | None = None) -> str:
+    """Google's consent screen; `hint` (default: VALR_GMAIL_ACCOUNT) preselects the account."""
     params = {"client_id": settings.client_id, "redirect_uri": settings.redirect_uri,
               "response_type": "code", "scope": " ".join(SCOPES), "access_type": "offline",
               "prompt": "consent", "include_granted_scopes": "false", "state": state}
-    if settings.account:
-        params["login_hint"] = settings.account
+    hint = settings.account if hint is None else hint
+    if hint:
+        params["login_hint"] = hint
     return f"{AUTH_URL}?{urlencode(params)}"
 
 

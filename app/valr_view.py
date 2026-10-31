@@ -742,8 +742,10 @@ async def gmail_view(connection: Any) -> dict[str, Any]:
 
 
 async def collect(pool: Any, now: datetime | None = None) -> dict[str, Any]:
-    """The whole cockpit view. `pool`: the app's psycopg pool (research.pool)."""
+    """The whole cockpit view of the current workspace. `pool`: the app's psycopg pool (research.pool)."""
+    from app import workspaces
     now = now or datetime.now(timezone.utc)
+    mine = workspaces.is_owner()  # The owner's own server files and phone line (below).
     view: dict[str, Any] = {"generated_at": iso(now), "zone": str(interviews.owner_zone()),
                             "errors": []}
     async with pool.connection() as connection:
@@ -840,21 +842,24 @@ async def collect(pool: Any, now: datetime | None = None) -> dict[str, Any]:
                    "age_days": google.get("age_days"), "expires_soon": bool(google.get("expires_soon")),
                    "last_ok_at": iso(google.get("last_ok_at")), "last_error": scrub(google.get("last_error") or "")[:120],
                    "configured": google_oauth.OAuthSettings.from_env() is not None},
-        "fathom": {"configured": bool(os.getenv("FATHOM_API_KEY", "").strip()) or
+        "fathom": {"configured": (mine and bool(os.getenv("FATHOM_API_KEY", "").strip())) or
                    (notetaker_status.get("fathom") or {}).get("state") == "connected"},
         "notetakers": notetaker_status,
         "calendar": calendar,
         "gmail": gmail,
         "push": push,
     }
-    view["dials"] = await dial_counts(now)
+    # The owner's alone (app/workspaces.py): his Telnyx line's dial budgets, the scorecards and pay
+    # target in his server files, his configured name and VALR's number. A guest sees none of it.
+    view["dials"] = await dial_counts(now) if mine else {}
     # Two JSON files read and merged on every page and every /valr/api/state poll: off the loop (QA B6).
-    perf, target = await asyncio.to_thread(profile_files)
+    perf, target = await asyncio.to_thread(profile_files) if mine else (None, None)
     view["performance"] = performance(perf)
     view["pay_target"] = target
-    view["owner_name"] = owner_name()
     from app import owner
-    view["setup"] = {"phone_on_file": bool(owner.phone()),
+    view["owner_name"] = owner_name() if mine else owner.first_name("")
+    view["guest"] = not mine  # The pages hide the phone line, Call my phone and the Mac app.
+    view["setup"] = {"phone_on_file": mine and bool(owner.phone()),
                      "test_call_done": view.pop("_briefed_ever", False),
-                     "valr_number": valr_number()}
+                     "valr_number": valr_number() if mine else ""}
     return view
