@@ -778,6 +778,34 @@ temperature with its parts shown: recency, stage, momentum and quality. `/valr/l
 the leads as a 3D globe, coloured from cold blue to hot orange, with a list fallback. Details,
 data model, formula and the embeddable globe API: [docs/leads.md](docs/leads.md).
 
+### Workspaces (every signed-in account)
+
+Any Google account that signs in gets its own workspace, isolated by Postgres row-level
+security (`app/tenant.py`); the owner's is "owner". The background work serves every
+workspace, not just the owner (`app/workspaces.py`):
+
+- **Google**: each workspace connects its own Gmail and Calendar in Settings (same OAuth
+  client and scopes). A guest can only connect the account they signed in with; the signed
+  OAuth state names the workspace and must match whoever finishes the consent.
+- **Loops**: the notifications dispatch (each workspace's quiet hours, digest and devices),
+  the profile refresh and the fast Gmail check run once per workspace, each in its own scope,
+  two at a time with a time budget; one workspace's failure never stops the others.
+- **Temporal**: every Google-connected workspace gets its calendar sweep and Gmail poll/watch
+  schedules within five minutes; workflow inputs carry the workspace and activities run in
+  it. The owner keeps today's ids (`valr-gmail-sync`, `valr-calendar-sweep`...); a guest's end
+  in `-<workspace id>`. Advisory locks are per workspace.
+- **Pushes**: `/hooks/gmail` goes to the workspace that connected the push's address;
+  `/hooks/gcal` to the workspace named in the channel id.
+- **The owner's alone**: Telnyx calls, callbacks and Call my phone (a guest's briefing is a
+  heads-up, never a dial), the browser call, phone recordings and the Mac app, the notetaker
+  webhooks (guests use Sync now), and the file-based profile, performance and scorecards
+  (`/data`). Guests see a short empty state there, never the owner's data.
+- **Limits**: research, leads and notification budgets (`VALR_JOBS_PER_DAY`,
+  `VALR_MONTH_USD`, `VALR_LEADS_LLM_PER_DAY`...) count per workspace, so the server's total
+  can reach the per-workspace cap times the number of active workspaces (`VALR_MAX_USERS`).
+- **Delete my data** as a guest deletes their rows, sessions, conversation checkpoints,
+  workspace entry and schedules, after revoking their Google grant.
+
 ## Run locally
 
 Create `.env` from `.env.example` and set `GROQ_API_KEY` and `DEEPGRAM_API_KEY`.

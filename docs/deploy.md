@@ -532,6 +532,30 @@ Cut-over, with no moment where the owner is locked out:
 
 To roll back: set `VALR_AUTH_MODE=access` (today's behaviour) and restore the Access app.
 
+### Guests' workspaces (Gmail and Calendar for everyone)
+
+With open sign-up (`VALR_OPEN_SIGNUP`, default on; `VALR_MAX_USERS`, default 25) every
+account gets a workspace, and each can connect its own Gmail and Calendar
+(`/oauth/google/start`, the same client, redirect URI and scopes as the owner's). Nothing new
+to deploy in the app; the research worker picks up each newly connected workspace within five
+minutes (its calendar sweep and Gmail poll/watch schedules, ids ending in `-<workspace id>`).
+
+- **The Google OAuth app must allow guests.** Chirag must check its publishing status in the
+  GCP console (project framer-511620, Google Auth Platform › Audience); this cannot be checked
+  from here. "Testing": only the listed test users can grant, so add each guest's address as a
+  test user (and their grant expires after 7 days, like the owner's). "In production" without
+  verification: `gmail.readonly` is a restricted scope, so guests see an "unverified app"
+  warning and the app is capped at 100 users in total; past that, or to drop the warning, it
+  needs Google's verification (a security assessment for restricted scopes).
+- **Gmail push**: every workspace's `users.watch` publishes to the same topic and subscription
+  (`VALR_GMAIL_TOPIC`, `VALR_GMAIL_SUBSCRIPTION`); `/hooks/gmail` routes by the push's address.
+  `VALR_GMAIL_ACCOUNT` is now the owner's account only.
+- **Calendar push**: each workspace has its own channel (guests' ids `valr-<workspace id>-...`),
+  all posting to `/hooks/gcal`; no new bypass.
+- **Costs**: research, lead-classifier and notification-judge budgets count per workspace.
+- The notetaker webhooks (`/hooks/fathom`, `/hooks/granola`) stay the owner's; guests' notetakers
+  sync with "Check for new recordings".
+
 ## Updating and rolling back
 
 **Deploy: `bash deploy/deploy-all.sh`**, from the Mac. About 1–1.5 minutes
@@ -635,7 +659,7 @@ To roll back, run the same `docker rm -f` and `docker run` with the rollback tag
 | `LLM_GATEWAY_FALLBACK`, `LLM_BYOK_GUARD`, `LLM_GATEWAY_TIMEOUT_S` | `0` for groq (`1` for openrouter), `refuse`, `600` | `1`: a Groq or OpenRouter error retries on Anthropic direct (needs a working `ANTHROPIC_API_KEY`; a 401/403 turns it off). A response with `usage.is_byok=false` logs "VALR BYOK ALERT"; `refuse` then skips OpenRouter for the rest of the process, `warn` only logs, `off` ignores. Agent calls time out after 600 s, the inner search, check and classify calls after 60 s |
 | `VALR_JOB_USD`, `VALR_JOBS_PER_CALLER_DAY`, `VALR_JOBS_PER_DAY`, `VALR_MONTH_USD` | `0.25`, `3`, `15`, `20` | VALR cost limits (README, Research callbacks); the app checks them at booking, the worker within each job |
 | `VALR_SEARCHES_PER_RESEARCHER`, `VALR_PAGES_PER_RESEARCHER`, `VALR_PAGE_CHARS`, `VALR_RESULTS_PER_CALL`, `VALR_MAX_ITER`, `VALR_RESEARCHER_MODEL`, `VALR_SYNTH_MODEL` | `3`, `3`, `4000`, `5`, `5`, `claude-haiku-5-5`, `claude-sonnet-5-5` | Per-researcher caps and models (any `Caps` field in app/research_agents.py as `VALR_<NAME>`) |
-| `VALR_OWNER_EMAILS` | unset | Comma-separated Google addresses that may sign in to VALR (the owner); env only |
+| `VALR_OWNER_EMAILS` | unset | Comma-separated Google addresses of the owner (his workspace "owner"; others get their own); env only |
 | `VALR_AUTH_MODE` | `both` | `access` (Cloudflare Access only), `app` (VALR's own Google sign-in only) or `both` (either; for the cut-over, see Sign-in) |
 | `VALR_HOST`, `VALR_ACCESS_AUD` | `valr.haciensus.com`, unset | The dashboard's hostname, and the AUD tag of its Cloudflare Access application (else `CF_ACCESS_AUD`; neither: the dashboard is closed) |
 | `CF_TURN_KEY_ID`, `CF_TURN_KEY_API_TOKEN` | unset | Cloudflare Realtime TURN key for WebRTC media; run time only. Unset: public STUN only (see below) |
