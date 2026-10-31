@@ -660,6 +660,9 @@ To roll back, run the same `docker rm -f` and `docker run` with the rollback tag
 | `VALR_JOB_USD`, `VALR_JOBS_PER_CALLER_DAY`, `VALR_JOBS_PER_DAY`, `VALR_MONTH_USD` | `0.25`, `3`, `15`, `20` | VALR cost limits (README, Research callbacks); the app checks them at booking, the worker within each job |
 | `VALR_SEARCHES_PER_RESEARCHER`, `VALR_PAGES_PER_RESEARCHER`, `VALR_PAGE_CHARS`, `VALR_RESULTS_PER_CALL`, `VALR_MAX_ITER`, `VALR_RESEARCHER_MODEL`, `VALR_SYNTH_MODEL` | `3`, `3`, `4000`, `5`, `5`, `claude-haiku-5-5`, `claude-sonnet-5-5` | Per-researcher caps and models (any `Caps` field in app/research_agents.py as `VALR_<NAME>`) |
 | `VALR_OWNER_EMAILS` | unset | Comma-separated Google addresses of the owner (his workspace "owner"; others get their own); env only |
+
+| `VALR_OWNER_EMAILS` | unset | Comma-separated Google addresses that may sign in to VALR (the owner); env only |
+| (none) | | Other workspaces' own keys (Settings › API keys, README "Other users bring their own API keys") live in Postgres `user_keys`, Fernet-encrypted with `VALR_TOKEN_KEY`; no server key is ever used for them. The app checks a key with one GET to the provider (`api.groq.com`, `api.openai.com`, `api.anthropic.com`, `generativelanguage.googleapis.com`, `openrouter.ai`, `api.deepgram.com`); their browser calls use `api.deepgram.com` |
 | `VALR_AUTH_MODE` | `both` | `access` (Cloudflare Access only), `app` (VALR's own Google sign-in only) or `both` (either; for the cut-over, see Sign-in) |
 | `VALR_HOST`, `VALR_ACCESS_AUD` | `valr.haciensus.com`, unset | The dashboard's hostname, and the AUD tag of its Cloudflare Access application (else `CF_ACCESS_AUD`; neither: the dashboard is closed) |
 | `CF_TURN_KEY_ID`, `CF_TURN_KEY_API_TOKEN` | unset | Cloudflare Realtime TURN key for WebRTC media; run time only. Unset: public STUN only (see below) |

@@ -70,10 +70,11 @@ class AnthropicJsonLLM:
     def __init__(self, client=None, ledger: Ledger | None = None, attempts: int = 4,
                  sleep=None):
         if client is None:
-            # LLM_GATEWAY_PROFILE, else LLM_GATEWAY (app/llm_gateway.py); 300 s per request so a
+            # The workspace's gateway (llm_gateway.for_current: the owner's LLM_GATEWAY_PROFILE, else
+            # LLM_GATEWAY; a guest's own key) (app/llm_gateway.py); 300 s per request so a
             # stalled call fails instead of hanging (long rubric replies take ~2 min).
             from app import llm_gateway
-            client = llm_gateway.shared().client(timeout=300.0, backend=llm_gateway.feature_backend("profile"))
+            client = llm_gateway.for_current().client(timeout=300.0, backend=llm_gateway.feature_backend("profile"))
         self.client = client
         self.ledger = ledger or Ledger()
         self.attempts = attempts

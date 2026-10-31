@@ -14,7 +14,7 @@ from zoneinfo import ZoneInfo
 from groq import (APIConnectionError, APIError, APITimeoutError, AsyncGroq, InternalServerError,
                   RateLimitError)
 
-from app import groq_api
+from app import groq_api, user_voice
 from app.groq_api import ProviderError, groq_client, provider_error
 
 logger = logging.getLogger("uvicorn.error")
@@ -378,6 +378,11 @@ async def stream_model(messages: list[dict[str, Any]], tools: list[dict[str, Any
     request is hedged (see `first_reply`): nothing is yielded until one stream
     has started, so text is never duplicated.
     """
+    if client is None and (key := await user_voice.route()) is not None:
+        # A guest's workspace: its own LLM key, never the owner's Groq (app/user_voice.py).
+        async for event in user_voice.stream(key, messages, tools, tool_choice, max_tokens):
+            yield event
+        return
     async with (nullcontext(client) if client is not None else groq_client()) as groq:
         try:
             reply = await first_reply(groq, messages, tools, tool_choice, max_tokens)

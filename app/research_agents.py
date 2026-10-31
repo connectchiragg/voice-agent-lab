@@ -218,6 +218,7 @@ class ClaudeLLM(AnthropicCompletion):
     effort: str | None = None
     _ctx: Any = PrivateAttr(default=None)
     _meter: Any = PrivateAttr(default=None)
+    _gateway: Any = PrivateAttr(default=None)  # Captured by make_llm in the job's workspace.
 
     def bind(self, ctx: Ctx | None, meter: Meter) -> "ClaudeLLM":
         self._ctx, self._meter = ctx, meter
@@ -241,8 +242,10 @@ class ClaudeLLM(AnthropicCompletion):
         return params
 
     def _build_sync_client(self) -> Any:
-        """Through app/llm_gateway.py (LLM_GATEWAY_RESEARCH, else LLM_GATEWAY)."""
-        return llm_gateway.shared().client(backend=llm_gateway.feature_backend("research"))
+        """Through app/llm_gateway.py (the owner: LLM_GATEWAY_RESEARCH, else LLM_GATEWAY; a guest:
+        its own key)."""
+        gateway = self._gateway or llm_gateway.for_current()
+        return gateway.client(backend=llm_gateway.feature_backend("research"))
 
     def _build_async_client(self) -> Any:
         raise ValueError("VALR runs CrewAI synchronously; the LLM gateway has no async client")
@@ -285,6 +288,7 @@ class GroqLLM(OpenAICompletion):
     canonical: str = ""
     _ctx: Any = PrivateAttr(default=None)
     _meter: Any = PrivateAttr(default=None)
+    _gateway: Any = PrivateAttr(default=None)  # Captured by make_llm in the job's workspace.
 
     def bind(self, ctx: Ctx | None, meter: Meter) -> "GroqLLM":
         self._ctx, self._meter = ctx, meter
@@ -300,7 +304,7 @@ class GroqLLM(OpenAICompletion):
         try:
             return super().call(*args, **kwargs)
         except (openai.APIStatusError, openai.APIConnectionError) as error:
-            gateway = llm_gateway.shared()
+            gateway = self._gateway or llm_gateway.for_current()
             status = getattr(error, "status_code", None)
             if not gateway.fallback or status in (400, 401, 403, 404):
                 raise
@@ -315,7 +319,7 @@ class GroqLLM(OpenAICompletion):
         raise ValueError("VALR runs CrewAI synchronously")
 
     def _build_sync_client(self) -> Any:
-        return llm_gateway.shared().openai_client("background")
+        return (self._gateway or llm_gateway.for_current()).openai_client("background")
 
     def _build_async_client(self) -> Any:
         raise ValueError("VALR runs CrewAI synchronously; the LLM gateway has no async client")
@@ -326,6 +330,9 @@ class GroqLLM(OpenAICompletion):
         extra = {"reasoning_effort": reasoning}
         if reasoning == "default":
             extra["reasoning_format"] = "hidden"
+        gateway = self._gateway or llm_gateway.for_current()
+        extra = gateway.shape_chat({"model": self.model, **extra})  # Another provider: its own fields.
+        extra.pop("model", None)
         params["extra_body"] = {**(params.get("extra_body") or {}), **extra}
         return params
 
@@ -336,14 +343,19 @@ class GroqLLM(OpenAICompletion):
 
 
 def make_llm(model: str, max_tokens: int, effort: str) -> Any:
-    """The crew's LLM for a canonical model name, on the research backend
-    (LLM_GATEWAY_RESEARCH, else LLM_GATEWAY)."""
-    if llm_gateway.feature_mode("research") == "groq":
-        served = llm_gateway.groq_backend.groq_model(model)
-        return GroqLLM(model=served, canonical=model, max_tokens=max_tokens, effort=effort,
-                       api_key="via-llm-gateway", base_url=llm_gateway.groq_backend.GROQ_BASE_URL,
-                       custom_openai=True, max_retries=1)
-    return ClaudeLLM(model=model, max_tokens=max_tokens, effort=effort)
+    """The crew's LLM for a canonical model name, on the research backend of the workspace
+    in scope (the owner: LLM_GATEWAY_RESEARCH, else LLM_GATEWAY; a guest: its own key). The
+    gateway is captured here, in the job's context: CrewAI may call from its own threads."""
+    gateway = llm_gateway.for_current()
+    if gateway.crew_mode("research") == "groq":
+        served = gateway.chat_model(model)
+        base_url = getattr(getattr(gateway, "provider", None), "base_url", llm_gateway.groq_backend.GROQ_BASE_URL)
+        llm: Any = GroqLLM(model=served, canonical=model, max_tokens=max_tokens, effort=effort,
+                           api_key="via-llm-gateway", base_url=base_url, custom_openai=True, max_retries=1)
+    else:
+        llm = ClaudeLLM(model=getattr(gateway, "model_id", model), max_tokens=max_tokens, effort=effort)
+    llm._gateway = gateway
+    return llm
 
 
 # Tools.
@@ -356,8 +368,11 @@ _http = httpx.Client(timeout=10, follow_redirects=True,
 def anthropic_client() -> Any:
     """Messages client for the inner calls (search, claim check, classify): see app/llm_gateway.py."""
     global _anthropic
+    gateway = llm_gateway.for_current()  # A guest's workspace: its own key, per call.
+    if gateway is not llm_gateway.shared():
+        return gateway.client(timeout=60)
     if _anthropic is None:
-        _anthropic = llm_gateway.shared().client(  # As before: 60 s per request.
+        _anthropic = gateway.client(  # As before: 60 s per request.
             timeout=60, backend=llm_gateway.feature_backend("research"))
     return _anthropic
 

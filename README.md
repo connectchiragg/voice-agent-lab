@@ -764,6 +764,26 @@ briefs (about 2,500 tokens in all); Groq's free tier allows 8,000 input tokens a
 so long quiz sessions lean on the gpt-oss-20b hedge. ICS keys are mapped to Google's ids,
 but switching sources can make a recurring event look new once (a cache hit if unchanged).
 
+### Other users bring their own API keys
+
+Anyone else who signs in gets their own workspace and pays for their own AI: they add an API key
+in Settings › API keys, and it costs the owner nothing. The owner's workspace keeps the server's
+keys (Groq, Deepgram) exactly as before.
+
+- **Language model** (briefings, research, coaching, call replies): Groq, OpenAI, Anthropic,
+  Google Gemini or OpenRouter. Defaults: `openai/gpt-oss-120b`, `gpt-6-luna`,
+  `claude-haiku-5-5`, `gemini-3.1-flash-lite`, `google/gemini-3.1-flash-lite`; a model can be
+  chosen per key. **Voice**: Deepgram (new accounts get free credit). A consumer ChatGPT,
+  Claude or Gemini subscription is not an API key.
+- Each key is checked with one free call when saved (a rejected key is not kept), stored
+  Fernet-encrypted (VALR_TOKEN_KEY) and bound to its workspace, and never shown again: the page
+  shows "OpenAI · gpt-6-luna · key ending …1234".
+- One switch: `llm_gateway.for_current()` gives background work the owner's gateway or the
+  workspace's own (`app/user_gateway.py`); a browser call (`app/user_voice.py`) runs Flux and
+  Aura on the workspace's Deepgram key and streams replies from its own provider.
+- Without a key the feature says "Add your API key in Settings → API keys" (a call: "Voice needs
+  a Deepgram key"); it never falls back to a server key.
+
 ### Lead tracker (owner only)
 
 Every email about the owner's own job search becomes part of a **lead**: one per company or

@@ -53,6 +53,7 @@ def test_the_offer_needs_the_csrf_token_and_the_same_origin(engines):
 
 def test_only_the_owner_may_start_a_browser_call(engines, monkeypatch):
     monkeypatch.setenv("VALR_ADMIN_EMAILS", "boss@example.com")  # Signed in, but not the owner.
+    monkeypatch.delenv("VALR_OWNER_EMAILS", raising=False)
     client = TestClient(main.app)
     response = client.post("/webrtc/offer", json=offer_body(), headers=csrf())
     assert response.status_code == 403 and "owner" in response.json()["detail"]

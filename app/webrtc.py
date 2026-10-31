@@ -473,7 +473,20 @@ async def ice_servers(request: Request) -> dict[str, object]:
     client = request.client.host if request.client else "unknown"
     if not ice_limit.allow(client, asyncio.get_running_loop().time()):
         raise HTTPException(429, "Too many calls started. Wait a minute and try again.")
+    await guest_keys()  # A guest without its keys: no TURN credentials minted.
     return {"ice_servers": await call_ice_servers()}
+
+
+async def guest_keys() -> dict | None:
+    """None for the owner; a guest's own keys (app/user_voice.py), or 409 with what to add."""
+    from app import user_keys, user_voice
+    try:
+        return await user_voice.prepare()
+    except user_keys.KeyMissing as error:
+        raise HTTPException(409, str(error)) from None
+    except Exception as error:  # noqa: BLE001 - the database is down: no call, never a server key.
+        logger.warning("Guest keys failed to load: %s", type(error).__name__)
+        raise HTTPException(503, "VALR can't reach its data right now. Try again in a minute.") from None
 
 
 async def owner_action(request: Request) -> str:
@@ -488,12 +501,22 @@ async def offer(offer: Offer, request: Request) -> dict[str, str]:
     engines: Engines | None = getattr(request.app.state, "engines", None)
     if engines is None:
         raise HTTPException(503, "Voice models are not loaded.")
+    keys = await guest_keys()
     peers = peers_of(request.app)
     if len(peers) >= MAX_CALLS:
         raise HTTPException(503, "Too many calls right now. Try again shortly.")
     servers = await call_ice_servers()
     pc = RTCPeerConnection(RTCConfiguration(iceServers=[RTCIceServer(**server) for server in servers]))
-    peer = Peer(pc, engines.output_sample_rate, peers.discard, greet=offer.intent is not None)
+    on_closed: Callable[[Peer], None] = peers.discard
+    if keys is not None:  # A guest's call: its own Deepgram and LLM keys, pinned until it closes.
+        from app import user_voice
+        engines = user_voice.for_guest(engines, keys)
+        pinned = user_voice.opened(keys)
+
+        def on_closed(closing: Peer) -> None:
+            peers.discard(closing)
+            user_voice.closed(pinned)
+    peer = Peer(pc, engines.output_sample_rate, on_closed, greet=offer.intent is not None)
     peers.add(peer)
     try:
         await pc.setRemoteDescription(RTCSessionDescription(sdp=offer.sdp, type="offer"))
