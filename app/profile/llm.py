@@ -1,4 +1,5 @@
-"""Small structured-JSON wrapper over the Anthropic Messages API, with a token ledger.
+"""Small structured-JSON wrapper over the Messages API (app/llm_gateway.py: Groq's free tier by
+default, or Claude), with a token ledger. Groq models are free and price at $0.
 
 The classifier (Haiku) and evaluator (Sonnet) only need "prompt in, JSON out",
 so they depend on the `JsonLLM` protocol; tests pass a fake.
@@ -69,10 +70,10 @@ class AnthropicJsonLLM:
     def __init__(self, client=None, ledger: Ledger | None = None, attempts: int = 4,
                  sleep=None):
         if client is None:
-            # OpenRouter (BYOK) or Anthropic direct, per LLM_GATEWAY; 300 s per request so a
+            # LLM_GATEWAY_PROFILE, else LLM_GATEWAY (app/llm_gateway.py); 300 s per request so a
             # stalled call fails instead of hanging (long rubric replies take ~2 min).
             from app import llm_gateway
-            client = llm_gateway.shared().client(timeout=300.0)
+            client = llm_gateway.shared().client(timeout=300.0, backend=llm_gateway.feature_backend("profile"))
         self.client = client
         self.ledger = ledger or Ledger()
         self.attempts = attempts
@@ -100,6 +101,8 @@ class AnthropicJsonLLM:
                       # extra_body: the worker's anthropic 0.73 (pinned by crewai) has no
                       # output_config argument.
                       extra_body={"output_config": output_config})
+        if not constrained:
+            kwargs["json_output"] = True  # Groq JSON mode (the gateway drops it for Anthropic).
         for attempt in range(self.attempts):
             try:
                 response = self._create(kwargs)
@@ -112,8 +115,13 @@ class AnthropicJsonLLM:
                 log.info("llm %s: connection dropped, retry %d", model, attempt + 1)
                 self.sleep(5 * 2 ** attempt)
         usage = response.usage
-        self.ledger.add(model, usage.input_tokens, usage.output_tokens, reported_cost(usage))
-        log.info("llm %s: %d in / %d out tokens", model, usage.input_tokens, usage.output_tokens)
+        meta = getattr(response, "valr", None) or {}
+        billed = meta.get("model") if meta.get("backend") == "groq" else model
+        self.ledger.add(billed or model, usage.input_tokens, usage.output_tokens, reported_cost(usage))
+        log.info("llm %s: %d in / %d out tokens", billed or model, usage.input_tokens, usage.output_tokens)
+        if meta.get("shrunk_chars"):
+            log.warning("llm %s: the input was shortened by %d characters to fit Groq's free-tier "
+                        "limit; the reply may miss details", billed, meta["shrunk_chars"])
         if response.stop_reason == "refusal":
             raise LLMError(f"{model} declined the request")
         if response.stop_reason == "max_tokens":

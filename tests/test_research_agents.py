@@ -159,3 +159,45 @@ def test_the_claim_check_drops_unsupported_sentences_and_fails_open(monkeypatch)
     assert meter.cap_hits["claim_check_dropped"] == 1 and meter.rows[0]["kind"] == "claim_check"
     monkeypatch.setattr(agents, "_anthropic", FakeAnthropic(error=RuntimeError("down")))
     assert agents.check_claims(spoken, parts, Meter("synth")) == spoken
+
+
+# Groq's free tier (LLM_GATEWAY=groq).
+
+def test_meter_reads_openai_style_usage_and_groq_models_are_free():
+    meter = Meter("web")
+    meter.record("agent", "qwen/qwen3.8-27b", {"prompt_tokens": 3000, "completion_tokens": 200, "total_tokens": 3200})
+    assert meter.rows[0]["input_tokens"] == 3000 and meter.rows[0]["output_tokens"] == 200
+    assert meter.usd() == 0.0
+
+
+def test_the_crew_runs_on_groq_through_the_gateway(monkeypatch):
+    import json as _json
+
+    from app import groq_backend, llm_gateway
+    bodies = []
+
+    def handler(request):
+        bodies.append(_json.loads(request.content))
+        return httpx.Response(200, json={"id": "x", "model": "qwen/qwen3.8-27b", "choices": [{
+            "index": 0, "message": {"role": "assistant", "content": "All done."}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 50, "completion_tokens": 5, "total_tokens": 55}})
+    transport = groq_backend.GroqTransport(groq_backend.Limiters(), inner=httpx.MockTransport(handler),
+                                           sleep=lambda s: pytest.fail("the crew should not wait here"))
+    monkeypatch.setenv("LLM_GATEWAY", "groq")
+    monkeypatch.setenv("VALR_GROQ_REASONING", "1")
+    monkeypatch.setattr(llm_gateway, "_shared", llm_gateway.Gateway(mode="groq", groq_key="k",
+                                                                    groq_transport=transport))
+    meter = Meter("synth")
+    llm = agents.make_llm("claude-sonnet-5-5", 3000, "medium").bind(None, meter)
+    assert isinstance(llm, agents.GroqLLM) and llm.model == "qwen/qwen3.8-27b"
+    assert llm.call("Say done.") == "All done."
+    sent = bodies[0]
+    assert sent["model"] == "qwen/qwen3.8-27b" and sent["reasoning_effort"] == "default"
+    assert sent["reasoning_format"] == "hidden" and sent["max_completion_tokens"] == 750  # Capped.
+    assert "max_tokens" not in sent
+    assert meter.rows[0]["model"] == "qwen/qwen3.8-27b" and meter.rows[0]["input_tokens"] == 50
+    low = agents.make_llm("claude-haiku-5-5", 1500, "low").bind(None, meter)
+    low.call("Hi")
+    assert bodies[1]["reasoning_effort"] == "none" and "reasoning_format" not in bodies[1]
+    monkeypatch.setenv("LLM_GATEWAY", "anthropic")
+    assert isinstance(agents.make_llm("claude-haiku-5-5", 1500, "low"), ClaudeLLM)

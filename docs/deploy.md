@@ -351,9 +351,11 @@ Setup, after Temporal (above):
    ```
 
    The app container never gets it, so the live call path has no Claude client.
-   Background Claude calls go through OpenRouter with this same Anthropic key (BYOK)
-   when `OPENROUTER_API_KEY` is also in `.env.research` (app/llm_gateway.py); the
-   Anthropic key stays as the direct fallback:
+   Background LLM calls default to Groq's free tier (see "Background LLM on Groq's free
+   tier" below); this key serves `LLM_GATEWAY_RESEARCH=anthropic`,
+   `LLM_GATEWAY_PROFILE=anthropic`, `LLM_GATEWAY_FALLBACK=1` and `LLM_GATEWAY=anthropic`.
+   Only with `LLM_GATEWAY=openrouter` do Claude calls go through OpenRouter with this same
+   Anthropic key (BYOK), with the Anthropic key as the direct fallback:
 
    ```sh
    grep '^OPENROUTER_API_KEY=' .env | ssh ubuntu@<vm-ip> 'umask 077; cat >> ~/voice-agent-lab/.env.research'
@@ -396,10 +398,52 @@ anonymised caller hashes, never numbers.
 
 | Service | What VALR uses | Cost |
 |---|---|---|
-| Anthropic | 3 Haiku 5.5 researchers, 4 to 6 web searches, Sonnet 5.5 synthesis, Haiku claim check | about $0.08 to $0.11 per job measured; capped at $0.25 per job and $20 a month |
+| Anthropic (`LLM_GATEWAY_RESEARCH=anthropic`) | 3 Haiku 5.5 researchers, 4 to 6 web searches, Sonnet 5.5 synthesis, Haiku claim check | about $0.08 to $0.11 per job measured; capped at $0.25 per job and $20 a month. On Groq's free tier: $0, but see below |
 | Deepgram | the callback call: Flux per streamed minute ($0.0065) and Aura-2 per character ($0.030 per 1,000) | about $0.05 for a 2-minute callback |
 | Telnyx | one outbound call per job (plus retries if unanswered) | Telnyx's per-minute voice rate; recordings $0.002 a minute when on |
 | Groq | the callback conversation's replies | free tier (counts toward its daily limits) |
+
+### Background LLM on Groq's free tier
+
+Since 2026-10-28 the research worker's LLM calls default to Groq's free tier
+(`LLM_GATEWAY=groq` whenever `GROQ_API_KEY` is set; `voice-research` already reads it
+from `.env`). app/llm_gateway.py keeps the callers' Anthropic Messages calls and
+translates them; app/groq_backend.py holds the model table, the limits and the free web
+search. Callers can read `Gateway.limits(model)` (context, per-request input and output,
+per-minute and per-day budgets) to split long inputs, pass `backend="anthropic"` on a call,
+and read `response.valr` (served model, seconds queued, 429 retries, characters shortened,
+output tokens capped).
+
+- **Model.** On 2026-10-28 `GET /openai/v1/models` lists, besides the voice agent's
+  `openai/gpt-oss-120b` and `-20b`, one general chat model: `qwen/qwen3.8-27b` (131k
+  context, tools, JSON mode, strict JSON schema). `openai/gpt-oss-safeguard-20b` is a
+  policy classifier at 3 requests and 2,000 tokens a minute; `meta-models/muse-spark-open`
+  needs the org admin to accept its terms in the Groq console; Groq Compound and the Llama
+  models are retired. Background work never uses the voice models: Groq's limits are per
+  model per organisation, so a separate model cannot slow a live call.
+- **Free limits for qwen3.8-27b** (docs, headers and 413/429 bodies): 30 requests a minute,
+  1,000 a day; 8,000 tokens a minute, of which at most 7,000 input and 1,000 output (Groq
+  books a request's `max_tokens` while it runs, so a request for more than 1,000 output
+  tokens is refused); 200,000 tokens a day. The transport enforces them per model: a
+  sliding minute and refilling day counters, background work kept to 75% and its
+  `max_tokens` to 750, interactive calls (classifier, notification judge, company
+  resolver) served first, 429s waited out (`retry-after`), and a request over 6,300 input
+  tokens shortened in the middle of its longest message (logged, `valr.shrunk_chars`).
+- **Web search.** Anthropic's server-side tool becomes one keyless DuckDuckGo HTML search
+  (Wikipedia search when that fails) whose results the model answers from, citing URLs.
+  DuckDuckGo has no official API for this; VALR's volume is a few searches a job.
+- **What fits.** The Gmail classifier: 31/31 on the eval set, p50 0.5 s, $0 (docs/leads.md).
+  The research crew does not: in three runs on the VM (2026-10-28, "Coorg, India for a
+  weekend trip", 220 s per researcher) no researcher finished, the job took 450-550 s
+  and the synthesis was partial or failed; a phase-1 job used about 138,000 input tokens,
+  most of a day's 200,000. The coach and profile evaluator ask for 2,000-12,000 output
+  tokens a reply, more than the 1,000 a request allows: on Groq those replies are cut short
+  and fail as "hit max_tokens" rather than return a partial report.
+- **Recommended env** in `~/voice-agent-lab/.env.research` until the owner decides:
+  `LLM_GATEWAY=groq`, `LLM_GATEWAY_RESEARCH=anthropic`, `LLM_GATEWAY_PROFILE=anthropic`
+  (Claude for those two, at the costs in the table above). Everything on Groq for $0:
+  leave the two unset and accept partial research and failing coach reports.
+  Back to the old setup: `LLM_GATEWAY=openrouter`.
 
 ## Interview assistant (VALR)
 
@@ -583,8 +627,12 @@ To roll back, run the same `docker rm -f` and `docker run` with the rollback tag
 | `TEMPORAL_DB_PASSWORD` | set by `deploy/temporal-setup.sh` | Postgres password of the `temporal` role; used only by the setup script |
 | `TELNYX_CONNECTION_ID`, `TELNYX_FROM_NUMBER` | `3071391970178893742`, `+12288888007` | Callback dials: the Call Control app and the caller ID |
 | `ANTHROPIC_API_KEY` | unset | VALR research, in `.env.research`, read only by `voice-research` |
-| `OPENROUTER_API_KEY`, `LLM_GATEWAY` | unset, `openrouter` when the key is set (else `anthropic`) | VALR research: background Claude calls via OpenRouter, pinned to Anthropic and run on our Anthropic key (BYOK, set up under openrouter.ai Integrations with "Never use shared capacity"); the voice LLM stays on Groq direct |
-| `LLM_GATEWAY_FALLBACK`, `LLM_BYOK_GUARD`, `LLM_GATEWAY_TIMEOUT_S` | `1`, `refuse`, `600` | An OpenRouter error retries on Anthropic direct (`0`: fail). A response with `usage.is_byok=false` logs "VALR BYOK ALERT"; `refuse` then skips OpenRouter for the rest of the process, `warn` only logs, `off` ignores. Agent calls time out after 600 s, the inner search, check and classify calls after 60 s |
+| `LLM_GATEWAY` | `groq` when `GROQ_API_KEY` is set, else `openrouter` when `OPENROUTER_API_KEY` is set, else `anthropic` | Where VALR's background LLM calls go (leads classifier, notification judge, company resolver, research and interview crews, coach, profile). See "Background LLM on Groq's free tier" |
+| `LLM_GATEWAY_RESEARCH`, `LLM_GATEWAY_PROFILE` | unset (= `LLM_GATEWAY`) | `groq`, `anthropic` or `openrouter` for the research and interview-briefing crews, or for the coach and profile evaluator, alone |
+| `VALR_GROQ_FAST_MODEL`, `VALR_GROQ_STRONG_MODEL` | `qwen/qwen3.8-27b` | Groq models for Haiku-class and Sonnet-class work; the voice models (`openai/gpt-oss-120b`, `-20b`, `GROQ_LLM_MODEL`, `LLM_FALLBACK_MODEL`) are refused |
+| `VALR_GROQ_RESERVE`, `VALR_GROQ_MAX_WAIT_S`, `VALR_GROQ_REASONING` | `0.25`, `150`, `0` | Share of each Groq budget background work leaves to the classifier; longest a request queues before it fails as a 429; `1` turns hidden reasoning on for Sonnet-class work (it spends the same 1,000 output tokens a minute) |
+| `OPENROUTER_API_KEY` | unset | Only with `LLM_GATEWAY=openrouter`: background Claude calls via OpenRouter, pinned to Anthropic and run on our Anthropic key (BYOK, set up under openrouter.ai Integrations with "Never use shared capacity") |
+| `LLM_GATEWAY_FALLBACK`, `LLM_BYOK_GUARD`, `LLM_GATEWAY_TIMEOUT_S` | `0` for groq (`1` for openrouter), `refuse`, `600` | `1`: a Groq or OpenRouter error retries on Anthropic direct (needs a working `ANTHROPIC_API_KEY`; a 401/403 turns it off). A response with `usage.is_byok=false` logs "VALR BYOK ALERT"; `refuse` then skips OpenRouter for the rest of the process, `warn` only logs, `off` ignores. Agent calls time out after 600 s, the inner search, check and classify calls after 60 s |
 | `VALR_JOB_USD`, `VALR_JOBS_PER_CALLER_DAY`, `VALR_JOBS_PER_DAY`, `VALR_MONTH_USD` | `0.25`, `3`, `15`, `20` | VALR cost limits (README, Research callbacks); the app checks them at booking, the worker within each job |
 | `VALR_SEARCHES_PER_RESEARCHER`, `VALR_PAGES_PER_RESEARCHER`, `VALR_PAGE_CHARS`, `VALR_RESULTS_PER_CALL`, `VALR_MAX_ITER`, `VALR_RESEARCHER_MODEL`, `VALR_SYNTH_MODEL` | `3`, `3`, `4000`, `5`, `5`, `claude-haiku-5-5`, `claude-sonnet-5-5` | Per-researcher caps and models (any `Caps` field in app/research_agents.py as `VALR_<NAME>`) |
 | `VALR_OWNER_EMAILS` | unset | Comma-separated Google addresses that may sign in to VALR (the owner); env only |

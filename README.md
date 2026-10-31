@@ -556,6 +556,14 @@ Whole-call costs for a research request: the first call as usual, plus a
 callback call of a minute or two (Deepgram Flux and Aura-2 about $0.05, see
 Speech; Telnyx outbound minutes at its voice rates; Groq on the free tier).
 
+Background LLM work now defaults to **Groq's free tier** (`LLM_GATEWAY=groq`, $0;
+app/llm_gateway.py, app/groq_backend.py): every Claude name maps to `qwen/qwen3.8-27b`,
+never the voice agent's gpt-oss models. Its free limits (1,000 output and 7,000 input
+tokens a minute, 200,000 tokens a day) do not fit this crew: measured on 2026-10-28, no
+researcher finished within 220 s and a job took 450-550 s. Until that is decided, keep the
+crew on Claude with `LLM_GATEWAY_RESEARCH=anthropic` (the costs above); see
+docs/deploy.md, "Background LLM on Groq's free tier".
+
 Why these pieces:
 
 - **Temporal runs the fan-out, CrewAI runs each researcher.** Each researcher
@@ -762,8 +770,9 @@ Every email about the owner's own job search becomes part of a **lead**: one per
 opportunity, merged with his calendar interviews, Fathom recordings and interview scores.
 Gmail pushes through Cloud Pub/Sub to `/hooks/gmail` (Pub/Sub's OIDC token verified), with
 a 30-minute safety poll and a daily watch renewal (Temporal Schedules). Cheap heuristics
-drop job alerts and bulk mail; Claude Haiku decides the rest (25/25 on a synthetic eval set,
-$0.00017 per call, about $0.25 a month). Only decisions, metadata and 20-word summaries are
+drop job alerts and bulk mail; a model decides the rest: Groq's free `qwen/qwen3.8-27b` by
+default (31/31 on a synthetic eval set, stage hints 11/12, $0; Claude Haiku: 31/31, 12/12,
+$0.00024 per call). Only decisions, metadata and 20-word summaries are
 stored, never bodies. Each lead has a stage, expires after 30 quiet days, and has a 0-100
 temperature with its parts shown: recency, stage, momentum and quality. `/valr/leads` draws
 the leads as a 3D globe, coloured from cold blue to hot orange, with a list fallback. Details,

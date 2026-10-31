@@ -53,6 +53,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from app.groq_backend import billed_model
+
 NOVELTY = ("new", "reminder", "duplicate", "confirmation")
 SUPPRESSED = ("reminder", "duplicate", "confirmation")
 WINDOW = timedelta(days=30)
@@ -303,9 +305,11 @@ def judge(email: Any, decision: Any, kind: str, ctx: Context, client: Any, model
     """One short Haiku call (blocking: run it in a thread). An unreadable answer is new."""
     response = client.messages.create(
         model=model, max_tokens=MAX_TOKENS, thinking={"type": "disabled"},
-        messages=[{"role": "user", "content": prompt_for(email, decision, kind, ctx)}])
+        messages=[{"role": "user", "content": prompt_for(email, decision, kind, ctx)}],
+        json_output=True)  # Groq JSON mode; ignored on Anthropic.
     usage = getattr(response, "usage", None)
-    counts = {"input_tokens": int(getattr(usage, "input_tokens", 0) or 0),
+    counts = {"model": billed_model(response, model),
+              "input_tokens": int(getattr(usage, "input_tokens", 0) or 0),
               "output_tokens": int(getattr(usage, "output_tokens", 0) or 0),
               "cache_read": int(getattr(usage, "cache_read_input_tokens", 0) or 0),
               "cache_write": int(getattr(usage, "cache_creation_input_tokens", 0) or 0)}

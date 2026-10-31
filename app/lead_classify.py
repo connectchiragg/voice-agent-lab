@@ -11,7 +11,8 @@ Two steps, cheapest first:
    (`own_mail`) never reaches the model: in a thread already on a lead it is kept as a
    touchpoint, otherwise skipped. ATS and scheduling mail (Greenhouse,
    Lever, Ashby...), and replies in a thread already on a lead, always go to step 2.
-2. `classify` (Claude Haiku through app/llm_gateway.py): keep or drop, a category, a
+2. `classify` (the Haiku-class model through app/llm_gateway.py: Groq's free qwen3.8-27b by
+   default, in JSON mode; or Claude Haiku): keep or drop, a category, a
    confidence, a short reason, and what the lead tracker needs (company, role, the
    sender's role, a stage hint, sentiment, an explicit positive or negative cue, a
    20-word paraphrased summary and the next step). The email is passed as data inside
@@ -27,6 +28,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable
 
+from app.groq_backend import billed_model
 from app.leads import CLOSED, FORWARD, domain_of, is_tool_domain
 
 MODEL = "claude-haiku-5-5"
@@ -299,9 +301,11 @@ def classify(email: Email, owner_emails: set[str], client: Any, model: str = MOD
     response = client.messages.create(
         model=model, max_tokens=MAX_TOKENS,
         messages=[{"role": "user", "content": prompt_for(email, owner_emails)}],
-        thinking={"type": "disabled"})  # A short JSON answer; thinking only spent the tokens.
+        thinking={"type": "disabled"},  # A short JSON answer; thinking only spent the tokens.
+        json_output=True)  # Groq JSON mode (validated, asked once more); ignored on Anthropic.
     usage = getattr(response, "usage", None)
-    counts = {"input_tokens": int(getattr(usage, "input_tokens", 0) or 0),
+    counts = {"model": billed_model(response, model),
+              "input_tokens": int(getattr(usage, "input_tokens", 0) or 0),
               "output_tokens": int(getattr(usage, "output_tokens", 0) or 0),
               "cache_read": int(getattr(usage, "cache_read_input_tokens", 0) or 0),
               "cache_write": int(getattr(usage, "cache_creation_input_tokens", 0) or 0)}

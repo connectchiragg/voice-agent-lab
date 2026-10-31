@@ -453,7 +453,31 @@ Logs carry codes only: "VALR notify context: reminder by rule (reminder wording;
 
 ## Measurements and cost
 
-**Classifier**, on the 25 synthetic emails in `tests/fixtures/lead_emails.json`
+**Classifier on Groq's free tier** (the default since 2026-10-28, `LLM_GATEWAY=groq`): the
+31 synthetic emails now in `tests/fixtures/lead_emails.json`, run on the VM
+(`scripts/eval_lead_classifier.py`), against Claude Haiku 5.5 (OpenRouter BYOK) the same day:
+
+| | Groq `qwen/qwen3.8-27b` (JSON mode, reasoning off) | Claude Haiku 5.5 |
+|---|---|---|
+| Keep/drop decisions | **31/31** | 31/31 |
+| Stage hints | 11/12 (e03: "screening" for an interview-scheduling email) | 12/12 |
+| Model calls, tokens | 15; about 1,000 in and 166 out each | 15; about 1,400 in and 200 out each |
+| Latency per call | p50 **0.49 s**; a burst of 15 queued behind the 8,000 tokens a minute: max 56 s | p50 1.49 s, max 2.9 s |
+| Cost | **$0** | $0.00024 per call |
+
+Under research load (the crew running on Groq in the same process), ten classifier calls
+were all correct, p50 0.51 s, max 42 s: they go first, but wait for the output tokens
+already spent that minute. The `incoming` bell item is created before the classifier
+runs, so the email -> bell SLA is unchanged; only the push for a kept email can be later.
+The free tier's limits for this model: 30 requests a minute and 1,000 a day, 8,000 tokens
+a minute of which at most 7,000 input and 1,000 output (Groq books a request's max_tokens
+while it runs), 200,000 tokens a day. At about 1,200 tokens a call that is roughly 160
+classifier calls a day when nothing else uses the model; a 500-message backfill takes
+several days at the free tier and is best run with `LLM_GATEWAY=anthropic` once.
+The notification judge has not been re-measured on Groq (same JSON mode; about 1,300
+input and 25 output tokens a call).
+
+**Classifier on Claude**, on the first 25 synthetic emails
 (`scripts/eval_lead_classifier.py`, real Haiku 5.5 through OpenRouter BYOK, 2026-10-16):
 - **25/25** decisions correct, and stage hints 10/10.
 - The heuristics and the own-mail rule settled 13 emails without the model; 12 reached it.

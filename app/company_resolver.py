@@ -4,13 +4,15 @@ reviews the evidence, then one web search when it is still unclear. Cached, capp
 1. Rules (app/company_names.py) give candidates. A *confident* rule answer is accepted with no
    model call: exactly one external company domain (not free-mail, ATS, job board or tool,
    not the owner's) that maps to a name, and no title that names a different company.
-2. Otherwise Claude Haiku (app/llm_gateway.py, thinking off, JSON) reviews the evidence: the
+2. Otherwise the Haiku-class model (app/llm_gateway.py: Groq's free tier by default, or Claude
+   Haiku; thinking off, JSON) reviews the evidence: the
    title, the external people (names and email *domains*, never addresses), the Gmail sender's
    display name and domain, the subject, the first 300 characters of the stored snippet
    (decrypted in memory only), and the rule candidates with their reasons. It answers
    {company, domain, confidence, role_title, agency, reasoning (<= 25 words), needs_web}.
-3. If it asks for the web, or is below 0.7, one more Haiku call with Anthropic's server-side
-   web_search tool (max_uses 1, the same search the research crew uses) decides again from
+3. If it asks for the web, or is below 0.7, one more call with one web search (Anthropic's
+   server-side web_search on Claude, a free DuckDuckGo search on Groq; max_uses 1, the same
+   search the research crew uses) decides again from
    the results, and the first result URL it relied on is kept as the citation.
 4. After every model answer, code enforces the rules: never the owner's name, a round label,
    a tool, an ATS or a free-mail domain; below 0.5 confidence -> not identified.
@@ -36,6 +38,7 @@ from typing import Any, Callable
 
 from app import company_names as names
 from app import schema
+from app.groq_backend import billed_model
 
 logger = logging.getLogger("valr")
 MODEL = "claude-haiku-5-5"
@@ -257,7 +260,7 @@ def parse(text: str) -> dict[str, Any]:
 def usage_row(response: Any, part: str, searches: int = 0) -> dict[str, Any]:
     usage = getattr(response, "usage", None)
     server = getattr(usage, "server_tool_use", None)
-    return {"part": part, "kind": "company", "model": MODEL,
+    return {"part": part, "kind": "company", "model": billed_model(response, MODEL),
             "input_tokens": int(getattr(usage, "input_tokens", 0) or 0),
             "output_tokens": int(getattr(usage, "output_tokens", 0) or 0),
             "cache_read": int(getattr(usage, "cache_read_input_tokens", 0) or 0),
@@ -283,7 +286,7 @@ def review(ev: Evidence, candidates: list[dict[str, str]], client: Any, candidat
     """One Haiku call (blocking: run in a thread). -> (answer, usage rows)."""
     prompt = PROMPT.replace("CANDIDATE", candidate or "the candidate").replace("EVIDENCE", ev.render(candidates))
     response = client.messages.create(model=MODEL, max_tokens=MAX_TOKENS, thinking={"type": "disabled"},
-                                      messages=[{"role": "user", "content": prompt}])
+                                      messages=[{"role": "user", "content": prompt}], json_output=True)
     return parse(text_of(response)), [usage_row(response, "review")]
 
 
@@ -296,7 +299,7 @@ def research(ev: Evidence, candidates: list[dict[str, str]], first: dict, client
     response = client.messages.create(
         model=MODEL, max_tokens=MAX_TOKENS + 300, thinking={"type": "disabled"},
         tools=[{"type": "web_search_20250305", "name": "web_search", "max_uses": 1}],
-        messages=[{"role": "user", "content": prompt}])
+        messages=[{"role": "user", "content": prompt}], json_output=True)
     body = parse(text_of(response))
     body["source_url"] = str(body.get("source_url") or "") if str(body.get("source_url") or "").startswith("https://") \
         else first_url(response)
@@ -491,7 +494,7 @@ def default_resolver(owner_emails: set[str]) -> Resolver:
 
     from app import owner
     candidate = owner.recording_name()
-    return Resolver(client=lambda: llm_gateway.shared().client(timeout=60), month_ok=month_ok,
+    return Resolver(client=lambda: llm_gateway.shared().client(timeout=60, priority="interactive"), month_ok=month_ok,
                     owner_emails=owner_emails, candidate=candidate)
 
 
