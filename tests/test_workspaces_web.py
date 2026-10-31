@@ -221,7 +221,7 @@ def test_guests_may_act_in_their_own_workspace_but_not_start_a_browser_call(who,
     assert web.post("/valr/api/google/sync", content="{}", headers=headers).status_code == 200
     assert calls == [("calendar", GUEST_ID), ("gmail", GUEST_ID)]
     offer = web.post("/webrtc/offer", json={"type": "offer", "sdp": "x", "echo_cancelled": True}, headers=headers)
-    assert offer.status_code == 403  # Browser calls stay the owner's.
+    assert offer.status_code in (409, 503)  # No keys of its own: no call (never the server's keys).
     for path in ("/valr/api/call-now", "/valr/api/phone/token"):
         assert web.post(path, content="{}", headers=headers).status_code == 403, path
 

@@ -51,13 +51,13 @@ def test_the_offer_needs_the_csrf_token_and_the_same_origin(engines):
     assert client.post("/webrtc/offer", json=offer_body(), headers=csrf()).status_code == 400
 
 
-def test_only_the_owner_may_start_a_browser_call(engines, monkeypatch):
+def test_a_guest_without_keys_never_gets_a_browser_call_on_the_servers_keys(engines, monkeypatch):
     monkeypatch.setenv("VALR_ADMIN_EMAILS", "boss@example.com")  # Signed in, but not the owner.
     monkeypatch.delenv("VALR_OWNER_EMAILS", raising=False)
     client = TestClient(main.app)
     response = client.post("/webrtc/offer", json=offer_body(), headers=csrf())
-    assert response.status_code == 403 and "owner" in response.json()["detail"]
-    assert client.post("/webrtc/hangup", json={"call_id": "x"}, headers=csrf()).status_code == 403
+    assert response.status_code in (409, 503)  # "Add your keys", or no data: never a call.
+    assert client.post("/webrtc/hangup", json={"call_id": "x"}, headers=csrf()).json() == {"ok": False}
 
 
 def test_signed_out_offers_and_hangups_are_refused():

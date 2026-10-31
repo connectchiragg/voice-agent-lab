@@ -46,7 +46,7 @@ from aiortc.rtp import RtpPacket
 from fastapi import APIRouter, FastAPI, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from app import ice, memory
+from app import ice, memory, tenant
 from app.pipeline import Engines, Samples
 from app.transport import CallSession, SpeechUnavailable, open_call
 
@@ -490,9 +490,10 @@ async def guest_keys() -> dict | None:
 
 
 async def owner_action(request: Request) -> str:
-    """The owner, same-origin JSON and the page's CSRF token (app/valr_dashboard.py)."""
+    """A signed-in workspace, same-origin JSON and the page's CSRF token (app/valr_dashboard.py).
+    A guest's call then needs its own keys (`guest_keys`): it never runs on the server's."""
     from app import valr_dashboard  # Loaded late: it imports much of the app.
-    return await valr_dashboard.action_owner(request, only_owner=True)
+    return await valr_dashboard.action_owner(request)
 
 
 @router.post("/offer")
@@ -517,6 +518,7 @@ async def offer(offer: Offer, request: Request) -> dict[str, str]:
             peers.discard(closing)
             user_voice.closed(pinned)
     peer = Peer(pc, engines.output_sample_rate, on_closed, greet=offer.intent is not None)
+    peer.workspace = tenant.get() or tenant.OWNER  # Hang-up ends only this workspace's calls.
     peers.add(peer)
     try:
         await pc.setRemoteDescription(RTCSessionDescription(sdp=offer.sdp, type="offer"))
@@ -551,7 +553,9 @@ async def offer(offer: Offer, request: Request) -> dict[str, str]:
 async def hangup(body: Hangup, request: Request) -> dict[str, bool]:
     """End the call now ("End call" in the panel) instead of waiting for the peer to time out."""
     await owner_action(request)
-    peer = next((p for p in peers_of(request.app) if p.id == body.call_id), None)
+    mine = tenant.get() or tenant.OWNER
+    peer = next((p for p in peers_of(request.app)
+                 if p.id == body.call_id and getattr(p, "workspace", tenant.OWNER) == mine), None)
     if peer is not None:
         await peer.close("hung up by the caller")
     return {"ok": peer is not None}
