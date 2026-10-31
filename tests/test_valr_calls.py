@@ -231,6 +231,7 @@ def test_call_talk_now_rings_once_with_no_interviews():
 
 def test_call_my_phone_with_nothing_coming_up_still_calls(client, monkeypatch):  # noqa: F811
     monkeypatch.setenv("VALR_OWNER_PHONE", PHONE)
+    monkeypatch.setenv("VALR_OWNER_EMAILS", OWNER)
     calls = []
 
     async def temporal():
@@ -254,7 +255,8 @@ def test_call_my_phone_with_nothing_coming_up_still_calls(client, monkeypatch): 
     token = client.get("/valr", headers=GOOD).text.split('name="csrf-token" content="', 1)[1].split('"', 1)[0]
     response = client.post("/valr/api/call-now", json={},
                            headers={**GOOD, "X-CSRF-Token": token, "Content-Type": "application/json"})
-    assert response.status_code == 200 and response.json()["mode"] == "talk"
+    assert response.status_code == 200, response.text
+    assert response.json()["mode"] == "talk"
     assert calls == [(owner.KEY, PHONE)]
 
 

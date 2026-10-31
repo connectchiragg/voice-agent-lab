@@ -30,7 +30,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
-from app import schema
+from app import schema, tenant
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS research_jobs (
@@ -347,7 +347,7 @@ def conninfo() -> str:
 async def print_overview() -> None:
     import psycopg
     limits = Limits.from_env()
-    async with await psycopg.AsyncConnection.connect(conninfo(), autocommit=True) as connection:
+    async with await tenant.connect(conninfo(), autocommit=True) as connection:
         await setup(connection)
         view = await overview(connection, limits, recent=10)
     now = datetime.now(timezone.utc)
@@ -362,6 +362,8 @@ async def print_overview() -> None:
 
 
 if __name__ == "__main__":
+    from app import tenant
+    tenant.current.set(tenant.OWNER)  # The owner's server-side jobs (app/tenant.py).
     if sys.argv[1:] not in ([], ["spend"]):
         sys.exit("usage: python -m app.research_jobs [spend]")
     asyncio.run(print_overview())

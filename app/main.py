@@ -16,7 +16,8 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from app import (access, agent, auth, callbacks, groq_api, interviews, leads_web, memory,
-                 notifications_web, phone_web, recordings, research, settings_web, telnyx, valr_dashboard, valr_hooks, webpush_web, webrtc)
+                 notifications_web, phone_web, recordings, research, settings_web, telnyx, tenant, valr_dashboard, valr_hooks,
+                 webpush_web, webrtc)
 from app.notetakers import routes as notetaker_routes
 from app.static_files import CachedStaticFiles
 from app.valr_ui import routes as valr_routes
@@ -105,6 +106,9 @@ async def watch_event_loop(interval_s: float = 0.1, threshold_s: float = 0.25) -
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    # Start-up loads and the app's background tasks are the owner's (app/tenant.py); requests
+    # run in their own context, scoped by the sign-in gate.
+    tenant.current.set(tenant.OWNER)
     app.state.engines = load_engines()
     app.state.phone_engines = load_engines(telnyx.phone_codec().sample_rate)
     watcher = asyncio.create_task(watch_event_loop())

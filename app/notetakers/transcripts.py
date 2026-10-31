@@ -77,7 +77,7 @@ async def save(connection: Any, provider: str, external_id: str, meeting: dict |
     await setup(connection)
     await connection.execute(
         "INSERT INTO recording_transcripts (provider, external_id, sealed, turns, chars) VALUES (%s, %s, %s, %s, %s) "
-        "ON CONFLICT (provider, external_id) DO UPDATE SET sealed = excluded.sealed, turns = excluded.turns, "
+        "ON CONFLICT (owner_id, provider, external_id) DO UPDATE SET sealed = excluded.sealed, turns = excluded.turns, "
         "chars = excluded.chars, updated_at = now()",
         (provider, str(external_id), google_oauth.encrypt(key, payload), len(turns),
          sum(len(t["text"]) for t in turns)))

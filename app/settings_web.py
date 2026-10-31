@@ -50,7 +50,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from app import google_oauth, interview_store, owner, research, valr_dashboard
+from app import google_oauth, interview_store, owner, research, tenant, valr_dashboard
 
 logger = logging.getLogger("uvicorn.error")
 router = APIRouter()
@@ -192,7 +192,7 @@ async def logout_all(request: Request) -> JSONResponse:
     backend = store.backend()
     if backend is None:
         raise HTTPException(503, "VALR can't reach its data right now. Try again in a minute.")
-    ended = await backend.end_all()
+    ended = await backend.end_all(core.signed_in_email() or "")
     logger.info("VALR signed out of every device (%d sessions)", ended)
     response = JSONResponse({"ok": True, "ended": ended, "next": "/login?signed_out=1",
                              "message": "Signed out everywhere."}, headers=NO_CACHE)
@@ -369,10 +369,20 @@ async def delete_data(request: Request) -> JSONResponse:
         except Exception as error:  # noqa: BLE001 - the wipe goes ahead
             logger.warning("VALR delete: Google not revoked (%s)", type(error).__name__)
         tables = await existing(connection, DELETE_TABLES)
+        mine = [table for table in tables if table in tenant.TABLES]
+        shared = [table for table in tables if table not in tenant.TABLES]
         async with connection.transaction():
-            await connection.execute(f"TRUNCATE {', '.join(tables)}")  # Names from the list above.
+            # Per-user tables: DELETE, which row-level security limits to this workspace
+            # (TRUNCATE would ignore it and wipe everyone's). Names from the lists above.
+            for table in mine:
+                await connection.execute(f"DELETE FROM {table}")
+            if tenant.is_owner():
+                await connection.execute(f"TRUNCATE {', '.join(shared)}")
+            else:
+                await connection.execute("DELETE FROM valr_sessions WHERE lower(email) = %s",
+                                         ((core.signed_in_email() or "").lower(),))
     kept = []
-    for path in scorecard_files():
+    for path in (scorecard_files() if tenant.is_owner() else []):
         try:
             path.unlink(missing_ok=True)
         except OSError:

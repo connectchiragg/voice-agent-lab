@@ -44,7 +44,7 @@ from datetime import datetime, timezone
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError, available_timezones
 
-from app import schema
+from app import schema, tenant
 
 logger = logging.getLogger("valr")
 
@@ -72,40 +72,43 @@ CREATE TABLE IF NOT EXISTS owner_profile (
     migrated_at         timestamptz,
     updated_at          timestamptz NOT NULL DEFAULT now()
 );
-INSERT INTO owner_profile (id) VALUES (1) ON CONFLICT (id) DO NOTHING;
 """
 FIELDS = ("display_name", "recording_name", "name_pronunciation", "timezone", "photo_type", "photo_etag",
           "phone_e164", "phone_removed", "phone_updated_at", "legacy_keys", "migrated_at", "updated_at")
 
-_row: dict[str, Any] = {}
-_loaded_at = 0.0
+# One cached row per workspace (app/tenant.py): {user: (row, loaded at)}. No user = the owner,
+# as before (a worker or script that has not chosen a user).
+_rows: dict[str, tuple[dict[str, Any], float]] = {}
+
+
+def who() -> str:
+    return tenant.get() or KEY
 
 
 # The cache.
 
 def apply(row: dict[str, Any] | None) -> None:
-    """Replace the cached row (after a load or a save)."""
-    global _row, _loaded_at
-    _row = dict(row or {})
-    _loaded_at = time.monotonic()
+    """Replace the current user's cached row (after a load or a save)."""
+    _rows[who()] = (dict(row or {}), time.monotonic())
 
 
 def reset() -> None:
-    """Forget the cached row (tests)."""
-    global _row, _loaded_at
-    _row, _loaded_at = {}, 0.0
+    """Forget every cached row (tests)."""
+    _rows.clear()
 
 
 def stale() -> bool:
-    return not _loaded_at or time.monotonic() - _loaded_at > FRESH_S
+    loaded = _rows.get(who(), ({}, 0.0))[1]
+    return not loaded or time.monotonic() - loaded > FRESH_S
 
 
 def cached(field: str) -> Any:
-    return _row.get(field)
+    return _rows.get(who(), ({}, 0.0))[0].get(field)
 
 
 def env(name: str) -> str:
-    return os.getenv(name, "").strip()
+    """A server setting about the owner; other users never inherit it."""
+    return os.getenv(name, "").strip() if who() == KEY else ""
 
 
 # What the rest of VALR reads.
@@ -172,6 +175,7 @@ def key() -> str:
 
 
 def emails() -> set[str]:
+    """The owner's sign-in addresses (VALR_OWNER_EMAILS), whoever is asking."""
     return {e.strip().lower() for e in os.getenv("VALR_OWNER_EMAILS", "").split(",") if e.strip()}
 
 
@@ -348,9 +352,13 @@ def etag_of(data: bytes) -> str:
 async def setup(connection: Any) -> None:
     """The table and its row; once, the move of caller memory to the stable key."""
     await schema.once(connection, "owner", lambda: connection.execute(SCHEMA))  # Once per process.
+    # The row is per user: made at the user's scope. Only the owner has old caller keys to merge.
+    await connection.execute(
+        "INSERT INTO owner_profile (id, migrated_at) VALUES (1, CASE WHEN %s THEN NULL ELSE now() END) "
+        "ON CONFLICT (owner_id, id) DO NOTHING", (who() == KEY,))
     cursor = await connection.execute("SELECT migrated_at FROM owner_profile WHERE id = 1")
     row = await cursor.fetchone()
-    if row and row[0] is None:
+    if row and row[0] is None and who() == KEY:
         await migrate(connection)
 
 
@@ -384,7 +392,7 @@ async def migrate(connection: Any) -> None:
                 "min(first_seen), max(last_seen), "
                 "sum(call_count), (array_agg(profile ORDER BY last_seen DESC))[1], "
                 "(array_agg(open_items ORDER BY last_seen DESC))[1] FROM callers WHERE caller_key = ANY(%s) "
-                "HAVING count(*) > 0 ON CONFLICT (caller_key) DO NOTHING", (KEY, keys))
+                "HAVING count(*) > 0 ON CONFLICT (owner_id, caller_key) DO NOTHING", (KEY, keys))
             await connection.execute("DELETE FROM callers WHERE caller_key = ANY(%s)", (keys,))
         await connection.execute(
             "UPDATE owner_profile SET legacy_keys = %s, migrated_at = now() WHERE id = 1", (keys,))
@@ -418,13 +426,13 @@ async def refresh(connection: Any = None, force: bool = False) -> None:
             return
         import psycopg
         from app import research_jobs
-        async with await psycopg.AsyncConnection.connect(research_jobs.conninfo(), autocommit=True,
+        async with await tenant.connect(research_jobs.conninfo(), autocommit=True,
                                                          connect_timeout=5) as own:
             await setup(own)
             await load(own)
     except Exception as error:  # noqa: BLE001 - keep the last values; try again in a minute
-        global _loaded_at
-        _loaded_at = time.monotonic()
+        row, _ = _rows.get(who(), ({}, 0.0))
+        _rows[who()] = (row, time.monotonic())
         logger.warning("VALR owner profile unavailable: %s", type(error).__name__)
 
 

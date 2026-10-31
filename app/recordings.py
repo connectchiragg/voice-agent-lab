@@ -16,6 +16,8 @@ from datetime import datetime
 
 from psycopg_pool import AsyncConnectionPool
 
+from app import schema, tenant
+
 logger = logging.getLogger("uvicorn.error")
 
 SCHEMA = """
@@ -50,7 +52,7 @@ async def save(recording: Recording) -> bool:
     async with pool.connection() as connection:
         await connection.execute(
             "INSERT INTO call_recordings (recording_id, call_control_id, created_at, duration_ms) "
-            "VALUES (%s, %s, %s, %s) ON CONFLICT (recording_id) DO UPDATE SET "
+            "VALUES (%s, %s, %s, %s) ON CONFLICT (owner_id, recording_id) DO UPDATE SET "
             "duration_ms = coalesce(excluded.duration_ms, call_recordings.duration_ms)",
             (recording.recording_id, recording.call_control_id, recording.created_at,
              recording.duration_ms))
@@ -65,11 +67,11 @@ async def lifespan(conninfo: Callable[[], str]) -> AsyncIterator[None]:
         yield
         return
     try:
-        pool = AsyncConnectionPool(conninfo(), min_size=1, max_size=1, open=False,
+        pool = AsyncConnectionPool(conninfo(), min_size=1, max_size=1, open=False, connection_class=tenant.TenantConnection,
                                    kwargs={"autocommit": True})
         await pool.open(wait=True, timeout=5)
         async with pool.connection() as connection:
-            await connection.execute(SCHEMA)
+            await schema.once(connection, "recordings", lambda: connection.execute(SCHEMA))
         logger.info("Phone calls are recorded (TELNYX_RECORD=1)")
     except Exception as error:
         logger.warning("Postgres unavailable for recordings (%s); recording ids are only logged.",

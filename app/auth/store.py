@@ -10,7 +10,10 @@ Expired rows are swept whenever a sign-in starts or a session is created.
 """
 from typing import Any, Protocol
 
+from app import schema
 from app.auth import core
+
+USERS_LOCK = 0x56414C52_5553  # "VALR" "US": new workspaces, one at a time (the cap).
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS valr_sessions (
@@ -20,6 +23,13 @@ CREATE TABLE IF NOT EXISTS valr_sessions (
     expires_at  timestamptz NOT NULL
 );
 CREATE INDEX IF NOT EXISTS valr_sessions_expires ON valr_sessions (expires_at);
+CREATE TABLE IF NOT EXISTS valr_users (
+    id          text PRIMARY KEY,
+    email       text NOT NULL UNIQUE,
+    name        text,
+    created_at  timestamptz NOT NULL DEFAULT now(),
+    last_seen   timestamptz NOT NULL DEFAULT now()
+);
 CREATE TABLE IF NOT EXISTS valr_login_states (
     state_hash  text PRIMARY KEY,
     nonce       text NOT NULL,
@@ -42,8 +52,13 @@ class Store(Protocol):
 
     async def end_session(self, token: str) -> None: ...
 
-    async def end_all(self) -> int:
-        """Every session (each device): "Sign out of all devices". -> how many."""
+    async def end_all(self, email: str) -> int:
+        """Delete every session of this account; returns how many."""
+
+    async def register(self, user: str, email: str, cap: int) -> bool:
+        """Record a sign-in; False when a new workspace would pass the cap."""
+
+    async def users(self) -> list[str]: ...
 
 
 _ready_pool: Any = None  # The pool the tables were created in (once per process).
@@ -57,7 +72,7 @@ class PostgresStore:
         global _ready_pool
         if _ready_pool is self.pool:
             return
-        await connection.execute(SCHEMA)
+        await schema.once(connection, "auth", lambda: connection.execute(SCHEMA))
         _ready_pool = self.pool
 
     async def save_state(self, state: str, nonce: str, next_path: str) -> None:
@@ -106,11 +121,39 @@ class PostgresStore:
             await connection.execute("DELETE FROM valr_sessions WHERE token_hash = %s",
                                      (core.token_hash(token),))
 
-    async def end_all(self) -> int:
+    async def end_all(self, email: str) -> int:
+        """Every session of this account (each device); other people's stay."""
         async with self.pool.connection() as connection:
             await self._ready(connection)
-            cursor = await connection.execute("DELETE FROM valr_sessions")
+            cursor = await connection.execute("DELETE FROM valr_sessions WHERE lower(email) = %s",
+                                              (email.lower(),))
             return int(getattr(cursor, "rowcount", 0) or 0)
+
+    async def register(self, user: str, email: str, cap: int) -> bool:
+        """Record a sign-in. A new account other than the owner's is refused once `cap`
+        workspaces exist (False); a known one always gets in."""
+        async with self.pool.connection() as connection:
+            await self._ready(connection)
+            async with connection.transaction():
+                await connection.execute("SELECT pg_advisory_xact_lock(%s)", (USERS_LOCK,))
+                cursor = await connection.execute(
+                    "UPDATE valr_users SET last_seen = now(), email = %s WHERE id = %s", (email, user))
+                if getattr(cursor, "rowcount", 0):
+                    return True
+                if user != "owner":
+                    cursor = await connection.execute("SELECT count(*) FROM valr_users WHERE id <> 'owner'")
+                    if (await cursor.fetchone())[0] >= cap:
+                        return False
+                await connection.execute("INSERT INTO valr_users (id, email) VALUES (%s, %s) "
+                                         "ON CONFLICT DO NOTHING", (user, email))
+        return True
+
+    async def users(self) -> list[str]:
+        """Every workspace that has signed in, the owner's first (the workers serve each)."""
+        async with self.pool.connection() as connection:
+            await self._ready(connection)
+            cursor = await connection.execute("SELECT id FROM valr_users ORDER BY id <> 'owner', created_at")
+            return [row[0] for row in await cursor.fetchall()]
 
 
 def backend() -> Store | None:

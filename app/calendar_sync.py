@@ -206,10 +206,9 @@ def needs_renewal(state: dict[str, Any], now: datetime) -> bool:
 
 async def setup(connection: Any) -> None:
     """The tables and the state row, once per process (app/schema.py)."""
-    async def run() -> None:
-        await connection.execute(SCHEMA)
-        await connection.execute("INSERT INTO calendar_state (id) VALUES (1) ON CONFLICT DO NOTHING")
-    await schema.once(connection, "calendar_sync", run)
+    await schema.once(connection, "calendar_sync", lambda: connection.execute(SCHEMA))
+    # The state row is per user (app/tenant.py), so it is made at the user's scope, not in the DDL.
+    await connection.execute("INSERT INTO calendar_state (id) VALUES (1) ON CONFLICT DO NOTHING")
 
 
 async def load_state(connection: Any) -> dict[str, Any]:
@@ -242,7 +241,7 @@ async def snapshots(connection: Any, keys: list[str] | None = None) -> dict[str,
 async def store(connection: Any, event: SlotEvent) -> None:
     await connection.execute(
         "INSERT INTO calendar_events (key, snapshot, start_utc, status, updated_at) "
-        "VALUES (%s, %s::jsonb, %s, %s, now()) ON CONFLICT (key) DO UPDATE SET "
+        "VALUES (%s, %s::jsonb, %s, %s, now()) ON CONFLICT (owner_id, key) DO UPDATE SET "
         "snapshot = excluded.snapshot, start_utc = excluded.start_utc, status = excluded.status, "
         "updated_at = now()",
         (event.key, json.dumps(asdict(event)), event.start_utc, event.status))

@@ -38,7 +38,7 @@ from temporalio.client import Client
 from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
 from temporalio.service import RPCError
 
-from app import calendar_sync, google_oauth, interview_store, interview_types, owner, research_jobs
+from app import calendar_sync, google_oauth, interview_store, interview_types, owner, research_jobs, tenant
 from app.interview_types import (Person, SlotEvent, attendee_role, company_key, group_blocks,
                                  people, slot_workflow_id)
 from app.interview_workflow import (TASK_QUEUE, BlockCallWorkflow, BlockInput, BlockRecord,
@@ -93,7 +93,7 @@ def fingerprint(event: SlotEvent) -> str:
 
 
 async def connect() -> psycopg.AsyncConnection:
-    return await psycopg.AsyncConnection.connect(research_jobs.conninfo(), autocommit=True)
+    return await tenant.connect(research_jobs.conninfo(), autocommit=True)
 
 
 async def gmail_access(connection: Any, http: httpx.AsyncClient) -> tuple[str | None, str]:

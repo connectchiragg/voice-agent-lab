@@ -328,7 +328,7 @@ async def cached(connection: Any, fingerprint: str) -> Decision | None:
 async def save(connection: Any, fingerprint: str, d: Decision, source: str) -> None:
     await connection.execute(
         "INSERT INTO company_resolutions (fingerprint, company, domain, agency, role_title, confidence, source, how, "
-        "citation, usd) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (fingerprint) DO UPDATE SET "
+        "citation, usd) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (owner_id, fingerprint) DO UPDATE SET "
         "company = excluded.company, domain = excluded.domain, agency = excluded.agency, "
         "role_title = excluded.role_title, confidence = excluded.confidence, source = excluded.source, "
         "how = excluded.how, citation = excluded.citation, usd = excluded.usd, created_at = now()",
@@ -361,7 +361,7 @@ async def set_override(connection: Any, entity_id: str, company: str, by: str = 
     if company.strip():
         await connection.execute(
             "INSERT INTO company_overrides (entity_id, company, created_by) VALUES (%s, %s, %s) "
-            "ON CONFLICT (entity_id) DO UPDATE SET company = excluded.company, created_by = excluded.created_by, "
+            "ON CONFLICT (owner_id, entity_id) DO UPDATE SET company = excluded.company, created_by = excluded.created_by, "
             "updated_at = now()", (entity_id, company.strip()[:80], by))
     else:
         await connection.execute("DELETE FROM company_overrides WHERE entity_id = %s", (entity_id,))

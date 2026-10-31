@@ -40,9 +40,15 @@ async def once(connection: Any, name: str, run: Callable[[], Awaitable[Any]]) ->
     async with lock:
         if key in _ready:
             return
+        from app import tenant
+        real = isinstance(connection, tenant.psycopg.AsyncConnection)
         async with connection.transaction():
+            if real:  # DDL as the database owner, for this transaction only; queries run as valr_app.
+                await connection.execute("SET LOCAL ROLE NONE")
             await connection.execute("SELECT pg_advisory_xact_lock(%s)", (LOCK_KEY,))
             await run()
+            if real:
+                await tenant.migrate(connection)  # New per-user tables get owner_id and row-level security.
         _ready.add(key)
 
 

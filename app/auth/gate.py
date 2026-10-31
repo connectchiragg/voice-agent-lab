@@ -25,6 +25,7 @@ from urllib.parse import quote
 from starlette.requests import HTTPConnection
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from app import tenant
 from app.auth import core, store
 
 logger = logging.getLogger("uvicorn.error")
@@ -48,6 +49,23 @@ OWNER_PREFIXES = ("/valr",)  # /valr, /valr/api/*, /valr/interviews/..., /valr/c
 BEARER_PATHS = frozenset({"/valr/context"})
 API_PREFIXES = ("/valr/api/", "/webrtc/", "/valr/context")
 SAFE_METHODS = ("GET", "HEAD", "OPTIONS")
+# Public routes that act for the owner: his Telnyx line, his Google push channels, his notetaker
+# webhooks and the iPhone Shortcut (each checks its own signature or secret).
+OWNER_HOOKS = frozenset({"/hooks/gcal", "/hooks/gmail", "/hooks/fathom", "/hooks/granola",
+                         "/hooks/recording-upload", "/telnyx/webhook", "/ws/telnyx"})
+# The owner's alone, whoever else signs in: his phone line, Mac app, server and admin surfaces.
+# Every other signed-in route serves the caller's own workspace (app/tenant.py).
+OWNER_ONLY_PATHS = frozenset({
+    "/valr/context", "/valr/downloads/mac", "/valr/api/phone/token", "/valr/api/phone/status",
+    "/valr/api/notifications/latency", "/valr/system", "/valr/api/version",
+    # Telnyx dials (paid per minute): calls are the owner's phone line only.
+    "/valr/api/call-now", "/valr/api/dials", "/valr/api/reach", "/valr/settings/phone-help",
+})
+OWNER_ONLY_PREFIXES = ("/valr/api/phone/", "/valr/api/profile/phone", "/valr/admin")
+
+
+def owner_only(path: str) -> bool:
+    return path in OWNER_ONLY_PATHS or under(path, OWNER_ONLY_PREFIXES)
 SCOPE_KEY = "valr.identity"
 
 
@@ -76,7 +94,7 @@ async def session_identity(connection: HTTPConnection) -> core.Identity | None:
     except Exception as error:  # noqa: BLE001 - the database is down: anonymous, not a 500.
         logger.warning("VALR session lookup failed: %s", type(error).__name__)
         return None
-    if email is None or email.lower() not in core.owner_emails():
+    if email is None or (not core.open_signup() and email.lower() not in core.owner_emails()):
         return None
     return core.Identity(email.lower(), "session")
 
@@ -157,12 +175,17 @@ class Gate:
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] not in ("http", "websocket") or classify(scope["path"]) == "public":
-            await self.app(scope, receive, send)
+            if scope.get("path") in OWNER_HOOKS:
+                with tenant.as_user(tenant.OWNER):
+                    await self.app(scope, receive, send)
+            else:
+                await self.app(scope, receive, send)
             return
         connection = HTTPConnection(scope)
         if scope["path"] in BEARER_PATHS and \
                 connection.headers.get("authorization", "").startswith("Bearer "):
-            await self.app(scope, receive, send)  # The handler checks the token, or the owner.
+            with tenant.as_user(tenant.OWNER):  # The Mac-side job's token is the owner's.
+                await self.app(scope, receive, send)  # The handler checks the token, or the owner.
             return
         if (scope["type"] == "websocket" or scope["method"] not in SAFE_METHODS) and \
                 not core.same_origin(connection.headers, connection.headers.get("host")):
@@ -175,8 +198,13 @@ class Gate:
             else:
                 await refuse(scope, send, 401, "Sign in to VALR first.")
             return
+        if who.user != tenant.OWNER and owner_only(scope["path"]):
+            await refuse(scope, send, 403, "Only VALR's owner can use this.")
+            return
         token = core.current_email.set(who.email)
+        user_token = tenant.current.set(who.user)
         try:
             await self.app(scope, receive, send)
         finally:
+            tenant.current.reset(user_token)
             core.current_email.reset(token)

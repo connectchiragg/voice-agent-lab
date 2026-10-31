@@ -35,6 +35,8 @@ async def main(command: str) -> int:
 
 
 if __name__ == "__main__":
+    from app import tenant
+    tenant.current.set(tenant.OWNER)  # The owner's server-side jobs (app/tenant.py).
     command = sys.argv[1] if len(sys.argv) > 1 else "pending"
     if command == "history":
         from app.notetakers import history

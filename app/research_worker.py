@@ -40,7 +40,7 @@ from temporalio.worker import Worker
 
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
-from app import research_jobs  # noqa: E402
+from app import research_jobs  # noqa: E402, tenant
 from app.callback_workflow import workflow_runner  # noqa: E402
 from app.research_workflow import (TASK_QUEUE, FinishInput, PartInput, PartResult,  # noqa: E402
                                    ResearchCallbackWorkflow, SynthInput, SynthResult)
@@ -50,7 +50,7 @@ HEARTBEAT_S = 5
 
 
 async def connect() -> psycopg.AsyncConnection:
-    return await psycopg.AsyncConnection.connect(research_jobs.conninfo(), autocommit=True)
+    return await tenant.connect(research_jobs.conninfo(), autocommit=True)
 
 
 async def save_spend(job_id: str, rows: list[dict]) -> float:
@@ -388,6 +388,8 @@ USAGE = ('usage: python -m app.research_worker [test "<topic>" | sync | blocks |
          'call-now [next|<slot>] | reschedule-briefings]')
 
 if __name__ == "__main__":
+    from app import tenant
+    tenant.current.set(tenant.OWNER)  # The owner's server-side jobs (app/tenant.py).
     if sys.argv[1:2] == ["test"] and len(sys.argv) == 3:
         logging.basicConfig(level=logging.WARNING)
         asyncio.run(test_job(sys.argv[2]))

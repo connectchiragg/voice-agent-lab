@@ -173,4 +173,6 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
+    from app import tenant
+    tenant.current.set(tenant.OWNER)  # The owner's server-side jobs (app/tenant.py).
     asyncio.run(main())

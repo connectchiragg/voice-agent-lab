@@ -56,6 +56,14 @@ class FakeStore:
     async def end_session(self, token):
         self.sessions.pop(core.token_hash(token), None)
 
+    async def register(self, user, email, cap):
+        self.users = getattr(self, "users_", {})
+        if user not in self.users and user != "owner" and len([u for u in self.users if u != "owner"]) >= cap:
+            return False
+        self.users[user] = email
+        self.users_ = self.users
+        return True
+
 
 class Verifier:
     async def email(self, token):
@@ -235,8 +243,9 @@ def test_a_bad_token_from_google_is_no_session(client, env):
 
 # Owner only.
 
-def test_another_google_account_gets_the_private_page_and_no_session(client, env, caplog):
+def test_another_google_account_gets_the_private_page_when_sign_up_is_closed(client, env, caplog, monkeypatch):
     fake_store, google = env
+    monkeypatch.setenv("VALR_OPEN_SIGNUP", "0")
     with caplog.at_level(logging.INFO, logger="uvicorn.error"):
         done, _ = sign_in(client, google, email=STRANGER)
     assert done.status_code == 303 and done.headers["location"] == "/private"
@@ -259,8 +268,38 @@ def test_the_owner_gets_a_session_and_the_gmail_grant_is_untouched(client, env):
     assert 'action="/logout"' in page.text and "Sign out" in page.text  # The top bar's account menu.
 
 
-def test_a_session_ends_when_the_owner_leaves_the_list(client, env, monkeypatch):
+def test_another_google_account_gets_its_own_workspace(client, env, monkeypatch):
+    """Open sign-up (the default): a stranger gets a session in a workspace of their own, and
+    the owner's phone line, dials and Mac app stay closed to them."""
+    from app import tenant
+    from app.auth import gate
     fake_store, google = env
+    done, _ = sign_in(client, google, email=STRANGER)
+    assert done.status_code == 303 and done.headers["location"] == "/valr/leads"
+    assert fake_store.users == {tenant.user_id(STRANGER, core.owner_emails()): STRANGER}
+    assert tenant.user_id(STRANGER, core.owner_emails()).startswith("u_")
+    cookie = {"Cookie": f"{core.COOKIE}={cookie_of(done)}"}
+    assert client.get("/valr/api/state", headers=cookie).status_code in (200, 500, 503)
+    for path in ("/valr/api/phone/status", "/valr/downloads/mac", "/valr/settings/phone-help"):
+        assert client.get(path, headers=cookie).status_code == 403, path
+    assert gate.owner_only("/valr/api/call-now") and gate.owner_only("/valr/api/profile/phone/remove")
+    assert not gate.owner_only("/valr/leads") and not gate.owner_only("/valr/api/state")
+
+
+def test_sign_up_closes_at_the_workspace_cap_but_the_owner_always_gets_in(client, env, monkeypatch):
+    fake_store, google = env
+    monkeypatch.setenv("VALR_MAX_USERS", "1")
+    assert sign_in(client, google, email="first@elsewhere.example")[0].headers["location"] == "/valr/leads"
+    full, _ = sign_in(client, google, email=STRANGER)
+    assert full.headers["location"] == "/private?full=1" and "set-cookie" not in full.headers
+    assert "VALR is full" in client.get("/private?full=1").text
+    assert sign_in(client, google)[0].headers["location"] == "/valr/leads"  # The owner.
+    assert sign_in(client, google, email="first@elsewhere.example")[0].headers["location"] == "/valr/leads"
+
+
+def test_a_session_ends_when_the_owner_leaves_the_list_and_sign_up_is_closed(client, env, monkeypatch):
+    fake_store, google = env
+    monkeypatch.setenv("VALR_OPEN_SIGNUP", "0")
     done, _ = sign_in(client, google)
     cookie = {"Cookie": f"{core.COOKIE}={cookie_of(done)}"}
     assert client.get("/valr/api/state", headers=cookie).status_code == 200
@@ -336,7 +375,7 @@ def test_postgres_store_sql_hashes_tokens_and_deletes_states_as_it_reads_them():
     asyncio.run(pg.end_session(token))
     sql = "\n".join(call[0] for call in connection.calls)
     params = json.dumps([call[1] for call in connection.calls])
-    assert "CREATE TABLE IF NOT EXISTS valr_sessions" in sql and sql.count("CREATE TABLE") == 2  # Once.
+    assert "CREATE TABLE IF NOT EXISTS valr_sessions" in sql and sql.count("CREATE TABLE") == 3  # Once.
     assert "DELETE FROM valr_sessions WHERE expires_at < now()" in sql
     assert "DELETE FROM valr_login_states WHERE state_hash = %s" in sql and "RETURNING" in sql
     assert token not in params and core.token_hash(token) in params

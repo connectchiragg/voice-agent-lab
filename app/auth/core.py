@@ -60,8 +60,21 @@ def emails(name: str) -> frozenset[str]:
 
 
 def owner_emails() -> frozenset[str]:
-    """VALR_OWNER_EMAILS: the only Google accounts that get a session."""
+    """VALR_OWNER_EMAILS: the owner's Google accounts (the workspace "owner", app/tenant.py)."""
     return emails("VALR_OWNER_EMAILS")
+
+
+def open_signup() -> bool:
+    """VALR_OPEN_SIGNUP (default 1): any Google account gets its own workspace. 0: owner only."""
+    return os.getenv("VALR_OPEN_SIGNUP", "1").strip() != "0"
+
+
+def max_users() -> int:
+    """VALR_MAX_USERS (default 25): workspaces besides the owner's; then sign-up closes."""
+    try:
+        return max(0, int(os.getenv("VALR_MAX_USERS", "25")))
+    except ValueError:
+        return 25
 
 
 def domain_of(email: str) -> str:
@@ -73,6 +86,14 @@ def domain_of(email: str) -> str:
 class Identity:
     email: str
     via: Literal["session", "access", "preview"]
+
+    @property
+    def user(self) -> str:
+        """The workspace (app/tenant.py): "owner" for the owner's addresses, Access and the preview."""
+        from app import tenant
+        if self.via in ("preview", "access"):  # Cloudflare Access only ever admits the owner.
+            return tenant.OWNER
+        return tenant.user_id(self.email, owner_emails())
 
 
 # Session tokens: 32 random bytes in the cookie; the database keeps only their SHA-256.

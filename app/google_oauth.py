@@ -166,7 +166,7 @@ async def store(connection: Any, settings: OAuthSettings, account: str, refresh:
                 scope: str) -> None:
     await connection.execute(
         "INSERT INTO oauth_tokens (provider, account, refresh_token, scope, status, connected_at) "
-        "VALUES (%s, %s, %s, %s, 'connected', now()) ON CONFLICT (provider) DO UPDATE SET "
+        "VALUES (%s, %s, %s, %s, 'connected', now()) ON CONFLICT (owner_id, provider) DO UPDATE SET "
         "account = excluded.account, refresh_token = excluded.refresh_token, scope = excluded.scope, "
         "status = 'connected', connected_at = now(), last_error = NULL",
         (PROVIDER, account, encrypt(settings.token_key, refresh), scope))

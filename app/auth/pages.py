@@ -76,7 +76,14 @@ shares your name and email address with VALR and nothing else. It doesn't ask fo
 Calendar here.</p>""", theme)
 
 
-def private_page(theme: str | None = None) -> str:
+def private_page(theme: str | None = None, full: bool = False) -> str:
+    if full:
+        return frame("Full", """
+<p class="eyebrow">Sign-up closed</p>
+<h1 class="auth-title">VALR is full for now</h1>
+<p class="auth-pitch">Every workspace on this server is taken, so new accounts can't sign up yet.
+VALR kept nothing about the account you picked.</p>
+<p class="auth-privacy"><a href="/login">Back to sign-in</a></p>""", theme)
     return frame("Private", """
 <p class="eyebrow">Private</p>
 <h1 class="auth-title">VALR is private</h1>

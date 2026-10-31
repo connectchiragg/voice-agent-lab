@@ -100,7 +100,7 @@ async def enqueue(connection: Any, provider: str, external_id: str, meeting: dic
               if meeting and token_key() else None)
     cursor = await connection.execute(
         "INSERT INTO post_call_reports (provider, external_id, title, recording_url, sealed, history) "
-        "VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT (provider, external_id) DO NOTHING RETURNING 1",
+        "VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT (owner_id, provider, external_id) DO NOTHING RETURNING 1",
         (provider, str(external_id), (title or "")[:300], recording_url or "", sealed, bool(history)))
     return await cursor.fetchone() is not None
 
@@ -135,7 +135,7 @@ async def requeue(connection: Any, provider: str, external_id: str, title: str =
     await setup(connection)
     cursor = await connection.execute(
         "INSERT INTO post_call_reports (provider, external_id, title, recording_url, history, mode) "
-        "VALUES (%s, %s, %s, %s, true, 'reanalyse') ON CONFLICT (provider, external_id) DO UPDATE SET "
+        "VALUES (%s, %s, %s, %s, true, 'reanalyse') ON CONFLICT (owner_id, provider, external_id) DO UPDATE SET "
         "status = 'queued', history = true, mode = 'reanalyse', detail = NULL, updated_at = now() "
         "WHERE post_call_reports.status NOT IN ('queued', 'processing') RETURNING 1",
         (provider, str(external_id), (title or "")[:300], recording_url or ""))

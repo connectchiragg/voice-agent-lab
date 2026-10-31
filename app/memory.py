@@ -45,7 +45,7 @@ from psycopg_pool import AsyncConnectionPool
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from app.persona import ASSISTANT_NAME
-from app import access, groq_api
+from app import access, groq_api, schema, tenant
 from app.groq_api import ProviderError
 from app.llm import stream_model
 
@@ -246,8 +246,9 @@ class PostgresStore:
         self.checkpoints = False  # LangGraph's tables are in this database.
 
     async def setup(self) -> None:
+        async with self.pool.connection() as connection:
+            await schema.once(connection, "memory", lambda: connection.execute(SCHEMA))
         async with self.pool.connection() as connection, connection.transaction():
-            await connection.execute(SCHEMA)
             cursor = await connection.execute(
                 "SELECT count(*) FROM unnest(%s::text[]) AS name WHERE to_regclass(name) IS NOT NULL",
                 (list(CHECKPOINT_TABLES),))
@@ -271,7 +272,7 @@ class PostgresStore:
             cursor = await connection.execute(
                 "INSERT INTO call_summaries (call_id, caller_key, started_at, ended_at, summary, "
                 "facts, error) VALUES (%s, %s, %s, %s, %s, %s, %s) "
-                "ON CONFLICT (call_id) DO NOTHING RETURNING call_id",
+                "ON CONFLICT (owner_id, call_id) DO NOTHING RETURNING call_id",
                 (record.call_id, caller_key, record.started_at, record.ended_at, record.summary,
                  Jsonb(record.facts), record.error))
             if await cursor.fetchone() is None:
@@ -281,7 +282,7 @@ class PostgresStore:
                 "INSERT INTO callers (caller_key, display_name, first_seen, last_seen, call_count, "
                 "profile, open_items) VALUES (%(key)s, %(name)s, %(started)s, %(ended)s, 1, "
                 "coalesce(%(profile)s, ''), coalesce(%(open_items)s, '[]'::jsonb)) "
-                "ON CONFLICT (caller_key) DO UPDATE SET "
+                "ON CONFLICT (owner_id, caller_key) DO UPDATE SET "
                 "display_name = coalesce(%(name)s, callers.display_name), "
                 "last_seen = greatest(callers.last_seen, %(ended)s), "
                 "call_count = callers.call_count + 1, "
@@ -314,7 +315,7 @@ class PostgresStore:
             await connection.execute(
                 "INSERT INTO callers (caller_key, display_name, first_seen, last_seen, call_count, profile, "
                 "open_items) SELECT %s, display_name, first_seen, last_seen, call_count, profile, open_items "
-                "FROM callers WHERE caller_key = %s ON CONFLICT (caller_key) DO UPDATE SET "
+                "FROM callers WHERE caller_key = %s ON CONFLICT (owner_id, caller_key) DO UPDATE SET "
                 "display_name = CASE WHEN excluded.last_seen > callers.last_seen "
                 "  THEN coalesce(excluded.display_name, callers.display_name) "
                 "  ELSE coalesce(callers.display_name, excluded.display_name) END, "
@@ -757,7 +758,7 @@ async def lifespan(conninfo: Callable[[], str],
         return
     pool: AsyncConnectionPool | None = None
     try:
-        pool = AsyncConnectionPool(conninfo(), min_size=1, max_size=4, open=False,
+        pool = AsyncConnectionPool(conninfo(), min_size=1, max_size=4, open=False, connection_class=tenant.TenantConnection,
                                    kwargs={"autocommit": True})
         await pool.open(wait=True, timeout=5)
         postgres = PostgresStore(pool, delete_thread)

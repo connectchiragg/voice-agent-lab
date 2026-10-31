@@ -112,7 +112,7 @@ async def save_parts(connection: Any, key: str, company_key: str, title: str, st
                      parts: dict[str, Any]) -> None:
     await connection.execute(
         "INSERT INTO slot_context (key, company_key, title, start_utc, parts, status) "
-        "VALUES (%s, %s, %s, %s, %s::jsonb, 'researching') ON CONFLICT (key) DO UPDATE SET "
+        "VALUES (%s, %s, %s, %s, %s::jsonb, 'researching') ON CONFLICT (owner_id, key) DO UPDATE SET "
         "company_key = excluded.company_key, title = excluded.title, start_utc = excluded.start_utc, "
         "parts = excluded.parts, updated_at = now()",
         (key, company_key, title, start_utc, json.dumps(parts)))
@@ -150,7 +150,7 @@ async def record_block(connection: Any, block_id: str, start_utc: str, slot_keys
                        label: str, state: str) -> None:
     await connection.execute(
         "INSERT INTO briefing_blocks (block_id, start_utc, slot_keys, label, state) "
-        "VALUES (%s, %s, %s::jsonb, %s, %s) ON CONFLICT (block_id) DO UPDATE SET "
+        "VALUES (%s, %s, %s::jsonb, %s, %s) ON CONFLICT (owner_id, block_id) DO UPDATE SET "
         "slot_keys = excluded.slot_keys, label = excluded.label, state = excluded.state, "
         "updated_at = now()", (block_id, start_utc, json.dumps(slot_keys), label, state))
 
@@ -215,7 +215,7 @@ async def flag(connection: Any, name: str) -> dict[str, Any]:
 async def set_flag(connection: Any, name: str, enabled: bool, until: datetime | None = None) -> None:
     await connection.execute(
         "INSERT INTO valr_flags (name, enabled, updated_at, until) VALUES (%s, %s, now(), %s) "
-        "ON CONFLICT (name) DO UPDATE SET enabled = excluded.enabled, updated_at = now(), until = excluded.until",
+        "ON CONFLICT (owner_id, name) DO UPDATE SET enabled = excluded.enabled, updated_at = now(), until = excluded.until",
         (name, enabled, until))
 
 
@@ -239,7 +239,7 @@ async def auto_dial(connection: Any) -> bool:
 
 async def record_heads_up(connection: Any, block_id: str, outcome: str) -> None:
     await connection.execute(
-        "INSERT INTO heads_up_log (block_id, outcome) VALUES (%s, %s) ON CONFLICT (block_id) "
+        "INSERT INTO heads_up_log (block_id, outcome) VALUES (%s, %s) ON CONFLICT (owner_id, block_id) "
         "DO UPDATE SET outcome = excluded.outcome, sent_at = now()", (block_id, outcome[:40]))
 
 
@@ -261,7 +261,7 @@ def prep_item(text: str) -> str:
 async def set_prep_check(connection: Any, slot_ref: str, item: str, done: bool) -> None:
     await connection.execute(
         "INSERT INTO prep_checks (slot_ref, item, done, updated_at) VALUES (%s, %s, %s, now()) "
-        "ON CONFLICT (slot_ref, item) DO UPDATE SET done = excluded.done, updated_at = now()",
+        "ON CONFLICT (owner_id, slot_ref, item) DO UPDATE SET done = excluded.done, updated_at = now()",
         (slot_ref, item, done))
 
 

@@ -64,7 +64,7 @@ import psycopg
 from temporalio import activity
 
 from app import (company_names, company_resolver, gmail_api, google_oauth, lead_classify, leads, leads_store,
-                 notify_context, research_jobs)
+                 notify_context, research_jobs, tenant)
 from app.lead_classify import Decision, Email
 from app.lead_workflow import GmailSyncInput, GmailSyncSummary, RefreshSummary, WatchSummary
 from app.leads import Contact, Touch
@@ -129,7 +129,7 @@ def owner_emails() -> set[str]:
 
 
 async def connect() -> psycopg.AsyncConnection:
-    return await psycopg.AsyncConnection.connect(research_jobs.conninfo(), autocommit=True)
+    return await tenant.connect(research_jobs.conninfo(), autocommit=True)
 
 
 def snippet_cipher(email: Email) -> str | None:
@@ -1404,6 +1404,8 @@ async def cli(command: str) -> None:
 
 
 if __name__ == "__main__":
+    from app import tenant
+    tenant.current.set(tenant.OWNER)  # The owner's server-side jobs (app/tenant.py).
     import sys
     from dotenv import load_dotenv
     load_dotenv(Path(__file__).resolve().parent.parent / ".env")

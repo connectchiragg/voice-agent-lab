@@ -98,10 +98,9 @@ STATE_COLUMNS = ("account", "history_id", "watch_expires", "watch_renewed_at", "
 
 async def setup(connection: Any) -> None:
     """The tables and the state row, once per process (app/schema.py)."""
-    async def run() -> None:
-        await connection.execute(SCHEMA)
-        await connection.execute("INSERT INTO gmail_state (id) VALUES (1) ON CONFLICT DO NOTHING")
-    await schema.once(connection, "leads_store", run)
+    await schema.once(connection, "leads_store", lambda: connection.execute(SCHEMA))
+    # The state row is per user (app/tenant.py), so it is made at the user's scope, not in the DDL.
+    await connection.execute("INSERT INTO gmail_state (id) VALUES (1) ON CONFLICT DO NOTHING")
 
 
 # The owner's corrections.
@@ -214,7 +213,7 @@ async def record_email(connection: Any, message_id: str, thread_id: str, receive
     await connection.execute(
         "INSERT INTO lead_emails (message_id, thread_id, received_at, sender_domain, decision, method, "
         "reason, category, confidence, usd) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
-        "ON CONFLICT (message_id) DO UPDATE SET decision = excluded.decision, method = excluded.method, "
+        "ON CONFLICT (owner_id, message_id) DO UPDATE SET decision = excluded.decision, method = excluded.method, "
         "reason = excluded.reason, category = excluded.category, confidence = excluded.confidence, "
         "usd = lead_emails.usd + excluded.usd, processed_at = now()",
         (message_id, thread_id, received_at, sender_domain[:120], decision, method, reason[:160],
@@ -255,7 +254,7 @@ def touch_from_row(touch_id: str, kind: str, at: datetime, lead_id: str, data: d
 async def upsert_touch(connection: Any, touch: Touch, snippet_enc: str | None = None) -> None:
     await connection.execute(
         "INSERT INTO lead_touchpoints (id, kind, at, lead_id, data, snippet_enc, updated_at) "
-        "VALUES (%s, %s, %s, %s, %s::jsonb, %s, now()) ON CONFLICT (id) DO UPDATE SET "
+        "VALUES (%s, %s, %s, %s, %s::jsonb, %s, now()) ON CONFLICT (owner_id, id) DO UPDATE SET "
         "kind = excluded.kind, at = excluded.at, data = excluded.data, "
         "snippet_enc = coalesce(excluded.snippet_enc, lead_touchpoints.snippet_enc), updated_at = now()",
         (touch.id, touch.kind, touch.at, touch.lead_id, json.dumps(touch_data(touch)), snippet_enc))
@@ -297,7 +296,7 @@ async def save_leads(connection: Any, leads: list[Lead], all_touches: list[Touch
                 "INSERT INTO leads (id, company, key, domain, role, stage, status, temperature, parts, contacts, "
                 "touches, last_touch_at, next_step, next_step_at, archived_at, updated_at) VALUES "
                 "(%s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s, %s, %s, %s, %s, now()) "
-                "ON CONFLICT (id) DO UPDATE SET company = excluded.company, key = excluded.key, "
+                "ON CONFLICT (owner_id, id) DO UPDATE SET company = excluded.company, key = excluded.key, "
                 "domain = excluded.domain, role = excluded.role, stage = excluded.stage, status = excluded.status, "
                 "temperature = excluded.temperature, parts = excluded.parts, contacts = excluded.contacts, "
                 "touches = excluded.touches, last_touch_at = excluded.last_touch_at, next_step = excluded.next_step, "

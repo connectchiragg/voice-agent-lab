@@ -87,15 +87,20 @@ async def finish_login(code: str, state: str, error: str) -> Response:
         logger.warning("VALR sign-in failed: %s", failure if isinstance(failure, core.LoginError)
                        else type(failure).__name__)
         return to_login("failed")
-    if email not in core.owner_emails():
+    owner = email in core.owner_emails()
+    if not owner and not core.open_signup():
         logger.warning("VALR sign-in refused for a non-owner account at %s", core.domain_of(email))
         return RedirectResponse("/private", status_code=303, headers=NO_CACHE)
+    from app import tenant
     try:
+        if not await backend.register(tenant.user_id(email, core.owner_emails()), email, core.max_users()):
+            logger.warning("VALR sign-up closed: the workspace cap (VALR_MAX_USERS) is reached")
+            return RedirectResponse("/private?full=1", status_code=303, headers=NO_CACHE)
         token = await backend.create_session(email)
     except Exception as failure:  # noqa: BLE001
         logger.warning("VALR session could not be created: %s", type(failure).__name__)
         return to_login("db")
-    logger.info("VALR owner signed in")
+    logger.info("VALR %s signed in", "owner" if owner else "user")
     response = RedirectResponse(core.safe_next(next_path), status_code=303, headers=NO_CACHE)
     response.headers.append("Set-Cookie", core.session_cookie(token))
     return response
@@ -120,5 +125,5 @@ async def logout(request: Request) -> Response:
 
 
 @router.get("/private", response_class=HTMLResponse)
-async def private(theme: str = "") -> HTMLResponse:
-    return HTMLResponse(pages.private_page(theme or None), status_code=403, headers=NO_CACHE)
+async def private(theme: str = "", full: str = "") -> HTMLResponse:
+    return HTMLResponse(pages.private_page(theme or None, full=bool(full)), status_code=403, headers=NO_CACHE)

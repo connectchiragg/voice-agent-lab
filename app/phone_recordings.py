@@ -54,7 +54,7 @@ from typing import Any, AsyncIterator, Callable
 
 import httpx
 
-from app import google_oauth
+from app import google_oauth, tenant
 from app import schema
 
 logger = logging.getLogger("valr")
@@ -180,7 +180,7 @@ def token_matches(bearer: str, expected_hash: str | None) -> bool:
 async def save_token(connection: Any, token: str, source: str, revealed: bool) -> None:
     await connection.execute(
         "INSERT INTO phone_upload_token (id, token_hash, source, created_at, revealed_at) "
-        "VALUES (1, %s, %s, now(), CASE WHEN %s THEN now() END) ON CONFLICT (id) DO UPDATE SET "
+        "VALUES (1, %s, %s, now(), CASE WHEN %s THEN now() END) ON CONFLICT (owner_id, id) DO UPDATE SET "
         "token_hash = excluded.token_hash, source = excluded.source, created_at = now(), "
         "revealed_at = excluded.revealed_at", (digest(token), source, revealed))
 
@@ -223,7 +223,7 @@ async def revoke(connection: Any) -> None:
     doesn't come back either). 'Turn on' is a rotation: a new token, shown once."""
     await connection.execute(
         "INSERT INTO phone_upload_token (id, token_hash, source, created_at, revealed_at) "
-        "VALUES (1, %s, 'off', now(), now()) ON CONFLICT (id) DO UPDATE SET token_hash = excluded.token_hash, "
+        "VALUES (1, %s, 'off', now(), now()) ON CONFLICT (owner_id, id) DO UPDATE SET token_hash = excluded.token_hash, "
         "source = 'off', created_at = now(), revealed_at = now()", (OFF,))
 
 
@@ -938,7 +938,7 @@ async def close_quietly(connection: Any) -> None:
 async def _cli(target: str) -> int:
     import psycopg
     from app import research_jobs
-    async with await psycopg.AsyncConnection.connect(research_jobs.conninfo(), autocommit=True) as connection:
+    async with await tenant.connect(research_jobs.conninfo(), autocommit=True) as connection:
         await setup(connection)
         results = await reevaluate(connection, None if target == "--all-unevaluated" else target)
     for external_id, status in results:
@@ -948,6 +948,8 @@ async def _cli(target: str) -> int:
 
 
 if __name__ == "__main__":
+    from app import tenant
+    tenant.current.set(tenant.OWNER)  # The owner's server-side jobs (app/tenant.py).
     import sys
     if sys.argv[1:2] != ["reevaluate"] or len(sys.argv) != 3:
         sys.exit("usage: python -m app.phone_recordings reevaluate <upload id|--all-unevaluated>  "

@@ -55,10 +55,10 @@ async def evaluate_recording(provider: str, external_id: str, meeting: dict | No
             async with research.pool.connection() as connection:
                 return await _queue(connection, provider, external_id, meeting)
         import psycopg
-        from app import research_jobs
+        from app import research_jobs, tenant
 
         async def connect():
-            return await psycopg.AsyncConnection.connect(research_jobs.conninfo(), autocommit=True)
+            return await tenant.connect(research_jobs.conninfo(), autocommit=True)
     async with await connect() as connection:
         return await _queue(connection, provider, external_id, meeting)
 

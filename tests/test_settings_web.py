@@ -36,8 +36,8 @@ def memory_profile(monkeypatch):
     async def save(connection, **values):
         if "photo" in values:
             photo["data"] = values.pop("photo")
-        owner.apply({**owner._row, **values})
-        return owner._row
+        owner.apply({**owner._rows.get(owner.who(), ({}, 0))[0], **values})
+        return owner._rows[owner.who()][0]
 
     async def set_phone(connection, e164):
         return await save(connection, phone_e164=e164, phone_removed=False)
@@ -47,7 +47,7 @@ def memory_profile(monkeypatch):
 
     async def get_photo(connection):
         data = photo.get("data")
-        return (data, owner._row.get("photo_type") or "image/png", owner.photo_etag()) if data else None
+        return (data, owner.cached("photo_type") or "image/png", owner.photo_etag()) if data else None
 
     async def nothing(*args, **kwargs):
         return None
@@ -242,7 +242,7 @@ def test_sign_out_of_all_devices(client, monkeypatch):
     ended = []
 
     class Backend:
-        async def end_all(self):
+        async def end_all(self, email):
             ended.append(1)
             return 3
     monkeypatch.setattr(store, "backend", lambda: Backend())
@@ -322,10 +322,13 @@ def test_delete_needs_the_word_and_wipes_every_table(client, monkeypatch):
     done = client.post("/valr/api/data/delete", content='{"confirm": "DELETE"}', headers=good)
     assert done.status_code == 200 and "Max-Age=0" in done.headers["set-cookie"]
     truncate = next(sql for sql in executed if sql.startswith("TRUNCATE"))
-    assert executed.index("revoke") < executed.index(truncate)  # Google first, while the token exists.
-    for table in ("notifications", "owner_profile", "valr_sessions", "recording_transcripts", "callers"):
-        assert table in truncate
-    assert "call_recordings" not in truncate  # Only tables that exist.
+    deletes = [sql for sql in executed if sql.startswith("DELETE FROM ")]
+    assert executed.index("revoke") < executed.index(deletes[0])  # Google first, while the token exists.
+    # Per-user tables are DELETEd (row-level security keeps it to this workspace), never TRUNCATEd.
+    for table in ("notifications", "owner_profile", "recording_transcripts", "callers"):
+        assert f"DELETE FROM {table}" in deletes and table not in truncate
+    assert "valr_sessions" in truncate  # The owner's wipe still empties the shared tables.
+    assert not any("call_recordings" in sql for sql in executed)  # Only tables that exist.
 
 
 # Upload tokens: on and off.

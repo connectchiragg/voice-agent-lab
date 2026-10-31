@@ -418,7 +418,7 @@ async def import_calendar(connection: Any, events: list[Any], owners: set[str], 
             continue
         cursor = await connection.execute(
             "INSERT INTO calendar_history (event_key, title, company, start_utc, end_utc, interviewers) "
-            "VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT (event_key) DO UPDATE SET title = excluded.title, "
+            "VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT (owner_id, event_key) DO UPDATE SET title = excluded.title, "
             "company = excluded.company, start_utc = excluded.start_utc, end_utc = excluded.end_utc, "
             "interviewers = excluded.interviewers RETURNING (xmax = 0)",
             (event.key, scrub(event.title)[:300], scrub(event.company or "")[:120], base._dt(event.start_utc),
@@ -513,7 +513,7 @@ async def run(connection: Any, http: httpx.AsyncClient, days: int, dry_run: bool
 async def main(argv: list[str]) -> int:
     import argparse
     import psycopg
-    from app import research_jobs
+    from app import research_jobs, tenant
     parser = argparse.ArgumentParser(prog="python -m app.notetakers history")
     parser.add_argument("--days", type=int, default=90)
     parser.add_argument("--dry-run", action="store_true")
@@ -524,7 +524,7 @@ async def main(argv: list[str]) -> int:
         print("--days must be 1 to 366.")
         return 1
     logging.basicConfig(level=logging.WARNING)
-    async with await psycopg.AsyncConnection.connect(research_jobs.conninfo(), autocommit=True) as connection:
+    async with await tenant.connect(research_jobs.conninfo(), autocommit=True) as connection:
         from app import notetakers
 
         async def match(recording: Recording) -> dict | None:

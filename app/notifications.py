@@ -450,7 +450,7 @@ class Store:
         keys = [k for k in note if k in FIELDS and k != "id"]
         cursor = await self.c.execute(
             f"INSERT INTO notifications ({', '.join(keys)}) VALUES ({', '.join(['%s'] * len(keys))}) "
-            "ON CONFLICT (source_id) DO NOTHING RETURNING id", tuple(note[k] for k in keys))
+            "ON CONFLICT (owner_id, source_id) DO NOTHING RETURNING id", tuple(note[k] for k in keys))
         row = await cursor.fetchone()
         return int(row[0]) if row else None
 
@@ -550,7 +550,7 @@ class Store:
         keys = list(values)
         await self.c.execute(
             f"INSERT INTO notify_settings (id, {', '.join(keys)}) VALUES (1, {', '.join(['%s'] * len(keys))}) "
-            f"ON CONFLICT (id) DO UPDATE SET {', '.join(f'{k} = excluded.{k}' for k in keys)}, updated_at = now()",
+            f"ON CONFLICT (owner_id, id) DO UPDATE SET {', '.join(f'{k} = excluded.{k}' for k in keys)}, updated_at = now()",
             tuple(values.values()))
 
     async def try_lock(self) -> bool:

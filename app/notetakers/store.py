@@ -101,7 +101,7 @@ async def setup(connection: Any) -> None:
 async def save_key(connection: Any, token_key: str, provider: str, api_key: str, account: str) -> None:
     await connection.execute(
         "INSERT INTO notetaker_credentials (provider, secret, account, status, connected_at, last_ok_at) "
-        "VALUES (%s, %s, %s, 'connected', now(), now()) ON CONFLICT (provider) DO UPDATE SET "
+        "VALUES (%s, %s, %s, 'connected', now(), now()) ON CONFLICT (owner_id, provider) DO UPDATE SET "
         "secret = excluded.secret, account = excluded.account, status = 'connected', "
         "connected_at = now(), last_ok_at = now(), last_error = NULL",
         (provider, google_oauth.encrypt(token_key, api_key), account[:200]))
@@ -159,7 +159,7 @@ async def upsert_recording(connection: Any, recording: dict[str, Any], origin: s
         "INSERT INTO notetaker_recordings (provider, external_id, title, started_at, ended_at, share_url, "
         "embed_url, origin, sealed, company, company_domain, interviewers, invitee_hashes) "
         "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
-        "ON CONFLICT (provider, external_id) DO UPDATE SET title = excluded.title, "
+        "ON CONFLICT (owner_id, provider, external_id) DO UPDATE SET title = excluded.title, "
         "started_at = COALESCE(excluded.started_at, notetaker_recordings.started_at), "
         "ended_at = COALESCE(excluded.ended_at, notetaker_recordings.ended_at), "
         "share_url = COALESCE(NULLIF(excluded.share_url, ''), notetaker_recordings.share_url), "
@@ -309,7 +309,7 @@ async def save_media(connection: Any, provider: str, external_id: str, media: di
     values = [media.get(k) for k in MEDIA_FIELDS[:-1]]
     await connection.execute(
         f"INSERT INTO recording_media (provider, external_id, {', '.join(MEDIA_FIELDS[:-1])}, updated_at) "
-        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, now()) ON CONFLICT (provider, external_id) DO UPDATE SET "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, now()) ON CONFLICT (owner_id, provider, external_id) DO UPDATE SET "
         + ", ".join(f"{k} = excluded.{k}" for k in MEDIA_FIELDS[:-1]) + ", updated_at = now()",
         (provider, external_id, *values))
 
@@ -319,7 +319,7 @@ async def save_media(connection: Any, provider: str, external_id: str, media: di
 async def hide(connection: Any, provider: str, external_id: str, how: str = "hidden") -> None:
     await connection.execute(
         "INSERT INTO notetaker_hidden (provider, external_id, how) VALUES (%s, %s, %s) "
-        "ON CONFLICT (provider, external_id) DO UPDATE SET how = EXCLUDED.how, at = now()",
+        "ON CONFLICT (owner_id, provider, external_id) DO UPDATE SET how = EXCLUDED.how, at = now()",
         (provider, external_id, how))
 
 

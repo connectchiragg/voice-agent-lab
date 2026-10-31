@@ -33,7 +33,7 @@ from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.service import RPCError
 
 from app.persona import ASSISTANT_NAME
-from app import callbacks, memory, research_jobs
+from app import callbacks, memory, research_jobs, tenant
 from app.callback_workflow import MAX_DIALS_PER_DAY, DialBudgetWorkflow
 from app.research_workflow import (MAX_TOPIC_CHARS, TASK_QUEUE, ResearchCallbackWorkflow,
                                    ResearchRequest, workflow_id)
@@ -258,7 +258,7 @@ async def lifespan(conninfo: Callable[[], str]) -> AsyncIterator[None]:
     """Postgres for VALR bookings and findings; research is unavailable without it."""
     global pool
     try:
-        pool = AsyncConnectionPool(conninfo(), min_size=1, max_size=2, open=False,
+        pool = AsyncConnectionPool(conninfo(), min_size=1, max_size=2, open=False, connection_class=tenant.TenantConnection,
                                    kwargs={"autocommit": True})
         await pool.open(wait=True, timeout=5)
         async with pool.connection() as connection:

@@ -154,7 +154,7 @@ class Store:
     async def save(self, endpoint: str, p256dh: str, auth: str, user_agent: str) -> None:
         await self.c.execute(
             "INSERT INTO push_subscriptions (endpoint, p256dh, auth, user_agent) VALUES (%s, %s, %s, %s) "
-            "ON CONFLICT (endpoint) DO UPDATE SET p256dh = excluded.p256dh, auth = excluded.auth, "
+            "ON CONFLICT (owner_id, endpoint) DO UPDATE SET p256dh = excluded.p256dh, auth = excluded.auth, "
             "user_agent = excluded.user_agent, failures = 0", (endpoint, p256dh, auth, user_agent[:300]))
 
     async def remove(self, endpoint: str) -> int:
