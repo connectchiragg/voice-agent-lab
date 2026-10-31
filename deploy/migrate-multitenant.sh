@@ -16,9 +16,9 @@
 #  3. deploy/deploy-all.sh (BRANCH=main).
 #  4. Verifies: valr_app exists, row-level security is on, and the owner's rows are all "owner".
 #
-# Restore (after the image rollback):
-#   ssh valr-vm 'sudo docker exec -i voice-postgres pg_restore -U voice_agent -d voice_agent --clean --if-exists' \
-#     < /dev/null  # with the dump: sudo docker exec -i ... < /srv/valr-backups/pre-multitenant-<stamp>.dump
+# Restore, after the image rollback (on the VM):
+#   sudo docker exec -i voice-postgres pg_restore -U voice_agent -d voice_agent --clean --if-exists \
+#     < /srv/valr-backups/pre-multitenant-<stamp>.dump
 set -euo pipefail
 VM=${VM:-valr-vm}
 KEY=${KEY:-$HOME/.ssh/voice-agent-lab_ed25519}
