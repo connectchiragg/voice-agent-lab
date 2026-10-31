@@ -55,8 +55,8 @@ def row() -> str:
     if tenant.is_owner():
         body = '<p>Uses the server\'s keys.</p>'
         return (f'<li class="set-row" id="api-keys">{lead}<div class="set-main"><div class="set-title-row">'
-                f'<h3 class="set-title">API keys</h3>{chip("Server", "ok")}</div><div class="set-body">{body}</div></div></li>')
+                f'<h3 class="set-title">Server keys</h3>{chip("Server", "ok")}</div><div class="set-body">{body}</div></div></li>')
     forms = "".join(form(*purpose) for purpose in PURPOSES)
     return (f'<li class="set-row" id="api-keys">{lead}<div class="set-main"><div class="set-title-row">'
-            f'<h3 class="set-title">API keys</h3></div><div class="set-body"><p>{e(HELP)}</p>{forms}'
+            f'<h3 class="set-title">Your keys</h3></div><div class="set-body"><p>{e(HELP)}</p>{forms}'
             f'<script type="module" src="{asset("valr-keys.js")}"></script></div></div></li>')
