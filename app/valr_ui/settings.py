@@ -4,6 +4,7 @@ the actions), no folds.
 0. Finish setting up: only until done; every step can be finished here, without SSH.
 1. Profile: avatar, name and the masked phone → Edit profile (/valr/profile).
 2. Connections: Google (both syncs, Sync now, Reconnect, Disconnect) and the notetakers.
+   API keys: the workspace's own LLM and Deepgram keys (app/valr_ui/keys.py); the owner's one line.
 3. Calls & reminders: your phone (add, change, remove), the heads-up or the automatic call
    (with Pause for a day, a week or until resumed), VALR's own number.
 4. Notifications: the alerts (immediate, the daily digest push, quiet hours, their times and
@@ -18,7 +19,7 @@ from typing import Any
 
 from app import owner
 from app.valr_page import Clock, chip, e, money, phone_label
-from app.valr_ui import attention, contracts, pwa
+from app.valr_ui import attention, contracts, keys, pwa
 from app.valr_ui.shell import asset, icon, page_head
 
 STATE = {"connected": ("Connected", "ok"), "not_connected": ("Not connected", "warn"),
@@ -412,6 +413,7 @@ def page(view: dict[str, Any], clock: Clock, items: list[dict[str, Any]]) -> str
 {setup(view)}
 {section("profile", "Profile", profile_row(view))}
 {section("conn", "Connections", google_row(view, clock) + notetaker_row(view, clock))}
+{section("keys", "API keys", keys.row())}
 {section("calls", "Calls & reminders", phone_row(view) + reach_row(view, clock) + number_row(view))}
 {section("notify", "Notifications", alerts_row(view) + pwa.card())}
 {section("rec", "Call recordings", phone_recordings_row(str(view.get("_host") or "")))}

@@ -29,6 +29,8 @@ def signed_in(monkeypatch):
     async def owner(connection):
         return Identity("owner@example.com", "session")
     monkeypatch.setattr(gate, "identify", owner)
+    # The owner's workspace (app/tenant.py): a guest's call needs its own keys (app/user_voice.py).
+    monkeypatch.setenv("VALR_OWNER_EMAILS", "owner@example.com")
     monkeypatch.setattr(auth, "identify", owner)  # The offer's own owner check (valr_dashboard).
 
 

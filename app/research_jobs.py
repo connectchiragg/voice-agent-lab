@@ -79,6 +79,9 @@ PRICES = {
     "claude-haiku-5-5": (0.10, 0.50, 0.125, 0.01),
     "claude-sonnet-5-5": (2.00, 10.00, 2.50, 0.20),
     "claude-opus-5-5": (4.00, 20.00, 5.00, 0.20),
+    # Default models of a workspace's own key (app/key_providers.py), paid by that workspace.
+    "gpt-6-luna": (0.10, 0.50, 0.10, 0.01),
+    "gemini-3.1-flash-lite": (0.25, 1.50, 0.25, 0.025),
 }
 SEARCH_USD = 0.01
 # Groq's free tier (app/groq_backend.py) and its free web search: $0, tokens still metered.

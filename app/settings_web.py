@@ -292,7 +292,7 @@ DELETE_TABLES = EXPORT_TABLES + (
     "recording_transcripts", "recording_media", "phone_audio", "phone_upload_token", "interview_context_push",
     "calendar_state", "calendar_history", "gmail_state", "company_resolutions", "call_recordings",
     "checkpoints", "checkpoint_blobs", "checkpoint_writes", "checkpoint_migrations", "valr_login_states",
-    "valr_sessions")
+    "valr_sessions", "user_keys")
 
 
 async def existing(connection: Any, tables: tuple[str, ...]) -> list[str]:

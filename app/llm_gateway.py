@@ -3,6 +3,10 @@
 Research worker and profile scripts only; the live voice LLM stays on Groq direct (app/llm.py)
 and its models are never used here (app/groq_backend.py).
 
+`for_current()` is the accessor for work done for a workspace (app/tenant.py): the owner's (or
+no workspace's) is `shared()`, configured below; any other workspace's is a gateway on its own
+key (app/user_gateway.py), never a server key.
+
 - `LLM_GATEWAY=groq|anthropic|openrouter`; the default is `groq` when GROQ_API_KEY is set, else
   `openrouter` when OPENROUTER_API_KEY is set, else `anthropic`.
 - groq: callers keep the Anthropic Messages surface (`client.messages.create(model=
@@ -138,6 +142,20 @@ class Gateway:
         self.limiters = self.transport.limiters if self.transport is not None else groq_backend.Limiters()
         self._groq_http: httpx.Client | None = None
         self.search = search or groq_backend.web_search
+
+    # The chat-completions path (Groq here; another provider for a workspace's own key,
+    # app/user_gateway.py): the served model, and the request body as the provider takes it.
+    chat_provider = "groq"
+
+    def chat_model(self, model: str) -> str:
+        return groq_backend.groq_model(model)
+
+    def shape_chat(self, body: dict[str, Any]) -> dict[str, Any]:
+        return body
+
+    def crew_mode(self, feature: str) -> str:
+        """The CrewAI LLM class for `feature` (app/research_agents.py): groq or anthropic."""
+        return feature_mode(feature)
 
     def describe(self) -> str:
         if self.mode == "groq":
@@ -450,7 +468,7 @@ class GroqMessages:
 
     def post(self, body: dict[str, Any], timeout: Any) -> dict[str, Any]:
         http = self.gateway.groq_http()
-        request = http.build_request("POST", "/chat/completions", json=body,
+        request = http.build_request("POST", "/chat/completions", json=self.gateway.shape_chat(body),
                                      headers={groq_backend.PRIORITY_HEADER: self.priority},
                                      timeout=timeout if timeout is not None else httpx.USE_CLIENT_DEFAULT)
         try:
@@ -480,7 +498,7 @@ class GroqMessages:
 
     def create(self, kwargs: dict[str, Any], json_output: Any) -> Any:
         requested = kwargs["model"]
-        model = groq_backend.groq_model(requested)
+        model = self.gateway.chat_model(requested)
         config = {**((kwargs.get("extra_body") or {}).get("output_config") or {}), **(kwargs.get("output_config") or {})}
         reasoning = groq_backend.reasoning_for(requested if "/" not in requested else "sonnet",
                                                kwargs.get("thinking"), config.get("effort"))
@@ -666,6 +684,19 @@ def shared() -> Gateway:
             _shared = Gateway()
             logger.info("VALR %s", _shared.describe())
         return _shared
+
+
+def for_current() -> Gateway:
+    """The gateway for the workspace in scope (app/tenant.py): the owner (or no workspace: a
+    start-up task, a CLI) gets `shared()` and the server's keys, exactly as before; any other
+    workspace a gateway on its own key (app/user_gateway.py), else user_keys.KeyMissing. A
+    guest's request never reaches a server key."""
+    from app import tenant
+    user = tenant.get()
+    if user is None or user == tenant.OWNER:
+        return shared()
+    from app import user_gateway
+    return user_gateway.for_workspace(user)
 
 
 def required_key_missing() -> str:

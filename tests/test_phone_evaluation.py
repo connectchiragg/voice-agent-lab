@@ -131,7 +131,7 @@ def test_a_failing_hook_logs_the_exception_class_and_the_missing_module_only(mon
 
 # ---------- The app context ----------
 
-WORKER_ONLY = {"app.interview_agents", "app.research_agents", "app.llm_gateway"}  # crewai / anthropic
+WORKER_ONLY = {"app.interview_agents", "app.research_agents", "app.llm_gateway", "app.user_gateway"}  # crewai / anthropic
 
 
 def test_the_app_imports_no_worker_only_package():

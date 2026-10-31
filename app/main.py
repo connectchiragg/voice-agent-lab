@@ -16,8 +16,8 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from app import (access, agent, auth, callbacks, groq_api, interviews, leads_web, memory,
-                 notifications_web, phone_web, recordings, research, settings_web, telnyx, tenant, valr_dashboard, valr_hooks,
-                 webpush_web, webrtc)
+                 notifications_web, phone_web, recordings, research, settings_web, telnyx, tenant, user_keys,
+                 user_keys_web, user_voice, valr_dashboard, valr_hooks, webpush_web, webrtc)
 from app.notetakers import routes as notetaker_routes
 from app.static_files import CachedStaticFiles
 from app.valr_ui import routes as valr_routes
@@ -145,6 +145,7 @@ app.include_router(notifications_web.router)  # The bell: /valr/api/notification
 app.include_router(phone_web.router)  # /hooks/recording-upload and the phone recordings' audio
 app.include_router(webpush_web.router)  # The Home Screen app: /manifest.webmanifest, /sw.js, /valr/api/push
 app.include_router(settings_web.router)  # Settings and Profile actions: /valr/api/profile, google, export
+app.include_router(user_keys_web.router)  # A workspace's own API keys: /valr/api/keys
 
 
 class CallSettings(BaseModel):
@@ -190,6 +191,7 @@ async def voice(socket: WebSocket) -> None:
     send_lock = asyncio.Lock()
     call: Call | None = None
     ending: asyncio.Task[None] | None = None
+    pinned: str | None = None  # A guest's workspace, while its keys are pinned (app/user_voice.py).
 
     async def send(data: dict[str, object] | bytes) -> None:
         async with send_lock:  # The reply task and this loop both send.
@@ -204,6 +206,14 @@ async def voice(socket: WebSocket) -> None:
         if engines is None:
             await send({"type": "error", "error": "Speech services are not configured."})
             return
+        try:
+            keys = await user_voice.prepare()  # A guest: its own Deepgram and LLM keys, or nothing.
+        except user_keys.KeyMissing as error:
+            await send({"type": "error", "error": str(error)})
+            return
+        if keys is not None:
+            engines = user_voice.for_guest(engines, keys)
+            pinned = user_voice.opened(keys)
         if not settings.echo_cancelled:
             logger.warning("No browser echo cancellation; barge-in disabled for this call.")
         # Without echo cancellation the assistant's own voice would interrupt it.
@@ -242,6 +252,7 @@ async def voice(socket: WebSocket) -> None:
             ending.cancel()
         if call is not None:
             await call.close()
+        user_voice.closed(pinned)
         try:
             await socket.close()
         except (RuntimeError, WebSocketDisconnect):

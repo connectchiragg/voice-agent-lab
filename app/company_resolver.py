@@ -425,7 +425,7 @@ class Resolver:
             self._skip(ev, "month_cap")
             return first
         try:
-            client = self.client()
+            client = await asyncio.to_thread(self.client)  # A guest's key may load from the database.
             answer, rows = await asyncio.to_thread(review, ev, candidates, client, self.candidate)
         except Exception as error:  # noqa: BLE001 - counted and shown; the rules' answer stands.
             self._skip(ev, f"model_error:{type(error).__name__}")
@@ -494,7 +494,7 @@ def default_resolver(owner_emails: set[str]) -> Resolver:
 
     from app import owner
     candidate = owner.recording_name()
-    return Resolver(client=lambda: llm_gateway.shared().client(timeout=60, priority="interactive"), month_ok=month_ok,
+    return Resolver(client=lambda: llm_gateway.for_current().client(timeout=60, priority="interactive"), month_ok=month_ok,
                     owner_emails=owner_emails, candidate=candidate)
 
 
