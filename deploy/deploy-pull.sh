@@ -2,7 +2,7 @@
 # OPTIONAL deploy without building on the VM: the images come from GHCR, built by
 # .github/workflows/images.yml (manual "Run workflow" on the commit first). Run from the Mac:
 #
-#   bash deploy/deploy-pull.sh            # deploys the branch valr-interviews
+#   bash deploy/deploy-pull.sh            # deploys the branch main (the deployed version)
 #   BRANCH=<branch> bash deploy/deploy-pull.sh
 #   bash deploy/deploy-pull.sh --dry-run  # prints the steps, runs nothing
 #
@@ -16,7 +16,7 @@
 set -euo pipefail
 VM=${VM:-valr-vm}
 KEY=${KEY:-$HOME/.ssh/voice-agent-lab_ed25519}
-BRANCH=${BRANCH:-valr-interviews}
+BRANCH=${BRANCH:-main}
 WAIT_S=${WAIT_S:-900}
 GHCR=${GHCR:-ghcr.io/connectchiragg}
 STAMP=$(date -u +%Y%m%d-%H%M)

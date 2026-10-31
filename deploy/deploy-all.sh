@@ -3,7 +3,7 @@
 # Builds on the VM with BuildKit (docker buildx bake, both images in one run). A code-only
 # change rebuilds only the small COPY layers: the whole deploy is about 1-1.5 minutes.
 #
-#   bash deploy/deploy-all.sh            # deploys the branch valr-interviews
+#   bash deploy/deploy-all.sh            # deploys the branch main (the deployed version)
 #   BRANCH=<branch> bash deploy/deploy-all.sh
 #   bash deploy/deploy-all.sh --dry-run  # prints the steps, runs nothing
 #   DRY_RUN=1 bash deploy/deploy-all.sh  # ships and builds, stops before the swap
@@ -37,7 +37,7 @@
 set -euo pipefail
 VM=${VM:-valr-vm}
 KEY=${KEY:-$HOME/.ssh/voice-agent-lab_ed25519}
-BRANCH=${BRANCH:-valr-interviews}
+BRANCH=${BRANCH:-main}
 WAIT_S=${WAIT_S:-900}
 STAMP=$(date -u +%Y%m%d-%H%M)
 REPO=$(git -C "$(dirname "$0")" rev-parse --show-toplevel)
