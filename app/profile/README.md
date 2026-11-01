@@ -16,7 +16,17 @@ python scripts/import_recordings.py --purge                       # delete raw d
 
 Keys come from `.env`: `FATHOM_API_KEY`, `FIREFLIES_API_KEY` and `ANTHROPIC_API_KEY`.
 Models: Claude Haiku 5.5 classifies which meetings are interviews; Claude Sonnet 5.5
-does the analysis and scoring.
+does the analysis and scoring (through the LLM gateway: Groq's free tier by default).
+
+Scoring is three short calls per interview, each inside Groq's free-tier limits (about
+6,000 tokens in and 750 out a request): evidence from the transcript in parts (so nothing in
+the middle of a long call is dropped), scores from that evidence, then coaching. Check that
+scores still track performance after any prompt change:
+
+```
+python scripts/eval_scoring.py              # made-up weak/strong interviews, tests/scoring_sample.py
+python scripts/eval_scoring.py --repeat 2   # plus run-to-run stability
+```
 
 ## Files (paths overridable by env)
 

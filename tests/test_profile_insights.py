@@ -111,6 +111,11 @@ class CueLLM:
             return reply
         if "topics" in props:
             return {"topics": []}
+        if "exchanges" in props:
+            return {"exchanges": [], "comp": False, "outcome_cue": ""}
+        if "question_feedback" in props:
+            reply = rubric_reply(6)
+            return {k: reply[k] for k in ("do_next_time", "question_feedback")}
         raise AssertionError(f"unexpected schema {sorted(props)}")
 
 

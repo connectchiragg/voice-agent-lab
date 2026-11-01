@@ -200,6 +200,7 @@ def test_the_notifications_loop_serves_each_workspace_its_own_items_on_real_post
         return await tenant.connect(database, autocommit=True)
     monkeypatch.setattr(webpush, "sender", sender)
     monkeypatch.setenv("VALR_NOTIFY_LOOP_S", "0.05")
+    monkeypatch.setenv("VALR_NOTIFY_QUIET_HOURS", "0")  # Else it waits when run at night.
 
     async def main():
         pool = await build(database)

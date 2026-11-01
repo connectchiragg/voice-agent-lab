@@ -75,8 +75,15 @@ class FakeLLM:
             return coach_reply()
         if "leaned_in" in schema["properties"]:
             return {"cues": [], "leaned_in": "", "disengaged": "", "close": "none"}
+        if "exchanges" in schema["properties"]:
+            return {"exchanges": [{"q": "Shard?", "a": "By tenant", "keys": ["technical.system_design"],
+                                   "level": "strong", "quote": "I would shard by tenant"}],
+                    "comp": False, "outcome_cue": "next round scheduled"}
         if "overall_score" in schema["properties"]:
             return rubric_reply(self.rubric_base.pop(0) if self.rubric_base else 6)
+        if "question_feedback" in schema["properties"]:
+            reply = rubric_reply(6)
+            return {k: reply[k] for k in ("do_next_time", "question_feedback")}
         if "topics" in schema["properties"]:
             return {"topics": [{"topic": "consistency", "verdict": "improved", "occurrences": [
                 {"date": "2026-09-01", "interview_id": "fathom:1", "status": "first_seen",

@@ -89,8 +89,12 @@ def test_score_interview_uses_transcript_when_available():
     with_t = rubric.score_interview(meeting, a, llm, "claude-sonnet-5-5", "Sam")
     without = rubric.score_interview(None, a, llm, "claude-sonnet-5-5", "Sam")
     assert with_t["transcript_used"] and not without["transcript_used"]
-    assert "<transcript>" in llm.calls[0]["user"] and "<transcript>" not in llm.calls[1]["user"]
-    assert "1-10" in llm.calls[0]["system"] and "system_design" in llm.calls[0]["system"]
+    assert len(llm.calls) == 5  # evidence, scores, coaching; then scores, coaching (no transcript)
+    assert "<transcript>" in llm.calls[0]["user"]
+    assert not any("<transcript>" in c["user"] for c in llm.calls[1:])
+    assert "1-10" in llm.calls[1]["system"] and "system_design" in llm.calls[1]["system"]
+    assert with_t["scores"]["technical"]["system_design"]["quote"] == "I would shard by tenant"
+    assert with_t["outcome_evidence"] == "next round scheduled"
 
 
 def test_score_performance_writes_v2_and_keeps_v1_keys(tmp_path):
@@ -206,3 +210,54 @@ def test_score_performance_resumes_from_partial(tmp_path):
     importer.score_performance(cfg, {"interviews": [a1, a2]}, {}, llm2, COMP)
     assert sum(1 for c in llm2.calls if "Title: A" in c["user"]) == 0
     assert not partial.exists() and out["schema_version"] == 3
+
+
+def test_long_transcript_is_read_in_parts_not_shortened():
+    from tests import scoring_sample
+    long = scoring_sample.cases()["long_sd_strong"]
+    text = rubric.format_transcript(long["turns"])
+    chunks = rubric.parts(text)
+    assert len(chunks) > 1 and all(len(c) <= rubric.PART_CHARS for c in chunks)
+    assert "\n".join(chunks) == text  # whole lines, nothing dropped
+    llm = FakeLLM()
+    a = analysis()
+    a.update(source="eval", id="long", title="t", date="2026-10-20T10:00:00Z")
+    rubric.score_interview(long, a, llm, "m", scoring_sample.CANDIDATE)
+    evidence_calls = [c for c in llm.calls if "<transcript>" in c["user"]]
+    assert len(evidence_calls) == len(chunks)
+    assert f"part {len(chunks)} of {len(chunks)}" in evidence_calls[-1]["system"]
+
+
+def test_score_items_compact_form_quotes_and_unknown_keys():
+    exchanges = [{"q": "q1", "a": "", "keys": ["technical.system_design"], "level": "weak", "quote": "um microservices"},
+                 {"q": "q2", "a": "", "keys": ["technical.system_design"], "level": "strong", "quote": "10-second chunks"}]
+    items = rubric._score_items({"technical.system_design": [8, "chunked writes"], "made.up": [5, "x"],
+                                 "communication.clarity": [3], "process.time_management": ["n/a", ""]}, exchanges)
+    by = {i["key"]: i for i in items}
+    assert set(by) == {"technical.system_design", "communication.clarity"}
+    assert by["technical.system_design"]["quote"] == "10-second chunks"  # strong score -> strong evidence
+    assert by["technical.system_design"]["justification"] == "chunked writes"
+    assert rubric._quote_for("technical.system_design", 3, exchanges) == "um microservices"
+
+
+def test_negotiation_is_na_unless_pay_came_up():
+    llm = FakeLLM()
+    reply = rubric_reply(6, comp_came_up=True)
+    llm.json = lambda **kw: (reply if "overall_score" in kw["schema"]["properties"] else
+                             {"exchanges": [], "comp": False, "outcome_cue": ""} if "exchanges" in kw["schema"]["properties"]
+                             else {"do_next_time": [], "question_feedback": []})
+    a = analysis()
+    a.update(source="fathom", id="1", title="t", date="2026-09-01T10:00:00Z")
+    meeting = {"turns": [{"speaker": "Sam", "text": "I would shard by tenant.", "start": 0}]}
+    out = rubric.score_interview(meeting, a, llm, "m", "Sam")
+    assert out["dimension_scores"]["negotiation"] is None
+
+
+def test_overall_stays_near_the_detail():
+    items = [{"key": "behavioural.star_stories", "score": 8}, {"key": "communication.clarity", "score": 9},
+             {"key": "process.questions_at_end", "score": 4}]
+    assert rubric.consistent_overall(6, items) == 6  # mean of means 7.0: 6 is within 1.5
+    assert rubric.consistent_overall(3, items) == 6  # pulled up to 7.0 - 1.5
+    assert rubric.consistent_overall(10, items) == 8
+    assert rubric.consistent_overall(0, items) == 7
+    assert rubric.consistent_overall(5, []) == 5
